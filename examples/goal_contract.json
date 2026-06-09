@@ -1,0 +1,28 @@
+{
+  "title": "Verify checkout flow with A11y tree compression",
+  "summary": "Use compact browser observations, ref-based actions, and ledger evidence before completion.",
+  "risk": "high",
+  "permissions": {
+    "allowed_tools": ["browser-driver", "playwright", "axe"],
+    "write_scope": [".ouroboros/", "qa-reports/"],
+    "network_scope": ["localhost", "staging.example.com"],
+    "auth_scope": ["test-account-only"]
+  },
+  "evidence_required": [
+    {
+      "kind": "browser_diff",
+      "description": "Action-after-state diff for the checkout path",
+      "required": true
+    },
+    {
+      "kind": "a11y_report",
+      "description": "Accessibility scan artifact path and hash",
+      "required": true
+    },
+    {
+      "kind": "human_approval",
+      "description": "Final approval showing raw evidence references",
+      "required": true
+    }
+  ]
+}

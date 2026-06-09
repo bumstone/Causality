@@ -1,0 +1,29 @@
+{
+  "name": "ouroboros-workflows",
+  "version": "0.1.0",
+  "runtime": "ouroboros-hitl",
+  "risk_model": ["low", "medium", "high", "irreversible"],
+  "permissions": {
+    "required_fields": ["allowed_tools", "write_scope", "network_scope", "auth_scope"],
+    "default_policy": "least-privilege"
+  },
+  "audit_events": [
+    "goal_contract",
+    "state_transition",
+    "tool_call",
+    "verifier_decision",
+    "human_decision",
+    "evidence",
+    "browser_observation",
+    "browser_action",
+    "gate_decision"
+  ],
+  "workflows": [
+    "writing-plans",
+    "subagent-driven-development",
+    "verification-before-completion",
+    "test-driven-development",
+    "root-cause-protocol",
+    "session-bootstrap"
+  ]
+}

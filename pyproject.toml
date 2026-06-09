@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ouroboros-hitl"
+version = "0.1.0"
+description = "HITL, evidence ledger, and A11y-tree browser adapter scaffolding for Ouroboros-style agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Codex" }]
+dependencies = []
+
+[project.scripts]
+ouroboros-hitl = "ouroboros_hitl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
