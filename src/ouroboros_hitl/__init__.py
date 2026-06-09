@@ -19,15 +19,19 @@ from .orchestrator import OuroborosHITL
 from .contract_harness import BoundContract, ContractHarness, ContractHarnessError
 from .loop import LoopResult, StepOutcome, run_bounded_loop
 from .memory import MEMORY_TYPES, MemoryEntry, MemoryGovernanceError, TypedMemory
+from .agent_harness import AgentHarness, Dispatch, TaskType
+from .reflect import Reflection, reflect_on_contract
 from .browser_adapter import A11yBrowserAdapter
 
 __all__ = [
     "ActionType",
     "A11yBrowserAdapter",
+    "AgentHarness",
     "AuditEventType",
     "BoundContract",
     "ContractHarness",
     "ContractHarnessError",
+    "Dispatch",
     "EvidenceKind",
     "EvidenceLedger",
     "EvidenceRequirement",
@@ -41,11 +45,14 @@ __all__ = [
     "MemoryGovernanceError",
     "OuroborosHITL",
     "PermissionContract",
+    "Reflection",
     "Risk",
     "StateTransition",
     "StepOutcome",
     "TaskContract",
+    "TaskType",
     "TypedMemory",
     "VerifierDecision",
+    "reflect_on_contract",
     "run_bounded_loop",
 ]

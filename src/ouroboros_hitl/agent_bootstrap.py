@@ -302,6 +302,7 @@ def _workflow_doc(template: WorkflowTemplate) -> str:
         f"# Workflow: {template.name}\n\n"
         "> Generated view of `workflows.py` (single source). Do not edit by hand.\n\n"
         f"{template.purpose}\n\n"
+        f"- Layer: {template.layer or '-'}\n"
         f"- Required inputs: {inputs}\n"
         f"- Outputs: {outputs}\n"
         f"- Gate: {template.gate}\n\n"

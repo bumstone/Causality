@@ -15,12 +15,13 @@
 | ADR | 제목 | 상태 |
 |---|---|---|
 | [0001](0001-task-contract-as-binding-rules.md) | Task Contract — 범위 확장이 아닌 구속 규칙 계층 | **Accepted (구현)** |
-| [0002](0002-three-layer-control-stack.md) | 3계층 실행 제어 스택 (Stage Designer / Planner / Executor) | Proposed |
+| [0002](0002-three-layer-control-stack.md) | 3계층 실행 제어 스택 (Stage Designer / Planner / Executor) | **Accepted (부분 구현)** |
 | [0003](0003-contract-harness.md) | Contract Harness — 모든 실행 직전의 구속 의식 | **Accepted (구현)** |
-| [0004](0004-agent-harness-task-routing.md) | Agent Harness — 작업 유형별 아키텍처 디스패치 | Proposed |
+| [0004](0004-agent-harness-task-routing.md) | Agent Harness — 작업 유형별 아키텍처 디스패치 | **Accepted (구현)** |
 | [0005](0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 (Synergy 일부 차용) | **Accepted (부분 구현)** |
 | [0006](0006-final-blended-architecture.md) | 최종 혼합 아키텍처 — 5계층 분리와 충돌·중복·최적화 | Proposed |
 | [0007](0007-context-economy-progressive-disclosure.md) | Context Economy & Progressive Disclosure (운영 규칙) | **Accepted (부분 구현)** |
+| [0008](0008-repository-hygiene-shared-vs-ignored.md) | 저장소 위생 — 공유 설계 vs 무시할 런타임 state | **Accepted (구현)** |
 
 ## 읽는 순서
 
@@ -33,6 +34,8 @@
 - **0007**: 운영 규칙 — 긴 규칙/체크리스트/역할을 매번 로드하지 않고 필요할 때만
   파일을 참조하는 **context economy / 점진적 공개**. always-loaded 경계와 권장 파일
   레이아웃(`workflow/ checklists/ skills/ memory/`)을 명시.
+- **0008**: 저장소 위생 — 무엇을 공유(commit)하고 무엇을 런타임 state로 무시(ignore)할지.
+  머신 로그(`*.jsonl`)·`state.json`은 무시, 큐레이션 `*.md`·소스는 추적.
 
 ## 비판적 리뷰 (2026-06-09)
 
@@ -49,8 +52,8 @@
 
 ## 구현 상태 (2026-06-09)
 
-권장 순서(0001 → 0003 → 0007)로 기초 슬라이스를 구현한 뒤, 루프 드라이버와 타입
-메모리 거버넌스를 이어 구현했다(40 tests OK).
+권장 순서(0001 → 0003 → 0007)로 기초 슬라이스를 구현한 뒤, 루프 드라이버·타입 메모리,
+이어서 Agent Harness·Reflect·3계층 메타데이터·저장소 위생 규칙을 구현했다(65 tests OK).
 
 | ADR | 구현된 것 | 코드 | 테스트 |
 |---|---|---|---|
@@ -59,6 +62,10 @@
 | 0007 | 부트스트랩이 `workflow/`·`checklists/`·`skills/`·`memory/<6타입>/` 생성, 워크플로 문서 단일출처 생성, Context Economy 운영규칙, AGENTS.md=Codex 재정의 | `agent_bootstrap.py` | `test_agent_bootstrap.py` |
 | 0006 §6.1-1 | bounded 루프 드라이버 `run_bounded_loop`(should_stop로 정지, Run→Review→Fix) | `loop.py` | `test_loop.py` |
 | 0005 §2.2/§2.5 | 타입 메모리 `TypedMemory`(6타입 분리, assumption→decision 승급 게이트, failure scope/TTL, provenance) | `memory.py` | `test_memory.py` |
+| 0004 | Agent Harness 디스패처 `AgentHarness`(작업유형→단일 플레이북, classify/route) | `agent_harness.py` | `test_agent_harness.py` |
+| 0006 §6.1-3 | Reflect 증류기 `reflect_on_contract`(ledger→retrospective+failures, provenance, decisions 미기록) | `reflect.py` | `test_reflect.py` |
+| 0002 | 워크플로 3계층 메타데이터(`WorkflowTemplate.layer`, `CONTROL_LAYERS`) + 워크플로 문서 layer 표기 | `workflows.py` | `test_workflows.py` |
+| 0008 | 공유 vs 무시 규칙 — 런타임 로그/state 무시, 큐레이션 `.md`·소스 추적 | `.gitignore` | `git check-ignore` 검증 |
 
-**후속(미구현):** 자동 verifier 호출자(Review 자동화), Reflect 추출기·earned-skill
-distiller/승급(0005 진화 절반), Agent Harness 디스패처(0004), 3계층 메타데이터(0002).
+**후속(미구현):** 자동 verifier 호출자(Review 완전 자동화), earned-skill distiller/재현성/승급
+(진화 루프 뒤 절반), Agenda 영속화, 디스패처-하니스-루프 end-to-end 통합 런타임.

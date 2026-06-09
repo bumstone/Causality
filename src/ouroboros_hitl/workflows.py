@@ -4,6 +4,12 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# The three execution-control layers (ADR 0002). Each workflow is tagged with
+# its primary layer; some straddle layers (e.g. writing-plans and TDD), in which
+# case the tag is the layer that owns the workflow's gate.
+CONTROL_LAYERS = ("stage_designer", "planner", "executor")
+
+
 @dataclass(frozen=True)
 class WorkflowTemplate:
     name: str
@@ -11,6 +17,7 @@ class WorkflowTemplate:
     required_inputs: tuple[str, ...]
     outputs: tuple[str, ...]
     gate: str
+    layer: str = ""
     notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -20,6 +27,7 @@ class WorkflowTemplate:
             "required_inputs": list(self.required_inputs),
             "outputs": list(self.outputs),
             "gate": self.gate,
+            "layer": self.layer,
             "notes": list(self.notes),
         }
 
@@ -31,6 +39,7 @@ OUROBOROS_WORKFLOWS: dict[str, WorkflowTemplate] = {
         required_inputs=("goal_contract", "repo_context", "constraints"),
         outputs=("immutable_plan_snapshot", "acceptance_criteria", "verification_commands"),
         gate="goal_scope_or_high_risk_plan_approval",
+        layer="stage_designer",
         notes=("No placeholders", "Attach plan snapshot to the ledger before execution"),
     ),
     "subagent-driven-development": WorkflowTemplate(
@@ -39,6 +48,7 @@ OUROBOROS_WORKFLOWS: dict[str, WorkflowTemplate] = {
         required_inputs=("seed_id", "task_id", "allowed_tools", "context_packet"),
         outputs=("subagent_report", "evidence_refs", "uncertainties"),
         gate="subagent_output_verifier_review",
+        layer="stage_designer",
         notes=("Do not share full session context", "Use disjoint write scopes for parallel workers"),
     ),
     "verification-before-completion": WorkflowTemplate(
@@ -47,6 +57,7 @@ OUROBOROS_WORKFLOWS: dict[str, WorkflowTemplate] = {
         required_inputs=("acceptance_criteria", "evidence_requirements", "ledger_tail"),
         outputs=("verification_report", "missing_evidence", "verifier_decisions"),
         gate="completion_gate",
+        layer="executor",
         notes=("Agent prose is a claim, not evidence", "Use raw tool output or artifact hashes"),
     ),
     "test-driven-development": WorkflowTemplate(
@@ -55,6 +66,7 @@ OUROBOROS_WORKFLOWS: dict[str, WorkflowTemplate] = {
         required_inputs=("expected_behavior", "test_surface", "implementation_scope"),
         outputs=("failing_check", "passing_check", "regression_artifact"),
         gate="verification_gate",
+        layer="planner",
         notes=("Do not skip the failing check when a regression can be expressed",),
     ),
     "root-cause-protocol": WorkflowTemplate(
@@ -63,6 +75,7 @@ OUROBOROS_WORKFLOWS: dict[str, WorkflowTemplate] = {
         required_inputs=("symptom", "reproduction_steps", "affected_scope"),
         outputs=("root_cause_hypothesis", "confirming_evidence", "fix_plan"),
         gate="three_failed_hypotheses_escalation",
+        layer="planner",
         notes=("After three failed hypotheses, escalate to HITL", "Avoid symptom-only fixes"),
     ),
     "session-bootstrap": WorkflowTemplate(
@@ -71,6 +84,7 @@ OUROBOROS_WORKFLOWS: dict[str, WorkflowTemplate] = {
         required_inputs=("active_seed", "ledger_tail", "memory_facts", "permissions"),
         outputs=("context_packet", "open_questions", "allowed_next_actions"),
         gate="context_sufficiency_check",
+        layer="stage_designer",
         notes=("Do not inject entire skill libraries every turn", "Only verified facts enter memory"),
     ),
 }

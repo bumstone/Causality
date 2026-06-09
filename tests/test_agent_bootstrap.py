@@ -37,6 +37,10 @@ class AgentBootstrapTests(unittest.TestCase):
 
             self.assertTrue((root / "workflow" / "README.md").is_file())
             self.assertTrue((root / "workflow" / "writing-plans.md").is_file())
+            self.assertIn(
+                "Layer: stage_designer",
+                (root / "workflow" / "writing-plans.md").read_text(encoding="utf-8"),
+            )
             self.assertTrue((root / "checklists" / "verification-before-completion.md").is_file())
             self.assertTrue((root / "skills" / "README.md").is_file())
             for mem_type in (

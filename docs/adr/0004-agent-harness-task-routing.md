@@ -1,6 +1,6 @@
 # ADR 0004 — Agent Harness: 작업 유형별 아키텍처 디스패치
 
-- **상태(Status):** Proposed
+- **상태(Status):** Accepted — 구현 (디스패처, 2026-06-09)
 - **날짜:** 2026-06-09
 - **관련:** [ADR 0002](0002-three-layer-control-stack.md), [ADR 0003](0003-contract-harness.md), [ADR 0006](0006-final-blended-architecture.md)
 

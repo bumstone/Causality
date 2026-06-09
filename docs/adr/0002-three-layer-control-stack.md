@@ -1,6 +1,6 @@
 # ADR 0002 — 3계층 실행 제어 스택 (Stage Designer / Planner / Executor)
 
-- **상태(Status):** Proposed
+- **상태(Status):** Accepted — 부분 구현 (workflow `layer` 메타데이터, 2026-06-09)
 - **날짜:** 2026-06-09
 - **관련:** [ADR 0001 — Task Contract](0001-task-contract-as-binding-rules.md)
 

@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ouroboros_hitl.workflows import (
+    CONTROL_LAYERS,
     OUROBOROS_WORKFLOWS,
     build_session_bootstrap,
     build_subagent_packet,
@@ -27,6 +28,21 @@ class WorkflowTests(unittest.TestCase):
             tdd["notes"],
             ["Do not skip the failing check when a regression can be expressed"],
         )
+
+    def test_every_workflow_has_a_valid_control_layer(self) -> None:
+        # ADR 0002: each workflow maps to one of the three control layers.
+        for name, template in OUROBOROS_WORKFLOWS.items():
+            self.assertIn(template.layer, CONTROL_LAYERS, f"{name} has invalid layer {template.layer!r}")
+
+        by_layer = {layer: 0 for layer in CONTROL_LAYERS}
+        for template in OUROBOROS_WORKFLOWS.values():
+            by_layer[template.layer] += 1
+        # every layer is represented
+        for layer, count in by_layer.items():
+            self.assertGreater(count, 0, f"no workflow tagged {layer}")
+
+        manifest = workflow_manifest()
+        self.assertTrue(all("layer" in item for item in manifest["workflows"]))
 
     def test_subagent_packet_is_seed_bound(self) -> None:
         packet = build_subagent_packet(
