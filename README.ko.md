@@ -193,19 +193,23 @@ flowchart LR
 | ADR | 제목 | 상태 |
 |---|---|---|
 | [0001](docs/adr/0001-task-contract-as-binding-rules.md) | Task Contract — 구속 규칙 계층 | **Accepted / 구현** |
-| [0002](docs/adr/0002-three-layer-control-stack.md) | 3계층 실행 제어 스택 | Proposed |
+| [0002](docs/adr/0002-three-layer-control-stack.md) | 3계층 실행 제어 스택 | **Accepted / 부분** |
 | [0003](docs/adr/0003-contract-harness.md) | Contract Harness | **Accepted / 구현** |
-| [0004](docs/adr/0004-agent-harness-task-routing.md) | Agent Harness 작업 라우팅 | Proposed |
-| [0005](docs/adr/0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 | Proposed |
-| [0006](docs/adr/0006-final-blended-architecture.md) | 최종 혼합(5계층) 아키텍처 | Proposed |
+| [0004](docs/adr/0004-agent-harness-task-routing.md) | Agent Harness 작업 라우팅 | **Accepted / 구현** |
+| [0005](docs/adr/0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 | **Accepted / 부분** |
+| [0006](docs/adr/0006-final-blended-architecture.md) | 최종 혼합(5계층) 아키텍처 | **Accepted / 부분** |
 | [0007](docs/adr/0007-context-economy-progressive-disclosure.md) | Context Economy / 점진적 공개 | **Accepted / 부분** |
+| [0008](docs/adr/0008-repository-hygiene-shared-vs-ignored.md) | 저장소 위생: 공유 vs 무시 | **Accepted / 구현** |
 
-현재 구현됨: `non_goals` 필드, 동결된 `TaskContract`, 집행 게이트
-(`check_tool_allowed` / `check_non_goal` / `should_stop`), `ContractHarness.bind`,
-그리고 on-demand 파일 레이아웃(`workflow/` `checklists/` `skills/`
-`memory/<6타입>/`)과 Context Economy 운영 규칙. 미구현: 매 반복 `should_stop`을
-호출하는 루프 드라이버, Review 자동화, Reflect / Skill update, Agent Harness
-디스패처, 3계층 실행 메타데이터.
+현재 구현됨: `non_goals` 필드와 동결된 `TaskContract`; 집행 게이트
+(`check_tool_allowed` / `check_non_goal` / `should_stop`); `BoundContract`를
+반환하는 `ContractHarness.bind`; bounded 루프 드라이버(`run_bounded_loop`);
+거버넌스 포함 타입 메모리(`TypedMemory`); Agent Harness 디스패처(`AgentHarness`);
+Reflect 증류기(`reflect_on_contract`); 3계층 워크플로 메타데이터
+(`WorkflowTemplate.layer`); on-demand 파일 레이아웃(`workflow/` `checklists/`
+`skills/` `memory/<6타입>/`)과 Context Economy 운영 규칙; 공유 vs 무시 위생 규칙.
+미구현: 완전한 Review 자동화, earned-skill distiller·재현성·승급(진화 루프 뒤 절반),
+Agenda 영속화, 디스패처→하니스→루프 end-to-end 런타임.
 
 ---
 
