@@ -10,17 +10,21 @@ from .contracts import (
     PermissionContract,
     Risk,
     StateTransition,
+    TaskContract,
     VerifierDecision,
 )
 from .gates import GateResult, HITLGate
 from .ledger import EvidenceLedger
 from .orchestrator import OuroborosHITL
+from .contract_harness import ContractHarness, ContractHarnessError
 from .browser_adapter import A11yBrowserAdapter
 
 __all__ = [
     "ActionType",
     "A11yBrowserAdapter",
     "AuditEventType",
+    "ContractHarness",
+    "ContractHarnessError",
     "EvidenceKind",
     "EvidenceLedger",
     "EvidenceRequirement",
@@ -32,5 +36,6 @@ __all__ = [
     "PermissionContract",
     "Risk",
     "StateTransition",
+    "TaskContract",
     "VerifierDecision",
 ]

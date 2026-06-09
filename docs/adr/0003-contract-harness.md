@@ -1,6 +1,6 @@
 # ADR 0003 — Contract Harness: 모든 실행 직전의 구속 의식(ritual)
 
-- **상태(Status):** Proposed
+- **상태(Status):** Accepted — 구현 완료 (2026-06-09)
 - **날짜:** 2026-06-09
 - **관련:** [ADR 0001](0001-task-contract-as-binding-rules.md), [ADR 0006](0006-final-blended-architecture.md)
 

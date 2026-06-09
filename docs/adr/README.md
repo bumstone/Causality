@@ -14,13 +14,13 @@
 
 | ADR | 제목 | 상태 |
 |---|---|---|
-| [0001](0001-task-contract-as-binding-rules.md) | Task Contract — 범위 확장이 아닌 구속 규칙 계층 | Proposed |
+| [0001](0001-task-contract-as-binding-rules.md) | Task Contract — 범위 확장이 아닌 구속 규칙 계층 | **Accepted (구현)** |
 | [0002](0002-three-layer-control-stack.md) | 3계층 실행 제어 스택 (Stage Designer / Planner / Executor) | Proposed |
-| [0003](0003-contract-harness.md) | Contract Harness — 모든 실행 직전의 구속 의식 | Proposed |
+| [0003](0003-contract-harness.md) | Contract Harness — 모든 실행 직전의 구속 의식 | **Accepted (구현)** |
 | [0004](0004-agent-harness-task-routing.md) | Agent Harness — 작업 유형별 아키텍처 디스패치 | Proposed |
 | [0005](0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 (Synergy 일부 차용) | Proposed |
 | [0006](0006-final-blended-architecture.md) | 최종 혼합 아키텍처 — 5계층 분리와 충돌·중복·최적화 | Proposed |
-| [0007](0007-context-economy-progressive-disclosure.md) | Context Economy & Progressive Disclosure (운영 규칙) | Proposed |
+| [0007](0007-context-economy-progressive-disclosure.md) | Context Economy & Progressive Disclosure (운영 규칙) | **Accepted (부분 구현)** |
 
 ## 읽는 순서
 
@@ -45,4 +45,18 @@
 - **자기개선 루프**: Run→Review→Fix는 기존 요소 조합으로 가능, Reflect→Skill update는
   신규 — ADR 0006 §6 실현 가능성 표 + §7 알려진 위험 표(C-* IDs).
 
-전 ADR은 `Proposed`이며, "해결/처리"는 설계상 해소다(코드 반영은 별도 구현 단계).
+"해결/처리"는 설계상 해소이며, 일부는 아래 구현 단계에서 코드로 반영되었다.
+
+## 구현 상태 (2026-06-09)
+
+권장 순서(0001 → 0003 → 0007)로 첫 기초 슬라이스를 구현하고 테스트했다(30 tests OK).
+
+| ADR | 구현된 것 | 코드 | 테스트 |
+|---|---|---|---|
+| 0001 | `non_goals` 필드, `TaskContract`(frozen·파생·read-only), 집행 게이트 `check_tool_allowed`/`check_non_goal`/`should_stop`, escalation 파생 뷰 | `contracts.py`, `gates.py`, `orchestrator.py` | `test_contracts.py`, `test_gates.py` |
+| 0003 | `ContractHarness.bind`(5단계 검증 → frozen TaskContract, 단일 GOAL_CONTRACT 기록) | `contract_harness.py` | `test_contract_harness.py` |
+| 0007 | 부트스트랩이 `workflow/`·`checklists/`·`skills/`·`memory/<6타입>/` 생성, 워크플로 문서 단일출처 생성, Context Economy 운영규칙, AGENTS.md=Codex 재정의 | `agent_bootstrap.py` | `test_agent_bootstrap.py` |
+
+**후속(미구현):** should_stop을 매 반복 호출하는 루프 드라이버(0006 §6.1-1), Review 자동화,
+Reflect/Skill update(0005 메모리 거버넌스 동작), Agent Harness 디스패처(0004),
+3계층 메타데이터(0002).

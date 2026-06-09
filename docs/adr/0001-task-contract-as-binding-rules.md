@@ -1,6 +1,6 @@
 # ADR 0001 — Task Contract: 범위 확장이 아닌 구속 규칙 계층
 
-- **상태(Status):** Proposed
+- **상태(Status):** Accepted — 핵심 구현 완료 (2026-06-09)
 - **날짜:** 2026-06-09
 - **관련:** [ADR 0002 — 3계층 실행 제어 스택](0002-three-layer-control-stack.md)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -138,6 +139,7 @@ class GoalContract:
     risk: Risk | str = Risk.LOW
     permissions: PermissionContract = field(default_factory=PermissionContract)
     evidence_required: list[EvidenceRequirement] = field(default_factory=list)
+    non_goals: tuple[str, ...] = ()
     state: StateTransition | str = StateTransition.PLANNED
     stopping_policy: dict[str, Any] = field(
         default_factory=lambda: {
@@ -172,6 +174,7 @@ class GoalContract:
             "risk": self.risk_value,
             "permissions": self.permissions.to_dict(),
             "evidence_required": [item.to_dict() for item in self.evidence_required],
+            "non_goals": list(self.non_goals),
             "state": self.state_value,
             "stopping_policy": dict(self.stopping_policy),
             "created_at": self.created_at,
@@ -190,6 +193,7 @@ class GoalContract:
                 EvidenceRequirement.from_mapping(item)
                 for item in value.get("evidence_required", [])
             ],
+            non_goals=tuple(value.get("non_goals", ())),
             state=value.get("state", StateTransition.PLANNED.value),
             stopping_policy=dict(value.get("stopping_policy", {})),
             created_at=value.get("created_at", utc_now()),
@@ -217,3 +221,62 @@ class VerifierDecision:
         value = asdict(self)
         value["evidence_refs"] = list(self.evidence_refs)
         return value
+
+
+def _derive_escalation(contract: "GoalContract") -> tuple[str, ...]:
+    """Escalation triggers as a *derived view* of the gate's risk-based
+    behavior, not a separately enforced field. The HITLGate stays the single
+    enforcer, which avoids the dual-model conflict (ADR 0006, C-ESC-1)."""
+    triggers: list[str] = ["irreversible_action_approval"]
+    if contract.approval_required:
+        triggers.insert(0, "high_risk_plan_approval")
+        triggers.append("final_approval")
+    return tuple(triggers)
+
+
+@dataclass(frozen=True)
+class TaskContract:
+    """Immutable, binding rules-of-engagement derived from a GoalContract.
+
+    This is not a new goal specification; it is a frozen *view* of the clauses
+    a run must honor (ADR 0001). It narrows scope (``non_goals``,
+    ``allowed_tools``) rather than widening it, and cannot be mutated mid-loop.
+    """
+
+    objective: str
+    non_goals: tuple[str, ...]
+    allowed_tools: tuple[str, ...]
+    stop_condition: Mapping[str, Any]
+    verification: tuple[str, ...]
+    escalation: tuple[str, ...]
+    goal_id: str = ""
+
+    @classmethod
+    def of(cls, contract: "GoalContract") -> "TaskContract":
+        summary = contract.summary.strip()
+        objective = f"{contract.title}: {summary}" if summary else contract.title
+        verification = tuple(
+            item.description or item.kind_value
+            for item in contract.evidence_required
+            if item.required
+        )
+        return cls(
+            objective=objective,
+            non_goals=tuple(contract.non_goals),
+            allowed_tools=tuple(contract.permissions.allowed_tools),
+            stop_condition=MappingProxyType(dict(contract.stopping_policy)),
+            verification=verification,
+            escalation=_derive_escalation(contract),
+            goal_id=contract.goal_id,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "objective": self.objective,
+            "non_goals": list(self.non_goals),
+            "allowed_tools": list(self.allowed_tools),
+            "stop_condition": dict(self.stop_condition),
+            "verification": list(self.verification),
+            "escalation": list(self.escalation),
+            "goal_id": self.goal_id,
+        }

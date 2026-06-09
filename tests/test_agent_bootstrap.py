@@ -30,6 +30,28 @@ class AgentBootstrapTests(unittest.TestCase):
             mcp = json.loads((root / ".ouroboros" / "mcp.json").read_text(encoding="utf-8"))
             self.assertIn("ouroboros-hitl", mcp["mcpServers"])
 
+    def test_install_agent_files_writes_context_economy_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_agent_files(temp_dir)
+            root = Path(temp_dir)
+
+            self.assertTrue((root / "workflow" / "README.md").is_file())
+            self.assertTrue((root / "workflow" / "writing-plans.md").is_file())
+            self.assertTrue((root / "checklists" / "verification-before-completion.md").is_file())
+            self.assertTrue((root / "skills" / "README.md").is_file())
+            for mem_type in (
+                "decisions",
+                "assumptions",
+                "failures",
+                "playbooks",
+                "snippets",
+                "retrospectives",
+            ):
+                self.assertTrue((root / "memory" / mem_type / "README.md").is_file())
+
+            rules = (root / ".ouroboros" / "agent-rules.md").read_text(encoding="utf-8")
+            self.assertIn("Context Economy", rules)
+
     def test_install_agent_files_does_not_overwrite_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

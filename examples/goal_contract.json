@@ -8,6 +8,10 @@
     "network_scope": ["localhost", "staging.example.com"],
     "auth_scope": ["test-account-only"]
   },
+  "non_goals": [
+    "modify production payment configuration",
+    "change authentication beyond the test account"
+  ],
   "evidence_required": [
     {
       "kind": "browser_diff",

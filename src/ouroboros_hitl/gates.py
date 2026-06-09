@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from .contracts import (
     AuditEventType,
@@ -96,6 +96,78 @@ class HITLGate:
             )
 
         return self._record(contract, GateDecision.PASS, "completion criteria satisfied")
+
+    def check_tool_allowed(self, contract: GoalContract, tool: str) -> GateResult:
+        """Enforce the Allowed-tools clause (ADR 0001 §2.3).
+
+        An empty ``allowed_tools`` means no restriction was declared, so any
+        tool passes. When a restriction is declared, a tool outside it
+        escalates so a human can decide whether to widen scope.
+        """
+        allowed = contract.permissions.allowed_tools
+        if allowed and tool not in allowed:
+            return self._record(
+                contract,
+                GateDecision.ESCALATE,
+                f"tool '{tool}' is outside the contract's allowed_tools",
+            )
+        return self._record(contract, GateDecision.PASS, f"tool '{tool}' is permitted")
+
+    def check_non_goal(self, contract: GoalContract, action_desc: str) -> GateResult:
+        """Enforce the Non-goals clause (ADR 0001 §2.3).
+
+        A non-goal is a hard boundary, so a match stops the action rather than
+        escalating: the contract has already declared this work out of scope.
+        """
+        text = action_desc.lower()
+        for non_goal in contract.non_goals:
+            needle = non_goal.strip().lower()
+            if needle and needle in text:
+                return self._record(
+                    contract,
+                    GateDecision.STOP,
+                    f"action conflicts with declared non-goal: {non_goal}",
+                )
+        return self._record(contract, GateDecision.PASS, "action does not hit a non-goal")
+
+    def should_stop(
+        self,
+        contract: GoalContract,
+        iteration_state: Mapping[str, int],
+    ) -> GateResult:
+        """Enforce the Stop-condition clause by reading ``stopping_policy``.
+
+        This is the consumer the policy previously lacked (ADR 0006 C-STOP-1).
+        ``iteration_state`` is supplied by the loop runtime. Hitting the
+        iteration or no-progress ceiling stops; exhausting failed hypotheses
+        escalates (consistent with the root-cause protocol).
+        """
+        policy = contract.stopping_policy
+        iterations = int(iteration_state.get("iterations", 0))
+        no_progress = int(iteration_state.get("no_progress_iterations", 0))
+        failed = int(iteration_state.get("failed_hypotheses", 0))
+
+        max_iterations = int(policy.get("max_iterations", 0) or 0)
+        max_no_progress = int(policy.get("no_progress_iterations", 0) or 0)
+        max_failed = int(policy.get("max_failed_hypotheses", 0) or 0)
+
+        if max_iterations and iterations >= max_iterations:
+            return self._record(
+                contract, GateDecision.STOP, f"reached max_iterations ({max_iterations})"
+            )
+        if max_no_progress and no_progress >= max_no_progress:
+            return self._record(
+                contract,
+                GateDecision.STOP,
+                f"no progress for {max_no_progress} iteration(s)",
+            )
+        if max_failed and failed >= max_failed:
+            return self._record(
+                contract,
+                GateDecision.ESCALATE,
+                f"reached max_failed_hypotheses ({max_failed})",
+            )
+        return self._record(contract, GateDecision.PASS, "stop condition not met")
 
     def _missing_required_evidence(self, contract: GoalContract) -> set[str]:
         required = contract.required_evidence_kinds()

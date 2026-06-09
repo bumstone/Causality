@@ -1,6 +1,6 @@
 # ADR 0007 — Context Economy & Progressive Disclosure (운영 규칙)
 
-- **상태(Status):** Proposed
+- **상태(Status):** Accepted — 부분 구현 (파일 레이아웃·운영규칙, 2026-06-09)
 - **날짜:** 2026-06-09
 - **관련:** [ADR 0003](0003-contract-harness.md) · [ADR 0004](0004-agent-harness-task-routing.md) · [ADR 0005](0005-identity-memory-skill-substrate.md) · [ADR 0006](0006-final-blended-architecture.md)
 
