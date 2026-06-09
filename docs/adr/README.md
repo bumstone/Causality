@@ -20,6 +20,7 @@
 | [0004](0004-agent-harness-task-routing.md) | Agent Harness — 작업 유형별 아키텍처 디스패치 | Proposed |
 | [0005](0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 (Synergy 일부 차용) | Proposed |
 | [0006](0006-final-blended-architecture.md) | 최종 혼합 아키텍처 — 5계층 분리와 충돌·중복·최적화 | Proposed |
+| [0007](0007-context-economy-progressive-disclosure.md) | Context Economy & Progressive Disclosure (운영 규칙) | Proposed |
 
 ## 읽는 순서
 
@@ -29,6 +30,9 @@
   작업 유형 라우터(0004), 지속 기억·스킬 기반층(0005).
 - **0006**: 위 다섯을 하나의 **5계층 아키텍처**로 종합하고 충돌·중복·최적화를
   해소하는 capstone. 전체 그림은 여기서 본다.
+- **0007**: 운영 규칙 — 긴 규칙/체크리스트/역할을 매번 로드하지 않고 필요할 때만
+  파일을 참조하는 **context economy / 점진적 공개**. always-loaded 경계와 권장 파일
+  레이아웃(`workflow/ checklists/ skills/ memory/`)을 명시.
 
 ## 비판적 리뷰 (2026-06-09)
 

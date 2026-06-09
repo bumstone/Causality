@@ -169,6 +169,7 @@ docs/
     0004-agent-harness-task-routing.md
     0005-identity-memory-skill-substrate.md
     0006-final-blended-architecture.md
+    0007-context-economy-progressive-disclosure.md
 examples/
   goal_contract.json
 plugins/
