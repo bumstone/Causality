@@ -162,6 +162,9 @@ docs/
   agent_automation.md
   installation.md
   ouroboros_integration.md
+  adr/
+    0001-task-contract-as-binding-rules.md
+    0002-three-layer-control-stack.md
 examples/
   goal_contract.json
 plugins/
