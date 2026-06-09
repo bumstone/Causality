@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from .contracts import (
     AuditEventType,
@@ -98,3 +98,16 @@ class OuroborosHITL:
 
     def complete(self, contract: GoalContract) -> GateResult:
         return self.gate.complete(contract)
+
+    def check_tool_allowed(self, contract: GoalContract, tool: str) -> GateResult:
+        return self.gate.check_tool_allowed(contract, tool)
+
+    def check_non_goal(self, contract: GoalContract, action_desc: str) -> GateResult:
+        return self.gate.check_non_goal(contract, action_desc)
+
+    def should_stop(
+        self,
+        contract: GoalContract,
+        iteration_state: Mapping[str, int],
+    ) -> GateResult:
+        return self.gate.should_stop(contract, iteration_state)
