@@ -22,12 +22,18 @@
 | 패턴 | 구조 | 이 프로젝트와의 관계 |
 |---|---|---|
 | **AgentX** (arXiv 2509.07595) | **stage designer → planner → executor** 3-에이전트. 프롬프트를 분해해 워크플로 자동 생성. ReAct·Magentic-One 대비 competitive/우위 보고 | 본 ADR이 차용하는 역할 단순화 모델 |
-| **Magentic-One** (arXiv 2411.04468) | Orchestrator의 **task ledger**(사실·계획) + **progress ledger**(진행·정체 카운터→자동 replan) | **이미 구현됨**: `EvidenceLedger` + `stopping_policy.no_progress_iterations` + `GateDecision.REPAIR` |
+| **Magentic-One** (arXiv 2411.04468) | Orchestrator의 **task ledger**(사실·계획) + **progress ledger**(진행·정체 카운터→자동 replan) | **부분 정합**: `EvidenceLedger`는 존재(task ledger 유사). ⚠️ progress ledger의 *정체→replan* 은 **미구현** — 아래 정정 |
 | **ReAct** | thought→action 단일 인터리브 루프 | 장기 과제·컨텍스트 관리 취약, 비용 증가 경향 → 비교 기준선 |
 
-**핵심 통찰:** 이 프로젝트는 *이미* Magentic-One형(ledger + 정체→replan)이다.
-따라서 AgentX의 3계층은 새 런타임이 아니라 기존 역할 위에 얹는
-**"역할 단순화 오버레이"** 로 도입하는 것이 자연스럽다.
+> ⚠️ **정정(리뷰 C-MAG-1):** 초안은 정체→replan이 `stopping_policy.no_progress_iterations`
+> + `GateDecision.REPAIR`로 "이미 구현됨"이라 했으나, 실제 `REPAIR`는
+> `complete()`에서 *검증 미달*(verifier<2 / 치명 실패 / 증거 누락)일 때만 발생한다
+> (`gates.py:62-98`). 정체(stall) 카운터는 없고 `no_progress_iterations`를 읽는 코드도
+> 없다. 따라서 stall→replan은 **목표이지 현재 상태가 아니다**(구현 순서: ADR 0006 §6.1).
+
+**핵심 통찰:** 이 프로젝트는 ledger 기반이라 Magentic-One형 진화 *여지가 크지만*,
+정체→replan 루프는 아직 닫혀 있지 않다. AgentX의 3계층은 새 런타임이 아니라 기존
+역할 위에 얹는 **"역할 단순화 오버레이"** 로 도입하는 것이 자연스럽다.
 
 ## 2. 결정 (Decision)
 

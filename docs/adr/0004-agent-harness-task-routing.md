@@ -48,8 +48,20 @@ retro`)에 비춰 매핑은 일관적이다:
 
 - Agent Harness(L1, **어떤 플레이북인가**)와 Stage Designer(L3, **그 플레이북을
   어떤 단계로 실행하는가**)는 **고도가 다르다** → 중복이 아니라 위임 관계.
-- `agent-rules.md`의 intent 라우팅은 Agent Harness로 **흡수·대체**한다(이중 라우터
-  제거). 슬래시 커맨드 이름은 유지하되, 호출 결정은 Agent Harness가 내린다.
+- `agent-rules.md`의 intent 라우팅은 Agent Harness로 **흡수·대체할 계획**이다.
+
+> **현재 상태 vs 마이그레이션(리뷰 C-ROUTE-1):** intent 라우팅 프로즈는 현재
+> `agent_bootstrap.py`가 **3곳**에 생성한다 — `AGENT_RULES`(생성 파일
+> 17-26행), `AGENTS_MD`(`agent_bootstrap.py:77-83`), `CODEX_ROUTING`
+> (`agent_bootstrap.py:173-182`). Agent Harness 디스패처는 **아직 코드에 없다.**
+> 따라서 "흡수·대체"는 *제안*이며, 구현 시 **이 3곳의 라우팅 블록 제거(또는
+> Agent Harness 위임으로 치환)** 를 명시적 마이그레이션 항목으로 둔다.
+>
+> **제3 라우터 주의(C-ROUTE-2):** gstack 라이프사이클
+> `office-hours → plan → implement → review → QA → ship → retro` 자체가 *단계 순서
+> 라우터*다. 이는 L1(번들 선택)도 L3(번들 내부 단계화)도 아닌 별도 축이 되기 쉽다.
+> 처리: **라이프사이클의 단계 순서는 선택된 번들 *내부*의 책임**으로 귀속하고,
+> L1은 "어떤 번들인가"만 결정한다(번들이 자신의 phase 순서를 안다).
 
 ## 3. 검토한 대안 (Alternatives)
 

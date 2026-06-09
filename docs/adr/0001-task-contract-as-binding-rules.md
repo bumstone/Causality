@@ -99,6 +99,18 @@ class TaskContract:
 이로써 `.ouroboros/agent-rules.md`의 "Required Loop" 규칙
 (`agent_bootstrap.py:31-38`)이 산문 권고에서 **집행 가능한 계약**으로 승격된다.
 
+> **에스컬레이션 일원화(리뷰 C-ESC-1):** 현재 `ESCALATE`는 `gates.py:41,57,91`에서
+> `approval_required`(위험 기반)와 `IRREVERSIBLE_ACTIONS`로 **하드코딩**되어 있어,
+> `TaskContract.escalation` 조항을 따로 두면 *무동작 텍스트* 와 *실제 게이트 동작* 이
+> 갈린다. 따라서 escalation은 별도 모델을 만들지 않고 **게이트가
+> `contract.escalation`(+ 위험 기반 기본값)을 읽어 판단하도록 일원화**한다. 조항이
+> 곧 트리거가 되어야 하며, 조항 수정이 런타임에 반영되지 않으면 안 된다.
+>
+> **현재 상태:** 위 3개 메서드와 `should_stop`이 소비하는 `iteration_state` 호출
+> 계약은 **모두 신규**다. `orchestrator.py`는 현재 `evaluate_plan`/
+> `can_execute_action`/`complete`만 노출하며, `iteration_state`(반복 횟수)를 계산·전달
+> 하는 주체가 없다(§4 참조).
+
 ### 2.4 비확장 보장 메커니즘
 
 이 설계가 "Geas 확장"을 구조적으로 막는 이유:
