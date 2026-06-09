@@ -4,7 +4,7 @@
   "risk": "high",
   "permissions": {
     "allowed_tools": ["browser-driver", "playwright", "axe"],
-    "write_scope": [".ouroboros/", "qa-reports/"],
+    "write_scope": [".causality/", "qa-reports/"],
     "network_scope": ["localhost", "staging.example.com"],
     "auth_scope": ["test-account-only"]
   },

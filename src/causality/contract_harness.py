@@ -19,7 +19,7 @@ from .contracts import (
     Risk,
     TaskContract,
 )
-from .orchestrator import OuroborosHITL
+from .orchestrator import Causality
 
 
 class ContractHarnessError(ValueError):
@@ -58,7 +58,7 @@ class ContractHarness:
     5. stop_condition  -> stop_condition
     """
 
-    runtime: OuroborosHITL
+    runtime: Causality
 
     def bind(
         self,

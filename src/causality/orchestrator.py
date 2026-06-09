@@ -14,8 +14,8 @@ from .gates import GateResult, HITLGate
 from .ledger import EvidenceLedger
 
 
-class OuroborosHITL:
-    """Small orchestration facade for embedding in an Ouroboros runtime."""
+class Causality:
+    """Small orchestration facade for embedding in an Causality runtime."""
 
     def __init__(self, ledger_path: str | Path):
         self.ledger = EvidenceLedger(ledger_path)

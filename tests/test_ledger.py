@@ -7,8 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl.contracts import AuditEventType
-from ouroboros_hitl.ledger import EvidenceLedger
+from causality.contracts import AuditEventType
+from causality.ledger import EvidenceLedger
 
 
 class LedgerTests(unittest.TestCase):

@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl import MemoryGovernanceError, TypedMemory
+from causality import MemoryGovernanceError, TypedMemory
 
 
 class TypedMemoryTests(unittest.TestCase):
@@ -61,7 +61,7 @@ class TypedMemoryTests(unittest.TestCase):
     def test_provenance_persists_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             mem = TypedMemory(Path(temp_dir))
-            mem.record("snippets", "ouroboros-hitl context", provenance="ledger:deadbeef")
+            mem.record("snippets", "causality context", provenance="ledger:deadbeef")
             again = TypedMemory(Path(temp_dir))
             snippets = again.entries("snippets")
             self.assertEqual(snippets[0].provenance, "ledger:deadbeef")

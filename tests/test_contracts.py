@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dataclasses import FrozenInstanceError
 
-from ouroboros_hitl.contracts import (
+from causality.contracts import (
     EvidenceKind,
     EvidenceRequirement,
     GoalContract,

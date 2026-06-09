@@ -1,6 +1,6 @@
 # Agent Automation
 
-`ouroboros-hitl install-agent` makes a new project behave like it has a local
+`causality install-agent` makes a new project behave like it has a local
 agent plugin installed.
 
 ## What it installs
@@ -8,19 +8,19 @@ agent plugin installed.
 ```text
 AGENTS.md
 CLAUDE.md
-.claude/commands/ouroboros-plan.md
-.claude/commands/ouroboros-verify.md
-.claude/commands/ouroboros-root-cause.md
-.claude/commands/ouroboros-a11y-observe.md
-.claude/commands/ouroboros-complete.md
-.codex/ouroboros-routing.md
-.ouroboros/agent-rules.md
-.ouroboros/ledger.jsonl
-.ouroboros/ouroboros-workflows.json
-.ouroboros/mcp.json
+.claude/commands/causality-plan.md
+.claude/commands/causality-verify.md
+.claude/commands/causality-root-cause.md
+.claude/commands/causality-a11y-observe.md
+.claude/commands/causality-complete.md
+.codex/causality-routing.md
+.causality/agent-rules.md
+.causality/ledger.jsonl
+.causality/causality-workflows.json
+.causality/mcp.json
 ```
 
-`AGENTS.md` and `CLAUDE.md` point the agent to `.ouroboros/agent-rules.md`.
+`AGENTS.md` and `CLAUDE.md` point the agent to `.causality/agent-rules.md`.
 The rule file keeps the HITL loop stable across sessions:
 
 ```text
@@ -31,13 +31,13 @@ Goal contract -> gate -> evidence ledger -> verifier passes -> completion gate
 
 Claude project slash commands:
 
-- `/ouroboros-plan`
-- `/ouroboros-verify`
-- `/ouroboros-root-cause`
-- `/ouroboros-a11y-observe`
-- `/ouroboros-complete`
+- `/causality-plan`
+- `/causality-verify`
+- `/causality-root-cause`
+- `/causality-a11y-observe`
+- `/causality-complete`
 
-Codex uses `AGENTS.md` and `.codex/ouroboros-routing.md` as routing context.
+Codex uses `AGENTS.md` and `.codex/causality-routing.md` as routing context.
 When the user asks for planning, debugging, browser/UI testing, implementation
 verification, or completion, the agent should choose the matching workflow
 without requiring the user to name it.
@@ -47,15 +47,15 @@ without requiring the user to name it.
 Start the server:
 
 ```powershell
-python -m ouroboros_hitl.mcp_server --project .
+python -m causality.mcp_server --project .
 ```
 
 Tools exposed:
 
-- `ouroboros_init`: install/update the project automation files.
-- `ouroboros_context`: return ledger tail and workflow names.
-- `ouroboros_append_evidence`: append evidence to `.ouroboros/ledger.jsonl`.
-- `ouroboros_workflows`: return the workflow manifest.
+- `causality_init`: install/update the project automation files.
+- `causality_context`: return ledger tail and workflow names.
+- `causality_append_evidence`: append evidence to `.causality/ledger.jsonl`.
+- `causality_workflows`: return the workflow manifest.
 
 The implementation is intentionally local and dependency-light. It stores all
 state in the project, so it can be used by Claude, Codex, or any client that can

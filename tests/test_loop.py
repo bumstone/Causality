@@ -7,12 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl import (
+from causality import (
     EvidenceKind,
     EvidenceRequirement,
     GateDecision,
     GoalContract,
-    OuroborosHITL,
+    Causality,
     Risk,
     StepOutcome,
     VerifierDecision,
@@ -21,8 +21,8 @@ from ouroboros_hitl import (
 
 
 class LoopTests(unittest.TestCase):
-    def _runtime(self, temp_dir: str) -> OuroborosHITL:
-        return OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+    def _runtime(self, temp_dir: str) -> Causality:
+        return Causality(Path(temp_dir) / "ledger.jsonl")
 
     def test_loop_passes_when_completion_criteria_met(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

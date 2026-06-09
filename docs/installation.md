@@ -19,23 +19,23 @@ pip install ouroboros-ai
 In a new project:
 
 ```powershell
-ouroboros-hitl install-agent
+causality install-agent
 ```
 
 This installs local instruction/config files:
 
 - `AGENTS.md`
 - `CLAUDE.md`
-- `.claude/commands/ouroboros-plan.md`
-- `.claude/commands/ouroboros-verify.md`
-- `.claude/commands/ouroboros-root-cause.md`
-- `.claude/commands/ouroboros-a11y-observe.md`
-- `.claude/commands/ouroboros-complete.md`
-- `.codex/ouroboros-routing.md`
-- `.ouroboros/agent-rules.md`
-- `.ouroboros/ledger.jsonl`
-- `.ouroboros/ouroboros-workflows.json`
-- `.ouroboros/mcp.json`
+- `.claude/commands/causality-plan.md`
+- `.claude/commands/causality-verify.md`
+- `.claude/commands/causality-root-cause.md`
+- `.claude/commands/causality-a11y-observe.md`
+- `.claude/commands/causality-complete.md`
+- `.codex/causality-routing.md`
+- `.causality/agent-rules.md`
+- `.causality/ledger.jsonl`
+- `.causality/causality-workflows.json`
+- `.causality/mcp.json`
 
 Existing files are not overwritten unless you pass `--force`.
 
@@ -43,11 +43,11 @@ Claude uses the `.claude/commands/` files as project slash commands. Codex uses
 `AGENTS.md` as the automatic router and can call the MCP-style server when the
 client exposes it.
 
-For MCP-style clients, use the project config in `.ouroboros/mcp.json` or
+For MCP-style clients, use the project config in `.causality/mcp.json` or
 register the server manually:
 
 ```powershell
-python -m ouroboros_hitl.mcp_server --project .
+python -m causality.mcp_server --project .
 ```
 
 ## Browser driver
@@ -55,7 +55,7 @@ python -m ouroboros_hitl.mcp_server --project .
 The browser adapter is driver-agnostic. Configure the executable with:
 
 ```powershell
-$env:OUROBOROS_BROWSER_BIN="C:\path\to\browser-driver.exe"
+$env:CAUSALITY_BROWSER_BIN="C:\path\to\browser-driver.exe"
 ```
 
 The driver should expose snapshot/action commands or be wrapped by a small
@@ -77,4 +77,4 @@ npm install -D pa11y lighthouse
 ```
 
 These tools should produce JSON/HTML artifacts that are referenced from the
-Ouroboros ledger by path and hash, not pasted into prompts.
+Causality ledger by path and hash, not pasted into prompts.

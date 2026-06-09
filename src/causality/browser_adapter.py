@@ -110,7 +110,7 @@ class A11yBrowserAdapter:
     """Thin adapter over a snapshot/action browser driver binary.
 
     The adapter keeps heavy browser state in the driver and returns compact
-    observations that can be appended to the Ouroboros ledger.
+    observations that can be appended to the Causality ledger.
     """
 
     def __init__(
@@ -118,7 +118,7 @@ class A11yBrowserAdapter:
         browse_binary: str | Path | None = None,
         *,
         ledger: EvidenceLedger | None = None,
-        artifact_dir: str | Path = ".ouroboros/artifacts",
+        artifact_dir: str | Path = ".causality/artifacts",
         runner: Runner | None = None,
     ):
         self.browse_binary = str(browse_binary or self._default_browse_binary())
@@ -240,7 +240,7 @@ class A11yBrowserAdapter:
 
     @staticmethod
     def _default_browse_binary() -> Path:
-        env_path = os.environ.get("OUROBOROS_BROWSER_BIN")
+        env_path = os.environ.get("CAUSALITY_BROWSER_BIN")
         if env_path:
             return Path(env_path)
         return Path("browser-driver")

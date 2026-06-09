@@ -11,18 +11,18 @@ from .workflows import workflow_manifest
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ouroboros HITL integration helper")
+    parser = argparse.ArgumentParser(description="Causality integration helper")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="create a ledger and workflow manifest")
-    init_parser.add_argument("--ledger", default=".ouroboros/ledger.jsonl")
-    init_parser.add_argument("--manifest", default=".ouroboros/ouroboros-workflows.json")
+    init_parser.add_argument("--ledger", default=".causality/ledger.jsonl")
+    init_parser.add_argument("--manifest", default=".causality/causality-workflows.json")
 
     manifest_parser = subparsers.add_parser("manifest", help="print workflow manifest")
     manifest_parser.add_argument("--pretty", action="store_true")
 
     context_parser = subparsers.add_parser("context", help="print project ledger tail and workflows")
-    context_parser.add_argument("--ledger", default=".ouroboros/ledger.jsonl")
+    context_parser.add_argument("--ledger", default=".causality/ledger.jsonl")
     context_parser.add_argument("--limit", type=int, default=5)
     context_parser.add_argument("--pretty", action="store_true")
 

@@ -8,14 +8,14 @@ from typing import Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl.browser_adapter import (
+from causality.browser_adapter import (
     A11yBrowserAdapter,
     BrowserAction,
     CommandResult,
     compression_stats,
     wrap_untrusted,
 )
-from ouroboros_hitl.ledger import EvidenceLedger
+from causality.ledger import EvidenceLedger
 
 
 class BrowserAdapterTests(unittest.TestCase):

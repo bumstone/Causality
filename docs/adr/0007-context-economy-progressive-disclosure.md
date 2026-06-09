@@ -49,9 +49,9 @@
 
 | 권장(요청) | 역할 | 현재 구조 | 처리 |
 |---|---|---|---|
-| `AGENTS.md` | **Codex 전용** 실행 규칙 | `AGENTS.md`(generic) + `.codex/ouroboros-routing.md` | **재정의**: AGENTS.md를 Codex 실행 규칙 단일 진입점으로. `.codex/` 라우팅을 여기로 병합 |
+| `AGENTS.md` | **Codex 전용** 실행 규칙 | `AGENTS.md`(generic) + `.codex/causality-routing.md` | **재정의**: AGENTS.md를 Codex 실행 규칙 단일 진입점으로. `.codex/` 라우팅을 여기로 병합 |
 | `CLAUDE.md` | **Claude 전용** 실행 규칙 | `CLAUDE.md`(Claude) | 유지(얇게 유지) |
-| `workflow/*.md` | 작업 유형별 워크플로 | `.claude/commands/*.md` + `.ouroboros/ouroboros-workflows.json` + `workflows.py` | **단일 출처 = `workflows.py`/manifest**, `workflow/*.md`는 *생성 뷰*. 슬래시 커맨드는 본문 대신 `workflow/<type>.md`를 가리키는 thin 포인터 |
+| `workflow/*.md` | 작업 유형별 워크플로 | `.claude/commands/*.md` + `.causality/causality-workflows.json` + `workflows.py` | **단일 출처 = `workflows.py`/manifest**, `workflow/*.md`는 *생성 뷰*. 슬래시 커맨드는 본문 대신 `workflow/<type>.md`를 가리키는 thin 포인터 |
 | `checklists/*.md` | 검증 체크리스트 | (없음) | **신규**. ADR 0001 Verification + gstack QA 체크리스트 수용 |
 | `skills/*.md` | 재사용 성공 절차 | (개념만 ADR 0005) | **신규**. authored + earned 스킬 문서(ADR 0005 §2.4) |
 | `memory/*.md` | 장기 기억 | (개념만 ADR 0005 §2.2) | ADR 0005의 6-타입과 **동일**: `memory/{decisions,assumptions,failures,playbooks,snippets,retrospectives}/` |
@@ -76,7 +76,7 @@
 
 | ID | 충돌/중복 | 해소 |
 |---|---|---|
-| C-CTX-1 | 워크플로 4중 표현(`workflows.py` / `ouroboros-workflows.json` / `.claude/commands/*` / 신규 `workflow/*.md`) | **단일 출처 = `workflows.py`/manifest**. 나머지는 모두 *생성 뷰*. 손으로 4곳을 동기화하지 않는다 |
+| C-CTX-1 | 워크플로 4중 표현(`workflows.py` / `causality-workflows.json` / `.claude/commands/*` / 신규 `workflow/*.md`) | **단일 출처 = `workflows.py`/manifest**. 나머지는 모두 *생성 뷰*. 손으로 4곳을 동기화하지 않는다 |
 | C-CTX-2 | AGENTS.md가 generic이라 Codex 규칙이 `.codex/`와 분산 | AGENTS.md=Codex 단일 진입점으로 재정의(C-ROUTE-1 라우팅 3중과 함께 처리) |
 | C-CTX-3 | Contract Harness(ADR 0003)는 매 실행 전 guardrail 로드 → "always-loaded 최소화"와 충돌 우려 | 충돌 아님: Harness는 *현재 작업에 scoped된 소수 guardrail*만 로드(전체 `memory/` X). 오히려 본 원칙의 사례 |
 | C-CTX-4 | "완료 후 요약만 memory" vs ledger 전체 기록 | 충돌 아님: ledger(L4)=raw 전체, memory(L0)=타입 요약. ADR 0005/0006과 정합 |
