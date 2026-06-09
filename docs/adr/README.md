@@ -53,7 +53,8 @@
 ## 구현 상태 (2026-06-09)
 
 권장 순서(0001 → 0003 → 0007)로 기초 슬라이스를 구현한 뒤, 루프 드라이버·타입 메모리,
-이어서 Agent Harness·Reflect·3계층 메타데이터·저장소 위생 규칙을 구현했다(65 tests OK).
+Agent Harness·Reflect·3계층 메타데이터·저장소 위생 규칙, 이어서 Review 자동화·earned-skill
+스토어·Agenda 영속화와 이들을 묶는 **end-to-end 엔진**까지 구현했다(99 tests OK).
 
 | ADR | 구현된 것 | 코드 | 테스트 |
 |---|---|---|---|
@@ -66,6 +67,13 @@
 | 0006 §6.1-3 | Reflect 증류기 `reflect_on_contract`(ledger→retrospective+failures, provenance, decisions 미기록) | `reflect.py` | `test_reflect.py` |
 | 0002 | 워크플로 3계층 메타데이터(`WorkflowTemplate.layer`, `CONTROL_LAYERS`) + 워크플로 문서 layer 표기 | `workflows.py` | `test_workflows.py` |
 | 0008 | 공유 vs 무시 규칙 — 런타임 로그/state 무시, 큐레이션 `.md`·소스 추적 | `.gitignore` | `git check-ignore` 검증 |
+| 0006 §6.1-2 | Review 자동화 `run_review`(N개 독립 verifier 호출·기록·집계, ≥2 pass 표준화) | `review.py` | `test_review.py` |
+| 0005 §2.4 / 0006 §6.1-4 | earned-skill `SkillStore`(distill 절차 추출, 재현성 n-of-m, dedup, HITL 승급) | `skills.py` | `test_skills.py` |
+| 0005 §2.3 | `Agenda` 영속화(대기 작업 백로그, 우선순위 정렬, JSON state) | `agenda.py` | `test_agenda.py` |
+| 0006 §2/§6 | **end-to-end 엔진** `CausalityEngine`(Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill) | `engine.py` | `test_engine.py` |
 
-**후속(미구현):** 자동 verifier 호출자(Review 완전 자동화), earned-skill distiller/재현성/승급
-(진화 루프 뒤 절반), Agenda 영속화, 디스패처-하니스-루프 end-to-end 통합 런타임.
+**진화 루프 닫힘:** Run→Review→Fix(루프+Review)와 Reflect→Skill update(reflect+SkillStore 승급)가
+모두 코드로 동작하며, `CausalityEngine`이 5계층을 한 번의 `run_task`/`run_next`로 묶는다.
+
+**남은 후속(선택):** 실제 도구 실행 어댑터(work 콜백 표준화), earned skill의 자동 재사용
+(L1/L3 주입), guardrail TTL 만료 스케줄러, 다중 에이전트 협업(의도적 범위 밖, ADR 0005).

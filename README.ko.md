@@ -196,20 +196,22 @@ flowchart LR
 | [0002](docs/adr/0002-three-layer-control-stack.md) | 3계층 실행 제어 스택 | **Accepted / 부분** |
 | [0003](docs/adr/0003-contract-harness.md) | Contract Harness | **Accepted / 구현** |
 | [0004](docs/adr/0004-agent-harness-task-routing.md) | Agent Harness 작업 라우팅 | **Accepted / 구현** |
-| [0005](docs/adr/0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 | **Accepted / 부분** |
-| [0006](docs/adr/0006-final-blended-architecture.md) | 최종 혼합(5계층) 아키텍처 | **Accepted / 부분** |
+| [0005](docs/adr/0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 | **Accepted / 구현** |
+| [0006](docs/adr/0006-final-blended-architecture.md) | 최종 혼합(5계층) 아키텍처 | **Accepted / 구현** |
 | [0007](docs/adr/0007-context-economy-progressive-disclosure.md) | Context Economy / 점진적 공개 | **Accepted / 부분** |
 | [0008](docs/adr/0008-repository-hygiene-shared-vs-ignored.md) | 저장소 위생: 공유 vs 무시 | **Accepted / 구현** |
 
-현재 구현됨: `non_goals` 필드와 동결된 `TaskContract`; 집행 게이트
-(`check_tool_allowed` / `check_non_goal` / `should_stop`); `BoundContract`를
-반환하는 `ContractHarness.bind`; bounded 루프 드라이버(`run_bounded_loop`);
-거버넌스 포함 타입 메모리(`TypedMemory`); Agent Harness 디스패처(`AgentHarness`);
-Reflect 증류기(`reflect_on_contract`); 3계층 워크플로 메타데이터
-(`WorkflowTemplate.layer`); on-demand 파일 레이아웃(`workflow/` `checklists/`
-`skills/` `memory/<6타입>/`)과 Context Economy 운영 규칙; 공유 vs 무시 위생 규칙.
-미구현: 완전한 Review 자동화, earned-skill distiller·재현성·승급(진화 루프 뒤 절반),
-Agenda 영속화, 디스패처→하니스→루프 end-to-end 런타임.
+자기개선 루프가 end-to-end로 닫혔습니다. 구현됨: `non_goals`와 동결된 `TaskContract`;
+집행 게이트(`check_tool_allowed` / `check_non_goal` / `should_stop`); `BoundContract`를
+반환하는 `ContractHarness.bind`; bounded 루프 드라이버(`run_bounded_loop`); Review 자동화
+(`run_review`); 거버넌스 포함 타입 메모리(`TypedMemory`); Reflect 증류기
+(`reflect_on_contract`); 재현성 n-of-m·dedup·HITL 승급을 갖춘 earned-skill 스토어
+(`SkillStore`); 영속 `Agenda`; Agent Harness 디스패처(`AgentHarness`); 3계층 워크플로
+메타데이터(`WorkflowTemplate.layer`); on-demand 파일 레이아웃과 Context Economy 규칙;
+공유 vs 무시 위생 규칙; 그리고 Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill을 하나의
+`run_task` / `run_next`로 묶는 **`CausalityEngine`**. 남은 선택 항목: `work` 콜백용 표준 도구
+실행 어댑터, 디스패치 시 earned skill 자동 재사용, guardrail TTL 만료 스윕, 다중 에이전트
+협업(의도적 범위 밖, ADR 0005).
 
 ---
 

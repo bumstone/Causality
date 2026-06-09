@@ -206,22 +206,27 @@ Pulled from [docs/adr/README.md](docs/adr/README.md).
 | [0002](docs/adr/0002-three-layer-control-stack.md) | Three-layer control stack | **Accepted / Partial** |
 | [0003](docs/adr/0003-contract-harness.md) | Contract Harness | **Accepted / Implemented** |
 | [0004](docs/adr/0004-agent-harness-task-routing.md) | Agent Harness task routing | **Accepted / Implemented** |
-| [0005](docs/adr/0005-identity-memory-skill-substrate.md) | Identity / memory / skill substrate | **Accepted / Partial** |
-| [0006](docs/adr/0006-final-blended-architecture.md) | Final blended (5-layer) architecture | **Accepted / Partial** |
+| [0005](docs/adr/0005-identity-memory-skill-substrate.md) | Identity / memory / skill substrate | **Accepted / Implemented** |
+| [0006](docs/adr/0006-final-blended-architecture.md) | Final blended (5-layer) architecture | **Accepted / Implemented** |
 | [0007](docs/adr/0007-context-economy-progressive-disclosure.md) | Context Economy / progressive disclosure | **Accepted / Partial** |
 | [0008](docs/adr/0008-repository-hygiene-shared-vs-ignored.md) | Repository hygiene: shared vs ignored | **Accepted / Implemented** |
 
-Implemented today: the `non_goals` field and frozen `TaskContract`; the
-enforcing gates (`check_tool_allowed` / `check_non_goal` / `should_stop`);
-`ContractHarness.bind` returning a `BoundContract`; the bounded loop driver
-(`run_bounded_loop`); typed memory with governance (`TypedMemory`); the Agent
-Harness dispatcher (`AgentHarness`); the Reflect distiller
-(`reflect_on_contract`); three-layer workflow metadata (`WorkflowTemplate.layer`);
-the on-demand file layout (`workflow/` `checklists/` `skills/` `memory/<6 types>/`)
-with the Context Economy operating rule; and the share-vs-ignore hygiene rules.
-Not yet implemented: full Review automation, the earned-skill distiller /
-reproducibility / promotion (back half of the evolution loop), Agenda
-persistence, and the end-to-end dispatcher → harness → loop runtime.
+The self-improvement loop is now closed end to end. Implemented: the `non_goals`
+field and frozen `TaskContract`; the enforcing gates (`check_tool_allowed` /
+`check_non_goal` / `should_stop`); `ContractHarness.bind` returning a
+`BoundContract`; the bounded loop driver (`run_bounded_loop`); automated Review
+(`run_review`); typed memory with governance (`TypedMemory`); the Reflect
+distiller (`reflect_on_contract`); the earned-skill store with n-of-m
+reproducibility, dedup, and HITL promotion (`SkillStore`); the persisted
+`Agenda`; the Agent Harness dispatcher (`AgentHarness`); three-layer workflow
+metadata (`WorkflowTemplate.layer`); the on-demand file layout (`workflow/`
+`checklists/` `skills/` `memory/<6 types>/`) with the Context Economy rule; the
+share-vs-ignore hygiene rules; and the **`CausalityEngine`** that wires
+Agenda → Dispatch → Harness → Loop → Review → Reflect → Skill into one
+`run_task` / `run_next`. Remaining (optional): a standard tool-execution adapter
+for the `work` callback, automatic reuse of earned skills at dispatch, a
+guardrail-TTL expiry sweep, and multi-agent collaboration (intentionally out of
+scope, ADR 0005).
 
 ---
 
