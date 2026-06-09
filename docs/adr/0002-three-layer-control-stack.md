@@ -8,12 +8,12 @@
 
 현재 "역할"은 두 곳에 산재한다.
 
-- 워크플로 6종 (`src/ouroboros_hitl/workflows.py:27-76`)
-- 슬래시 커맨드 5종 (`src/ouroboros_hitl/agent_bootstrap.py:108-165`)
+- 워크플로 6종 (`src/causality/workflows.py:27-76`)
+- 슬래시 커맨드 5종 (`src/causality/agent_bootstrap.py:108-165`)
 
 이들은 사용자 의도 라우팅(`agent-rules.md`의 Automatic Routing,
 `agent_bootstrap.py:17-26`)에는 유용하지만, **실제 실행 제어(execution control)
-관점에서는 책임이 겹치고 경계가 모호**하다. 예를 들어 `/ouroboros-verify`는
+관점에서는 책임이 겹치고 경계가 모호**하다. 예를 들어 `/causality-verify`는
 검증 계획 수립과 검증 실행을 모두 포함하고, `writing-plans`는 단계 설계와 검증 기준
 작성을 함께 다룬다.
 
@@ -45,9 +45,9 @@
 
 | 계층 | 책임 | 흡수되는 기존 역할/워크플로 | 경계 게이트 |
 |---|---|---|---|
-| **Stage Designer** | 이번 작업의 **단계 구조 설계** + 계약 envelope | `session-bootstrap`, `writing-plans`(분해), `subagent-driven-development`, **Task Contract 생성(ADR 0001)**, `/ouroboros-plan`(구조화 부분) | → `evaluate_plan` |
-| **Planner** | 각 단계의 **실행 계획 + 검증 기준** 작성 | `writing-plans`(acceptance/verification), `test-driven-development`(RED·기준), `root-cause-protocol`, `/ouroboros-root-cause` | → `evaluate_plan` |
-| **Executor** | **코드 수정 · 테스트 · 커밋 · 문서화** + 검증·완료 | `verification-before-completion`, `test-driven-development`(GREEN/REFACTOR), `/ouroboros-verify`, `/ouroboros-a11y-observe`, `/ouroboros-complete` | `can_execute_action`, `complete` |
+| **Stage Designer** | 이번 작업의 **단계 구조 설계** + 계약 envelope | `session-bootstrap`, `writing-plans`(분해), `subagent-driven-development`, **Task Contract 생성(ADR 0001)**, `/causality-plan`(구조화 부분) | → `evaluate_plan` |
+| **Planner** | 각 단계의 **실행 계획 + 검증 기준** 작성 | `writing-plans`(acceptance/verification), `test-driven-development`(RED·기준), `root-cause-protocol`, `/causality-root-cause` | → `evaluate_plan` |
+| **Executor** | **코드 수정 · 테스트 · 커밋 · 문서화** + 검증·완료 | `verification-before-completion`, `test-driven-development`(GREEN/REFACTOR), `/causality-verify`, `/causality-a11y-observe`, `/causality-complete` | `can_execute_action`, `complete` |
 
 기존 HITL 게이트 3종(`gates.py`: `evaluate_plan` / `can_execute_action` /
 `complete`)이 **계층 경계와 자연스럽게 1:1로 정렬**된다. 즉 "역할 8개"가 아니라
@@ -103,18 +103,18 @@
 
 - `workflows.py`의 워크플로 메타데이터와 `agent_bootstrap.py`의 라우팅/커맨드
   템플릿을 3계층 기준으로 재배치해야 한다.
-- 문서(`agent_automation.md`, `ouroboros_integration.md`)의 역할 서술을 갱신해야 한다.
+- 문서(`agent_automation.md`, `causality_integration.md`)의 역할 서술을 갱신해야 한다.
 
 **중립:**
 
-- 슬래시 커맨드 이름(`/ouroboros-*`)은 유지 → 사용자 UX 하위 호환.
+- 슬래시 커맨드 이름(`/causality-*`)은 유지 → 사용자 UX 하위 호환.
 - 런타임 게이트 시그니처 변경 없음.
 
 ## 5. 구현 스케치 (참고용, 미반영)
 
 ```text
-workflows.py     : OUROBOROS_WORKFLOWS에 layer 메타 부여(stage_designer|planner|executor)
+workflows.py     : CAUSALITY_WORKFLOWS에 layer 메타 부여(stage_designer|planner|executor)
 agent_bootstrap.py: agent-rules.md 라우팅을 3계층 기준으로 재서술, 커맨드 이름 유지
-ouroboros_integration.md: 3계층 + 게이트 경계 다이어그램 반영
+causality_integration.md: 3계층 + 게이트 경계 다이어그램 반영
 (선택) eval 하니스: ledger를 읽어 success/latency/cost 집계하는 스크립트
 ```

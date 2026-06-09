@@ -12,7 +12,7 @@
 - 루프/아젠다(ADR 0005 §2.3, 0006 §6.1)는 개발 진행용 `state.json` 같은 파일을
   가질 수 있다.
 
-기존 `.gitignore`에 이미 **`.ouroboros/`** 가 들어 있다 — 즉 *설치된 자동화 파일과
+기존 `.gitignore`에 이미 **`.causality/`** 가 들어 있다 — 즉 *설치된 자동화 파일과
 런타임 ledger는 공유하지 않는다* 는 선례가 이미 있다. 본 ADR은 그 선례를 일반 규칙으로
 승격한다.
 
@@ -26,7 +26,7 @@
 | 분류 | 예시 | 처리 |
 |---|---|---|
 | **공유 설계/소스** | `src/`, `tests/`, `docs/adr/`, `README*`, `examples/`, 부트스트랩 *템플릿/구조 코드*, 구조 인덱스 `memory/<type>/README.md`, CI 설정 | **commit** |
-| **런타임/개발 state** | `.ouroboros/`(ledger·설치물), 머신 생성 메모리 로그 `memory/**/*.jsonl`, `state.json`/`*.state.json`, 캐시·빌드 | **ignore** |
+| **런타임/개발 state** | `.causality/`(ledger·설치물), 머신 생성 메모리 로그 `memory/**/*.jsonl`, `state.json`/`*.state.json`, 캐시·빌드 | **ignore** |
 | **경계(큐레이션 공유물)** | 사람이 작성해 공유하려는 `memory/**/*.md` (확정된 설계 결정 노트 등) | **commit (기본 추적)** |
 
 규칙을 `.gitignore`로 표현:
@@ -71,5 +71,5 @@ memory/**/*.jsonl   # 머신 로그만 무시
 **부정/비용:** 기여자가 "이건 공유물인가 런타임인가"를 의식해야 함(본 ADR이 기준 제공).
 `memory/**/*.jsonl` glob은 git의 `**` 지원에 의존(현행 git 충족).
 
-**중립:** 기존 `.ouroboros/` 무시와 일관. 타깃 프로젝트의 `.gitignore`는 부트스트랩이
+**중립:** 기존 `.causality/` 무시와 일관. 타깃 프로젝트의 `.gitignore`는 부트스트랩이
 별도로 다룰 수 있다(후속).

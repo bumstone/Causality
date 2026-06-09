@@ -8,7 +8,7 @@
 
 이 킷은 세 상류 아키텍처(Ouroboros / Superpowers / gstack)를 결합한다
 (`README.md:4-8`). 이들을 **한 번에 섞어 직접 충돌**시키면(예: 모든 작업에 gstack
-23 스페셜리스트 + Superpowers TDD + Ouroboros 루프를 동시에 적용) 비용·지연이
+23 스페셜리스트 + Superpowers TDD + Causality 루프를 동시에 적용) 비용·지연이
 폭증하고 책임이 모호해진다.
 
 또한 라우터가 이미 여럿이다: `agent-rules.md`의 intent 라우팅
@@ -27,7 +27,7 @@ if task == product/feature planning:
 elif task == implementation:
     use Superpowers TDD + debugging
 elif task == long-running autonomous work:
-    use Contract Harness + limited Ouroboros loop
+    use Contract Harness + limited Causality loop
 elif task == release:
     use gstack ship + QA checklist
 else:
@@ -41,7 +41,7 @@ retro`)에 비춰 매핑은 일관적이다:
 |---|---|---|---|
 | product/feature planning | office-hours + ceo-review | gstack | Stage Designer 중심 |
 | implementation | TDD + debugging | Superpowers | Planner + Executor 중심 |
-| long-running autonomous | Contract Harness + limited Ouroboros loop | Ouroboros | 3계층 풀 루프(bounded) |
+| long-running autonomous | Contract Harness + limited Causality loop | Causality | 3계층 풀 루프(bounded) |
 | release | ship + QA checklist | gstack | Executor 중심 + 완료 게이트 |
 
 ### 2.1 라우터 중복 제거

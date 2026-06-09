@@ -32,7 +32,7 @@ class WorkflowTemplate:
         }
 
 
-OUROBOROS_WORKFLOWS: dict[str, WorkflowTemplate] = {
+CAUSALITY_WORKFLOWS: dict[str, WorkflowTemplate] = {
     "writing-plans": WorkflowTemplate(
         name="writing-plans",
         purpose="Create path-specific plans with acceptance criteria and verification commands.",
@@ -92,9 +92,9 @@ OUROBOROS_WORKFLOWS: dict[str, WorkflowTemplate] = {
 
 def workflow_manifest() -> dict[str, Any]:
     return {
-        "package": "ouroboros-workflows",
+        "package": "causality-workflows",
         "version": "0.1.0",
-        "workflows": [template.to_dict() for template in OUROBOROS_WORKFLOWS.values()],
+        "workflows": [template.to_dict() for template in CAUSALITY_WORKFLOWS.values()],
     }
 
 

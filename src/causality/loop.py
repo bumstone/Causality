@@ -1,9 +1,9 @@
-"""Bounded Ouroboros loop driver (ADR 0006 §6.1, step 1).
+"""Bounded Causality loop driver (ADR 0006 §6.1, step 1).
 
 The orchestrator facade exposes primitives but does not run a loop. This driver
 binds the Run -> Review -> Fix cycle to the contract's stop condition via
 ``HITLGate.should_stop`` -- the consumer ``stopping_policy`` previously lacked --
-so a "limited Ouroboros loop" is bounded by ``max_iterations`` /
+so a "limited Causality loop" is bounded by ``max_iterations`` /
 ``no_progress_iterations`` / ``max_failed_hypotheses`` instead of running
 unbounded.
 
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
 from .contracts import GateDecision, GoalContract
-from .orchestrator import OuroborosHITL
+from .orchestrator import Causality
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ def _normalize(value: Union[StepOutcome, bool, None]) -> StepOutcome:
 
 
 def run_bounded_loop(
-    runtime: OuroborosHITL,
+    runtime: Causality,
     contract: GoalContract,
     step: Step,
 ) -> LoopResult:

@@ -1,4 +1,4 @@
-# Ouroboros Integration Structure
+# Causality Integration Structure
 
 ## Runtime modules
 
@@ -6,7 +6,7 @@
 - `EvidenceLedger`: append-only JSONL with hash chaining and artifact hashing.
 - `HITLGate`: blocks high-risk plans, irreversible actions, missing evidence, verifier conflicts, and final approval gaps.
 - `A11yBrowserAdapter`: exposes `observe`, `act`, `assert_state`, `inspect`, and `visual`.
-- `WorkflowTemplate`: Ouroboros workflow contracts for planning, subagents, verification, TDD, root-cause checks, and bootstrap context.
+- `WorkflowTemplate`: Causality workflow contracts for planning, subagents, verification, TDD, root-cause checks, and bootstrap context.
 
 ## State transition policy
 

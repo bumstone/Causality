@@ -7,21 +7,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl.contracts import (
+from causality.contracts import (
     EvidenceKind,
     EvidenceRequirement,
     GateDecision,
     GoalContract,
     VerifierDecision,
 )
-from ouroboros_hitl.memory import TypedMemory
-from ouroboros_hitl.orchestrator import OuroborosHITL
-from ouroboros_hitl.reflect import Reflection, reflect_on_contract
+from causality.memory import TypedMemory
+from causality.orchestrator import Causality
+from causality.reflect import Reflection, reflect_on_contract
 
 
 class ReflectTests(unittest.TestCase):
     def _setup(self, temp_dir: str):
-        runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+        runtime = Causality(Path(temp_dir) / "ledger.jsonl")
         memory = TypedMemory(Path(temp_dir))
         contract = runtime.create_contract(
             GoalContract(

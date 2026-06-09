@@ -7,13 +7,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl import ContractHarness, ContractHarnessError, OuroborosHITL
-from ouroboros_hitl.contracts import AuditEventType, GateDecision
+from causality import ContractHarness, ContractHarnessError, Causality
+from causality.contracts import AuditEventType, GateDecision
 
 
 class ContractHarnessTests(unittest.TestCase):
-    def _harness(self, temp_dir: str) -> tuple[OuroborosHITL, ContractHarness]:
-        runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+    def _harness(self, temp_dir: str) -> tuple[Causality, ContractHarness]:
+        runtime = Causality(Path(temp_dir) / "ledger.jsonl")
         return runtime, ContractHarness(runtime)
 
     def test_bind_produces_task_contract_and_records_once(self) -> None:

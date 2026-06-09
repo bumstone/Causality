@@ -30,7 +30,7 @@ class TaskType(str, Enum):
 _ROUTING: dict[TaskType, tuple[str, tuple[str, ...]]] = {
     TaskType.PLANNING: ("gstack", ("office-hours", "ceo-review")),
     TaskType.IMPLEMENTATION: ("superpowers", ("tdd", "debugging")),
-    TaskType.LONG_RUNNING: ("ouroboros", ("contract-harness", "limited-ouroboros-loop")),
+    TaskType.LONG_RUNNING: ("causality", ("contract-harness", "limited-causality-loop")),
     TaskType.RELEASE: ("gstack", ("ship", "qa-checklist")),
     TaskType.TRIVIAL: ("", ()),
 }
@@ -39,7 +39,7 @@ _ROUTING: dict[TaskType, tuple[str, tuple[str, ...]]] = {
 # Deterministic, case-insensitive keyword heuristic for classify(). Order of
 # precedence matches the ADR's if/elif chain: long-running is checked before
 # implementation/release so that an "autonomous overnight refactor" routes to the
-# bounded Ouroboros loop rather than to plain implementation.
+# bounded Causality loop rather than to plain implementation.
 CLASSIFY_KEYWORDS: dict[TaskType, tuple[str, ...]] = {
     TaskType.LONG_RUNNING: (
         "long-running",
@@ -72,7 +72,7 @@ _CLASSIFY_ORDER: tuple[TaskType, ...] = (
 @dataclass(frozen=True)
 class Dispatch:
     task_type: TaskType
-    architecture: str  # "gstack" | "superpowers" | "ouroboros" | "" for trivial
+    architecture: str  # "gstack" | "superpowers" | "causality" | "" for trivial
     playbook: tuple[str, ...]  # the chosen bundle, e.g. ("office-hours", "ceo-review")
 
     def to_dict(self) -> dict[str, object]:

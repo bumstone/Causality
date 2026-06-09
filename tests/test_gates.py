@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl.contracts import (
+from causality.contracts import (
     EvidenceKind,
     EvidenceRequirement,
     GateDecision,
@@ -16,13 +16,13 @@ from ouroboros_hitl.contracts import (
     Risk,
     VerifierDecision,
 )
-from ouroboros_hitl.orchestrator import OuroborosHITL
+from causality.orchestrator import Causality
 
 
 class GateTests(unittest.TestCase):
     def test_low_risk_completion_requires_evidence_and_two_verifiers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
             contract = runtime.create_contract(
                 GoalContract(
                     title="Smoke test",
@@ -45,7 +45,7 @@ class GateTests(unittest.TestCase):
 
     def test_high_risk_plan_and_final_require_human_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
             contract = runtime.create_contract(
                 GoalContract(
                     title="Deploy",
@@ -71,7 +71,7 @@ class GateTests(unittest.TestCase):
 
     def test_irreversible_action_requires_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
             contract = runtime.create_contract(GoalContract("Delete data", "Dangerous", Risk.LOW))
 
             self.assertEqual(runtime.can_execute_action(contract, "delete").decision, GateDecision.ESCALATE)
@@ -80,7 +80,7 @@ class GateTests(unittest.TestCase):
 
     def test_check_tool_allowed_enforces_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
             contract = runtime.create_contract(
                 GoalContract(
                     "Scoped",
@@ -95,14 +95,14 @@ class GateTests(unittest.TestCase):
 
     def test_check_tool_allowed_passes_when_unrestricted(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
             contract = runtime.create_contract(GoalContract("Open", "no tool limits"))
 
             self.assertEqual(runtime.check_tool_allowed(contract, "anything").decision, GateDecision.PASS)
 
     def test_check_non_goal_stops_on_match(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
             contract = runtime.create_contract(
                 GoalContract("Slice", "thin", non_goals=("touch CI config",))
             )
@@ -118,7 +118,7 @@ class GateTests(unittest.TestCase):
 
     def test_should_stop_reads_stopping_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = OuroborosHITL(Path(temp_dir) / "ledger.jsonl")
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
             contract = runtime.create_contract(
                 GoalContract(
                     "Loop",

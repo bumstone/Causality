@@ -5,14 +5,14 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-.ouroboros/
+.causality/
 .gstack/
 node_modules/
 
 # Runtime / per-run development state — NOT shared (see docs/adr/0008).
 # Rule: machine-written runtime artifacts stay local; source, design, and
 # curated *.md memory notes stay tracked. The ledger and installed automation
-# already live under .ouroboros/ (above).
+# already live under .causality/ (above).
 state.json
 *.state.json
 # Machine-written typed-memory logs (decisions/assumptions/failures/...).

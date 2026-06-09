@@ -29,7 +29,7 @@ Agent Harness, 정체성·기억·스킬 기반층)은 **그대로 쌓으면 라
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ L1  DISPATCH — Agent Harness   (작업 유형 라우터)                    [신규]  │
 │   planning→gstack office-hours+ceo-review · impl→Superpowers TDD+debug       │
-│   long-run→Contract Harness+limited Ouroboros · release→gstack ship+QA       │
+│   long-run→Contract Harness+limited Causality · release→gstack ship+QA       │
 └──────────────────────────────────────────────────────────────────────────┘
       │ 선택된 플레이북 1개 + identity set
       ▼
@@ -44,7 +44,7 @@ Agent Harness, 정체성·기억·스킬 기반층)은 **그대로 쌓으면 라
 │ L3  EXECUTION CONTROL   (3계층 + 경계 게이트)                    [ADR 0002] │
 │   Stage Designer ─[evaluate_plan]→ Planner ─[evaluate_plan]→ Executor        │
 │                   ─[can_execute_action / complete]→                         │
-│        ▲__________ REPAIR (limited Ouroboros loop · Stop로 bounded) _________│
+│        ▲__________ REPAIR (limited Causality loop · Stop로 bounded) _________│
 └──────────────────────────────────────────────────────────────────────────┘
       │ 모든 이벤트
       ▼
@@ -71,7 +71,7 @@ L4(ledger) → **증류** → L0(typed memory + rewarded trajectory). 그 결과
 | # | 충돌 | 해소 |
 |---|---|---|
 | C1 | 라우터 3중(agent-rules intent / Agent Harness / Stage Designer) | L1=**무엇을** 실행할지, L3 Stage Designer=**어떻게 단계화**할지로 고도 분리. agent-rules intent 라우팅은 L1로 흡수(ADR 0004) |
-| C2 | 정지 조건 다원화(Contract Harness / TaskContract.stop / stopping_policy / "limited loop" / Magentic 정체) | **단일 출처** = `stopping_policy`(`contracts.py:142`). ⚠️ **미구현**: `should_stop` 게이트·소비자 없음, 현재 아무도 안 읽음. "limited Ouroboros loop"는 `max_iterations`/`no_progress_iterations`로 **정의 확정 필요**(§6.1) |
+| C2 | 정지 조건 다원화(Contract Harness / TaskContract.stop / stopping_policy / "limited loop" / Magentic 정체) | **단일 출처** = `stopping_policy`(`contracts.py:142`). ⚠️ **미구현**: `should_stop` 게이트·소비자 없음, 현재 아무도 안 읽음. "limited Causality loop"는 `max_iterations`/`no_progress_iterations`로 **정의 확정 필요**(§6.1) |
 | C3 | 기억 vs ledger | L4 ledger=raw 원천, L0 typed memory=증류 파생. ⚠️ **미구현**: `build_session_bootstrap`(`workflows.py:118`)은 *입력 리스트 필터*일 뿐 ledger→memory 증류기는 신규(ADR 0005 §2.2) |
 | C4 | 스킬 폭증(gstack 23 + Superpowers + workflows + earned) | **2계층화**: authored(고정) vs earned(승급 필요). L1이 작업당 1개 번들만 호출(ADR 0004) |
 | C5 | 정체성 vs 권한 모델 | Agent Identity는 신규 모델이 아니라 역할별 `PermissionContract` 스코핑(ADR 0005) |
@@ -136,7 +136,7 @@ L4(ledger) → **증류** → L0(typed memory + rewarded trajectory). 그 결과
 
 1. **Run→Fix 닫기:** `should_stop`(`stopping_policy` 소비) + REPAIR 소비 루프 런타임.
    ✅ **구현됨**: `loop.py`의 `run_bounded_loop`가 `should_stop`로 정지하고 `complete`의
-   REPAIR를 받아 다시 돈다. "limited Ouroboros loop" = `max_iterations` /
+   REPAIR를 받아 다시 돈다. "limited Causality loop" = `max_iterations` /
    `no_progress_iterations` / `max_failed_hypotheses` 소비.
 2. **Review 자동화:** verifier 호출자(2개 독립 verifier) 표준화.
 3. **Reflect:** ledger에서 trajectory/실패 캡처 → `retrospectives/`·`failures/`.

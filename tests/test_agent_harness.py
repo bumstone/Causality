@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl.agent_harness import AgentHarness, Dispatch, TaskType
+from causality.agent_harness import AgentHarness, Dispatch, TaskType
 
 
 class RouteTests(unittest.TestCase):
@@ -24,10 +24,10 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(dispatch.architecture, "superpowers")
         self.assertEqual(dispatch.playbook, ("tdd", "debugging"))
 
-    def test_long_running_routes_to_ouroboros_bundle(self) -> None:
+    def test_long_running_routes_to_causality_bundle(self) -> None:
         dispatch = self.harness.route(TaskType.LONG_RUNNING)
-        self.assertEqual(dispatch.architecture, "ouroboros")
-        self.assertEqual(dispatch.playbook, ("contract-harness", "limited-ouroboros-loop"))
+        self.assertEqual(dispatch.architecture, "causality")
+        self.assertEqual(dispatch.playbook, ("contract-harness", "limited-causality-loop"))
 
     def test_release_routes_to_gstack_bundle(self) -> None:
         dispatch = self.harness.route(TaskType.RELEASE)

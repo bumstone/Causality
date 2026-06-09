@@ -1,6 +1,6 @@
 # 아키텍처 결정 기록 (ADR)
 
-이 디렉터리는 Ouroboros HITL의 설계 결정을 기록합니다. 각 ADR은
+이 디렉터리는 Causality의 설계 결정을 기록합니다. 각 ADR은
 동기(Context) · 결정(Decision) · 대안(Alternatives) · 영향(Consequences)
 순으로 작성하며, 결정의 근거가 되는 기존 코드 위치를 `file:line`으로 인용합니다.
 

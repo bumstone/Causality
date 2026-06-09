@@ -6,9 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl.workflows import (
+from causality.workflows import (
     CONTROL_LAYERS,
-    OUROBOROS_WORKFLOWS,
+    CAUSALITY_WORKFLOWS,
     build_session_bootstrap,
     build_subagent_packet,
     workflow_manifest,
@@ -31,11 +31,11 @@ class WorkflowTests(unittest.TestCase):
 
     def test_every_workflow_has_a_valid_control_layer(self) -> None:
         # ADR 0002: each workflow maps to one of the three control layers.
-        for name, template in OUROBOROS_WORKFLOWS.items():
+        for name, template in CAUSALITY_WORKFLOWS.items():
             self.assertIn(template.layer, CONTROL_LAYERS, f"{name} has invalid layer {template.layer!r}")
 
         by_layer = {layer: 0 for layer in CONTROL_LAYERS}
-        for template in OUROBOROS_WORKFLOWS.values():
+        for template in CAUSALITY_WORKFLOWS.values():
             by_layer[template.layer] += 1
         # every layer is represented
         for layer, count in by_layer.items():

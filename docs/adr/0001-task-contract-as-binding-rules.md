@@ -11,9 +11,9 @@
 Stop condition / Verification / Escalation)을 계약서처럼 명시하는 것이다.
 
 그러나 현재 구조에서 `GoalContract`는 **이미 루프의 원자적 뿌리(atomic root)**다.
-`OuroborosHITL.create_contract`가 곧 첫 ledger 이벤트이고
-(`src/ouroboros_hitl/orchestrator.py:24-30`), 이후 모든 상태 전이는 이 계약을
-중심으로 일어난다 (`src/ouroboros_hitl/contracts.py:21-27`).
+`Causality.create_contract`가 곧 첫 ledger 이벤트이고
+(`src/causality/orchestrator.py:24-30`), 이후 모든 상태 전이는 이 계약을
+중심으로 일어난다 (`src/causality/contracts.py:21-27`).
 
 > 참고: 코드베이스 전체에 "Geas"라는 토큰은 존재하지 않는다(grep 0건).
 > "Geas"는 *구속력 있는 목표 의무*를 가리키는 개념 어휘이며, 이 프로젝트에서
@@ -96,7 +96,7 @@ class TaskContract:
 | `check_non_goal(contract, action_desc)` | Non-goals | `STOP` |
 | `should_stop(contract, iteration_state)` | Stop condition (`max_iterations` 등) | `STOP` |
 
-이로써 `.ouroboros/agent-rules.md`의 "Required Loop" 규칙
+이로써 `.causality/agent-rules.md`의 "Required Loop" 규칙
 (`agent_bootstrap.py:31-38`)이 산문 권고에서 **집행 가능한 계약**으로 승격된다.
 
 > **에스컬레이션 일원화(리뷰 C-ESC-1):** 현재 `ESCALATE`는 `gates.py:41,57,91`에서
@@ -155,5 +155,5 @@ contracts.py   : GoalContract += non_goals; TaskContract(frozen) 신규; to_dict
 gates.py       : check_tool_allowed / check_non_goal / should_stop 추가 (+ GATE_DECISION 기록)
 orchestrator.py: can_execute_action 경로에서 check_tool_allowed/check_non_goal 연동 (선택)
 tests/         : test_contracts.py(non_goals 왕복), test_gates.py(집행/위반 경로)
-docs/          : ouroboros_integration.md에 Task Contract 조항 표 반영
+docs/          : causality_integration.md에 Task Contract 조항 표 반영
 ```

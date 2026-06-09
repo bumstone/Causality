@@ -24,7 +24,7 @@ Before every agent run:
 2. Define non-goals             → TaskContract.non_goals      (+ 실패 사례 guardrail 주입)
 3. Define allowed files/tools   → TaskContract.allowed_tools  (+ identity write_scope)
 4. Define verification command  → TaskContract.verification
-5. Define stop condition        → TaskContract.stop_condition (limited Ouroboros loop)
+5. Define stop condition        → TaskContract.stop_condition (limited Causality loop)
 ```
 
 핵심 규칙:

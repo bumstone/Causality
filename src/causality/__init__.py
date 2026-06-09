@@ -1,4 +1,4 @@
-"""Ouroboros HITL integration primitives."""
+"""Causality integration primitives."""
 
 from .contracts import (
     ActionType,
@@ -15,7 +15,7 @@ from .contracts import (
 )
 from .gates import GateResult, HITLGate
 from .ledger import EvidenceLedger
-from .orchestrator import OuroborosHITL
+from .orchestrator import Causality
 from .contract_harness import BoundContract, ContractHarness, ContractHarnessError
 from .loop import LoopResult, StepOutcome, run_bounded_loop
 from .memory import MEMORY_TYPES, MemoryEntry, MemoryGovernanceError, TypedMemory
@@ -43,7 +43,7 @@ __all__ = [
     "MEMORY_TYPES",
     "MemoryEntry",
     "MemoryGovernanceError",
-    "OuroborosHITL",
+    "Causality",
     "PermissionContract",
     "Reflection",
     "Risk",

@@ -1,7 +1,7 @@
 {
-  "name": "ouroboros-workflows",
+  "name": "causality-workflows",
   "version": "0.1.0",
-  "runtime": "ouroboros-hitl",
+  "runtime": "causality",
   "risk_model": ["low", "medium", "high", "irreversible"],
   "permissions": {
     "required_fields": ["allowed_tools", "write_scope", "network_scope", "auth_scope"],

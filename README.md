@@ -1,9 +1,9 @@
 **English** | [한국어](README.ko.md)
 
-# Ouroboros HITL
+# Causality
 
-Ouroboros HITL is a local-first, dependency-light agent workflow kit for Claude,
-Codex, and Ouroboros-style projects. It blends three lineages into one
+Causality is a local-first, dependency-light agent workflow kit for Claude,
+Codex, and agent-driven projects. It blends three lineages into one
 human-in-the-loop control surface:
 
 - **Ouroboros** — goal contracts, an append-only evidence ledger, state
@@ -82,7 +82,7 @@ flowchart TD
     T["Task arrives"] --> R{"Task type?"}
     R -->|planning| P1["gstack office-hours + ceo-review"]
     R -->|implementation| P2["Superpowers TDD + debug"]
-    R -->|long-running| P3["Contract Harness + limited Ouroboros loop"]
+    R -->|long-running| P3["Contract Harness + limited Causality loop"]
     R -->|release| P4["gstack ship + QA"]
 
     P1 --> BIND["Contract Harness binds Task Contract"]
@@ -231,7 +231,7 @@ Install the package, then run the installer once in a target project:
 
 ```bash
 pip install -e .
-ouroboros-hitl install-agent
+causality install-agent
 ```
 
 It writes:
@@ -239,16 +239,16 @@ It writes:
 ```text
 AGENTS.md                                  # Codex execution entry point
 CLAUDE.md                                  # Claude instructions
-.codex/ouroboros-routing.md                # Codex routing context
-.claude/commands/ouroboros-plan.md
-.claude/commands/ouroboros-verify.md
-.claude/commands/ouroboros-root-cause.md
-.claude/commands/ouroboros-a11y-observe.md
-.claude/commands/ouroboros-complete.md
-.ouroboros/agent-rules.md                  # thin rules + routing
-.ouroboros/ouroboros-workflows.json        # workflow manifest
-.ouroboros/mcp.json                        # MCP server config
-.ouroboros/ledger.jsonl                    # append-only evidence ledger
+.codex/causality-routing.md                # Codex routing context
+.claude/commands/causality-plan.md
+.claude/commands/causality-verify.md
+.claude/commands/causality-root-cause.md
+.claude/commands/causality-a11y-observe.md
+.claude/commands/causality-complete.md
+.causality/agent-rules.md                  # thin rules + routing
+.causality/causality-workflows.json        # workflow manifest
+.causality/mcp.json                        # MCP server config
+.causality/ledger.jsonl                    # append-only evidence ledger
 workflow/README.md + workflow/<type>.md    # generated views of workflows.py
 checklists/README.md + verification-before-completion.md
 skills/README.md                           # authored + earned skills
@@ -264,10 +264,10 @@ replace existing project instructions.
 ## CLI usage
 
 ```bash
-ouroboros-hitl init            # create a ledger and workflow manifest
-ouroboros-hitl manifest        # print the workflow manifest (add --pretty)
-ouroboros-hitl context         # print ledger tail + workflow names (--pretty, --limit N)
-ouroboros-hitl install-agent   # install project-level agent automation (--project, --force)
+causality init            # create a ledger and workflow manifest
+causality manifest        # print the workflow manifest (add --pretty)
+causality context         # print ledger tail + workflow names (--pretty, --limit N)
+causality install-agent   # install project-level agent automation (--project, --force)
 ```
 
 ### Claude and Codex usage
@@ -275,21 +275,21 @@ ouroboros-hitl install-agent   # install project-level agent automation (--proje
 Claude can use the installed project slash commands:
 
 ```text
-/ouroboros-plan
-/ouroboros-verify
-/ouroboros-root-cause
-/ouroboros-a11y-observe
-/ouroboros-complete
+/causality-plan
+/causality-verify
+/causality-root-cause
+/causality-a11y-observe
+/causality-complete
 ```
 
-Codex uses `AGENTS.md`, `.codex/ouroboros-routing.md`, and
-`.ouroboros/agent-rules.md` as automatic routing context:
+Codex uses `AGENTS.md`, `.codex/causality-routing.md`, and
+`.causality/agent-rules.md` as automatic routing context:
 
-- planning / spec request -> `ouroboros-plan`
-- implementation or verification request -> `ouroboros-verify`
-- bug / regression request -> `ouroboros-root-cause`
-- browser / UI flow request -> `ouroboros-a11y-observe`
-- "done" / "ship" / final handoff -> `ouroboros-complete`
+- planning / spec request -> `causality-plan`
+- implementation or verification request -> `causality-verify`
+- bug / regression request -> `causality-root-cause`
+- browser / UI flow request -> `causality-a11y-observe`
+- "done" / "ship" / final handoff -> `causality-complete`
 
 ---
 
@@ -298,15 +298,15 @@ Codex uses `AGENTS.md`, `.codex/ouroboros-routing.md`, and
 For clients that support project MCP configuration, register the stdio server:
 
 ```bash
-python -m ouroboros_hitl.mcp_server --project .
+python -m causality.mcp_server --project .
 ```
 
-The generated `.ouroboros/mcp.json` contains the same command. Exposed tools:
+The generated `.causality/mcp.json` contains the same command. Exposed tools:
 
-- `ouroboros_init` — install project-level agent automation files
-- `ouroboros_context` — return ledger tail and workflow names
-- `ouroboros_append_evidence` — append evidence to `.ouroboros/ledger.jsonl`
-- `ouroboros_workflows` — return the workflow manifest
+- `causality_init` — install project-level agent automation files
+- `causality_context` — return ledger tail and workflow names
+- `causality_append_evidence` — append evidence to `.causality/ledger.jsonl`
+- `causality_workflows` — return the workflow manifest
 
 ---
 
@@ -316,7 +316,7 @@ The browser adapter is driver-agnostic. Point it at any CLI that supports
 snapshot/action-style commands via an environment variable:
 
 ```bash
-export OUROBOROS_BROWSER_BIN="/path/to/browser-driver"
+export CAUSALITY_BROWSER_BIN="/path/to/browser-driver"
 ```
 
 Page text and snapshots are treated as **untrusted external content** and must
@@ -355,7 +355,7 @@ PYTHONPATH=src python -m unittest discover -s tests
 Inspect the current project context:
 
 ```bash
-ouroboros-hitl context --pretty
+causality context --pretty
 ```
 
 **CI:** GitHub Actions runs a matrix of Python **3.11 / 3.12 / 3.13** — it
@@ -371,14 +371,14 @@ GoalContract -> Plan -> HITL plan gate -> Execute (action gate) -> EvidenceLedge
              -> Verifier pool -> Completion gate -> Repair / Escalate / Stop / Complete
 ```
 
-Main modules (under `src/ouroboros_hitl/`):
+Main modules (under `src/causality/`):
 
 - `contracts.py` — `GoalContract`, `TaskContract`, risk classes, permissions,
   evidence requirements, `non_goals`, and the gate-decision / event enums.
 - `contract_harness.py` — `ContractHarness.bind`, the pre-run binding ritual.
 - `gates.py` — `HITLGate`: `evaluate_plan` / `can_execute_action` / `complete`
   plus the enforcing `check_tool_allowed` / `check_non_goal` / `should_stop`.
-- `orchestrator.py` — `OuroborosHITL` facade over the ledger and gates.
+- `orchestrator.py` — `Causality` facade over the ledger and gates.
 - `ledger.py` — append-only JSONL ledger with hash chaining and artifact hashing.
 - `workflows.py` — workflow templates and the manifest (single source).
 - `browser_adapter.py` — generic A11y snapshot / ref-action / diff adapter.
@@ -405,7 +405,7 @@ the operating rule.
 docs/
   agent_automation.md
   installation.md
-  ouroboros_integration.md
+  causality_integration.md
   adr/
     README.md
     0001-task-contract-as-binding-rules.md
@@ -418,8 +418,8 @@ docs/
 examples/
   goal_contract.json
 plugins/
-  ouroboros-workflows/manifest.json
-src/ouroboros_hitl/
+  causality-workflows/manifest.json
+src/causality/
   agent_bootstrap.py
   browser_adapter.py
   cli.py

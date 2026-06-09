@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ouroboros_hitl.agent_bootstrap import install_agent_files
+from causality.agent_bootstrap import install_agent_files
 
 
 class AgentBootstrapTests(unittest.TestCase):
@@ -19,16 +19,16 @@ class AgentBootstrapTests(unittest.TestCase):
 
             self.assertTrue((root / "AGENTS.md").is_file())
             self.assertTrue((root / "CLAUDE.md").is_file())
-            self.assertTrue((root / ".claude" / "commands" / "ouroboros-plan.md").is_file())
-            self.assertTrue((root / ".claude" / "commands" / "ouroboros-verify.md").is_file())
-            self.assertTrue((root / ".codex" / "ouroboros-routing.md").is_file())
-            self.assertTrue((root / ".ouroboros" / "agent-rules.md").is_file())
-            self.assertTrue((root / ".ouroboros" / "ledger.jsonl").is_file())
-            self.assertTrue((root / ".ouroboros" / "mcp.json").is_file())
+            self.assertTrue((root / ".claude" / "commands" / "causality-plan.md").is_file())
+            self.assertTrue((root / ".claude" / "commands" / "causality-verify.md").is_file())
+            self.assertTrue((root / ".codex" / "causality-routing.md").is_file())
+            self.assertTrue((root / ".causality" / "agent-rules.md").is_file())
+            self.assertTrue((root / ".causality" / "ledger.jsonl").is_file())
+            self.assertTrue((root / ".causality" / "mcp.json").is_file())
             self.assertGreaterEqual(len(result.written), 11)
 
-            mcp = json.loads((root / ".ouroboros" / "mcp.json").read_text(encoding="utf-8"))
-            self.assertIn("ouroboros-hitl", mcp["mcpServers"])
+            mcp = json.loads((root / ".causality" / "mcp.json").read_text(encoding="utf-8"))
+            self.assertIn("causality", mcp["mcpServers"])
 
     def test_install_agent_files_writes_context_economy_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -53,7 +53,7 @@ class AgentBootstrapTests(unittest.TestCase):
             ):
                 self.assertTrue((root / "memory" / mem_type / "README.md").is_file())
 
-            rules = (root / ".ouroboros" / "agent-rules.md").read_text(encoding="utf-8")
+            rules = (root / ".causality" / "agent-rules.md").read_text(encoding="utf-8")
             self.assertIn("Context Economy", rules)
 
     def test_install_agent_files_does_not_overwrite_by_default(self) -> None:

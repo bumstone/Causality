@@ -16,12 +16,12 @@ def _text_result(text: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}]}
 
 
-class OuroborosMCPServer:
-    """Minimal stdio JSON-RPC server exposing Ouroboros HITL helper tools."""
+class CausalityMCPServer:
+    """Minimal stdio JSON-RPC server exposing Causality helper tools."""
 
     def __init__(self, project: str | Path = "."):
         self.project = Path(project).resolve()
-        self.ledger = EvidenceLedger(self.project / ".ouroboros" / "ledger.jsonl")
+        self.ledger = EvidenceLedger(self.project / ".causality" / "ledger.jsonl")
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
         method = request.get("method")
@@ -33,7 +33,7 @@ class OuroborosMCPServer:
                 result = {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "ouroboros-hitl", "version": "0.1.0"},
+                    "serverInfo": {"name": "causality", "version": "0.1.0"},
                 }
             elif method == "tools/list":
                 result = {"tools": self._tools()}
@@ -49,15 +49,15 @@ class OuroborosMCPServer:
     def _tools(self) -> list[dict[str, Any]]:
         return [
             {
-                "name": "ouroboros_init",
-                "description": "Install project-level Ouroboros HITL agent files.",
+                "name": "causality_init",
+                "description": "Install project-level Causality agent files.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"force": {"type": "boolean", "default": False}},
                 },
             },
             {
-                "name": "ouroboros_context",
+                "name": "causality_context",
                 "description": "Return recent ledger events and workflow names.",
                 "inputSchema": {
                     "type": "object",
@@ -65,7 +65,7 @@ class OuroborosMCPServer:
                 },
             },
             {
-                "name": "ouroboros_append_evidence",
+                "name": "causality_append_evidence",
                 "description": "Append an evidence event to the local ledger.",
                 "inputSchema": {
                     "type": "object",
@@ -78,18 +78,18 @@ class OuroborosMCPServer:
                 },
             },
             {
-                "name": "ouroboros_workflows",
-                "description": "Return the available Ouroboros workflow manifest.",
+                "name": "causality_workflows",
+                "description": "Return the available Causality workflow manifest.",
                 "inputSchema": {"type": "object", "properties": {}},
             },
         ]
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if name == "ouroboros_init":
+        if name == "causality_init":
             result = install_agent_files(self.project, force=bool(arguments.get("force", False)))
             return _text_result(json.dumps(result.to_dict(), ensure_ascii=True, indent=2))
 
-        if name == "ouroboros_context":
+        if name == "causality_context":
             limit = int(arguments.get("limit", 5))
             context = {
                 "project": str(self.project),
@@ -98,7 +98,7 @@ class OuroborosMCPServer:
             }
             return _text_result(json.dumps(context, ensure_ascii=True, indent=2))
 
-        if name == "ouroboros_append_evidence":
+        if name == "causality_append_evidence":
             payload = {"kind": arguments["kind"], **dict(arguments.get("payload", {}))}
             event = self.ledger.append(
                 AuditEventType.EVIDENCE,
@@ -107,7 +107,7 @@ class OuroborosMCPServer:
             )
             return _text_result(json.dumps({"event_id": event.event_id}, ensure_ascii=True))
 
-        if name == "ouroboros_workflows":
+        if name == "causality_workflows":
             return _text_result(json.dumps(workflow_manifest(), ensure_ascii=True, indent=2))
 
         raise ValueError(f"unknown tool: {name}")
@@ -118,7 +118,7 @@ class OuroborosMCPServer:
 
 
 def serve(project: str | Path = ".") -> int:
-    server = OuroborosMCPServer(project)
+    server = CausalityMCPServer(project)
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -131,7 +131,7 @@ def serve(project: str | Path = ".") -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ouroboros HITL MCP-style stdio server")
+    parser = argparse.ArgumentParser(description="Causality MCP-style stdio server")
     parser.add_argument("--project", default=".")
     args = parser.parse_args()
     return serve(args.project)
