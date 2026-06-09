@@ -135,7 +135,9 @@ L4(ledger) → **증류** → L0(typed memory + rewarded trajectory). 그 결과
 ### 6.1 단계적 구현 순서 (제안)
 
 1. **Run→Fix 닫기:** `should_stop`(`stopping_policy` 소비) + REPAIR 소비 루프 런타임.
-   여기서 "limited Ouroboros loop" 정의 확정(`max_iterations` AND `no_progress_iterations`).
+   ✅ **구현됨**: `loop.py`의 `run_bounded_loop`가 `should_stop`로 정지하고 `complete`의
+   REPAIR를 받아 다시 돈다. "limited Ouroboros loop" = `max_iterations` /
+   `no_progress_iterations` / `max_failed_hypotheses` 소비.
 2. **Review 자동화:** verifier 호출자(2개 독립 verifier) 표준화.
 3. **Reflect:** ledger에서 trajectory/실패 캡처 → `retrospectives/`·`failures/`.
 4. **Skill update:** 재현성 n-of-m + dedup + HITL 승급 → `playbooks/`/earned skill.

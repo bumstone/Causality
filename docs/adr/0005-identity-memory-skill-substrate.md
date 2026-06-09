@@ -1,6 +1,6 @@
 # ADR 0005 — 정체성·기억·스킬 기반층 (Synergy 일부 차용)
 
-- **상태(Status):** Proposed
+- **상태(Status):** Accepted — 부분 구현 (typed memory 거버넌스, 2026-06-09)
 - **날짜:** 2026-06-09
 - **관련:** [ADR 0003](0003-contract-harness.md), [ADR 0006](0006-final-blended-architecture.md)
 

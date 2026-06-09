@@ -39,6 +39,12 @@ Before every agent run:
 - 4단계 verification은 **실행 가능한 명령**이어야 한다(예: `python -m unittest`).
   산문 주장은 증거가 아니다(`agent-rules.md:36`).
 
+> **반환값(구현, 리뷰 반영):** `bind()`는 `TaskContract`만 반환하면 호출자가 게이트에
+> 넘길 객체가 없다(게이트는 모두 `GoalContract`를 요구). 따라서 게이트 가능한
+> `GoalContract`와 frozen `TaskContract`를 함께 담은 **`BoundContract`**(`contract`,
+> `task`)를 반환한다. 호출자는 `bound.contract`를 런타임 게이트에 넘기고
+> `bound.task`로 구속 조항을 읽는다. (codex review r3381964877)
+
 ### 2.1 ADR 0001과의 관계 (중복 아님)
 
 | | ADR 0001 (Task Contract) | ADR 0003 (Contract Harness) |

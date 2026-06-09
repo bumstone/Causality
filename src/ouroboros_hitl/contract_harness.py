@@ -31,6 +31,21 @@ class ContractHarnessError(ValueError):
 
 
 @dataclass(frozen=True)
+class BoundContract:
+    """The result of the pre-run ritual.
+
+    Carries both the gateable ``GoalContract`` (pass this to the runtime gates:
+    ``evaluate_plan``, ``can_execute_action``, ``check_tool_allowed``,
+    ``check_non_goal``, ``should_stop``, ``complete``) and the immutable
+    ``TaskContract`` view of the binding clauses. Returning only the latter
+    would strand callers with no object to feed the enforcement path.
+    """
+
+    contract: GoalContract
+    task: TaskContract
+
+
+@dataclass(frozen=True)
 class ContractHarness:
     """Bind a task to an immutable contract before execution.
 
@@ -56,7 +71,7 @@ class ContractHarness:
         risk: Risk | str = Risk.LOW,
         summary: str = "",
         evidence_kind: EvidenceKind | str = EvidenceKind.TEST_OUTPUT,
-    ) -> TaskContract:
+    ) -> BoundContract:
         objective = objective.strip()
         if not objective:
             raise ContractHarnessError("objective is required (step 1: summarize objective)")
@@ -84,4 +99,4 @@ class ContractHarness:
             stopping_policy=dict(stop_condition),
         )
         self.runtime.create_contract(contract)
-        return TaskContract.of(contract)
+        return BoundContract(contract=contract, task=TaskContract.of(contract))

@@ -18,7 +18,7 @@
 | [0002](0002-three-layer-control-stack.md) | 3계층 실행 제어 스택 (Stage Designer / Planner / Executor) | Proposed |
 | [0003](0003-contract-harness.md) | Contract Harness — 모든 실행 직전의 구속 의식 | **Accepted (구현)** |
 | [0004](0004-agent-harness-task-routing.md) | Agent Harness — 작업 유형별 아키텍처 디스패치 | Proposed |
-| [0005](0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 (Synergy 일부 차용) | Proposed |
+| [0005](0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 (Synergy 일부 차용) | **Accepted (부분 구현)** |
 | [0006](0006-final-blended-architecture.md) | 최종 혼합 아키텍처 — 5계층 분리와 충돌·중복·최적화 | Proposed |
 | [0007](0007-context-economy-progressive-disclosure.md) | Context Economy & Progressive Disclosure (운영 규칙) | **Accepted (부분 구현)** |
 
@@ -49,14 +49,16 @@
 
 ## 구현 상태 (2026-06-09)
 
-권장 순서(0001 → 0003 → 0007)로 첫 기초 슬라이스를 구현하고 테스트했다(30 tests OK).
+권장 순서(0001 → 0003 → 0007)로 기초 슬라이스를 구현한 뒤, 루프 드라이버와 타입
+메모리 거버넌스를 이어 구현했다(40 tests OK).
 
 | ADR | 구현된 것 | 코드 | 테스트 |
 |---|---|---|---|
 | 0001 | `non_goals` 필드, `TaskContract`(frozen·파생·read-only), 집행 게이트 `check_tool_allowed`/`check_non_goal`/`should_stop`, escalation 파생 뷰 | `contracts.py`, `gates.py`, `orchestrator.py` | `test_contracts.py`, `test_gates.py` |
 | 0003 | `ContractHarness.bind`(5단계 검증 → frozen TaskContract, 단일 GOAL_CONTRACT 기록) | `contract_harness.py` | `test_contract_harness.py` |
 | 0007 | 부트스트랩이 `workflow/`·`checklists/`·`skills/`·`memory/<6타입>/` 생성, 워크플로 문서 단일출처 생성, Context Economy 운영규칙, AGENTS.md=Codex 재정의 | `agent_bootstrap.py` | `test_agent_bootstrap.py` |
+| 0006 §6.1-1 | bounded 루프 드라이버 `run_bounded_loop`(should_stop로 정지, Run→Review→Fix) | `loop.py` | `test_loop.py` |
+| 0005 §2.2/§2.5 | 타입 메모리 `TypedMemory`(6타입 분리, assumption→decision 승급 게이트, failure scope/TTL, provenance) | `memory.py` | `test_memory.py` |
 
-**후속(미구현):** should_stop을 매 반복 호출하는 루프 드라이버(0006 §6.1-1), Review 자동화,
-Reflect/Skill update(0005 메모리 거버넌스 동작), Agent Harness 디스패처(0004),
-3계층 메타데이터(0002).
+**후속(미구현):** 자동 verifier 호출자(Review 자동화), Reflect 추출기·earned-skill
+distiller/승급(0005 진화 절반), Agent Harness 디스패처(0004), 3계층 메타데이터(0002).
