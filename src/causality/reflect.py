@@ -88,10 +88,14 @@ def reflect_on_contract(
         f"stop={gate_counts[GateDecision.STOP.value]}; "
         f"{human_approvals} human approval(s)."
     )
+    # Provenance must be contract-scoped: the last event for THIS contract, not
+    # ledger.latest_hash() which, in interleaved multi-contract runs, may belong
+    # to another contract and break the audit trail (codex review r3382219479).
+    provenance = events[-1].entry_hash if events else None
     retrospective = memory.record(
         "retrospectives",
         summary,
-        provenance=ledger.latest_hash(),
+        provenance=provenance,
     )
 
     scope = f"contract:{contract.goal_id}"

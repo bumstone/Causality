@@ -107,6 +107,19 @@ class ClassifyTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertEqual(self.harness.classify(phrase), TaskType.TRIVIAL)
 
+    def test_keyword_inside_unrelated_word_does_not_misroute(self) -> None:
+        # codex review r3382219473: a keyword must not match inside an unrelated
+        # word ("test" inside "latest"/"contest"/"protest").
+        for phrase in ("what is the latest status?", "the contest results", "i protest this"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.harness.classify(phrase), TaskType.TRIVIAL)
+
+    def test_inflected_keywords_still_match(self) -> None:
+        # The leading-boundary match still catches plural/gerund forms.
+        self.assertEqual(self.harness.classify("running the tests"), TaskType.IMPLEMENTATION)
+        self.assertEqual(self.harness.classify("deploying to prod"), TaskType.RELEASE)
+        self.assertEqual(self.harness.classify("planning the sprint"), TaskType.PLANNING)
+
     def test_classify_then_route_end_to_end(self) -> None:
         dispatch = self.harness.route(self.harness.classify("implement the feature"))
         self.assertEqual(dispatch.architecture, "superpowers")

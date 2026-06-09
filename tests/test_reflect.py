@@ -101,6 +101,28 @@ class ReflectTests(unittest.TestCase):
             self.assertEqual(memory.entries("decisions"), [])
             self.assertEqual(memory.entries("assumptions"), [])
 
+    def test_retrospective_provenance_is_contract_scoped(self) -> None:
+        # codex review r3382219479: provenance must point at THIS contract's last
+        # event, not the global latest hash (which may belong to another contract).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime, memory, contract = self._setup(temp_dir)
+            a_events = [e for e in runtime.ledger.events() if e.contract_id == contract.goal_id]
+            a_last_hash = a_events[-1].entry_hash
+
+            # A second contract records a LATER event -> global latest is now B's.
+            other = runtime.create_contract(GoalContract("Other", "noise"))
+            runtime.record_verifier(
+                other, VerifierDecision("safety", "fail", "later", severity="critical")
+            )
+            self.assertNotEqual(runtime.ledger.latest_hash(), a_last_hash)
+
+            reflection = reflect_on_contract(runtime.ledger, memory, contract)
+
+            self.assertEqual(reflection.retrospective.provenance, a_last_hash)
+            self.assertNotEqual(
+                reflection.retrospective.provenance, runtime.ledger.latest_hash()
+            )
+
     def test_reflect_ignores_other_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, memory, contract = self._setup(temp_dir)

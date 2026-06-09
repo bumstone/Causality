@@ -13,6 +13,7 @@ the legacy ``agent-rules`` intent routing (ADR 0006 C1).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -103,13 +104,17 @@ class AgentHarness:
     def classify(self, text: str) -> TaskType:
         """Map free text to a :class:`TaskType` via the keyword heuristic.
 
-        Case-insensitive substring match against :data:`CLASSIFY_KEYWORDS`,
-        tried in :data:`_CLASSIFY_ORDER`. Falls back to ``TRIVIAL`` when no
-        keyword matches (ADR 0004 §2: trivial work is answered directly).
+        Case-insensitive, matched on a *leading word boundary* against
+        :data:`CLASSIFY_KEYWORDS` in :data:`_CLASSIFY_ORDER`. The leading
+        boundary stops a keyword from matching inside an unrelated word (e.g.
+        "test" must not match "latest" / "contest" / "protest"; codex review
+        r3382219473) while still allowing inflections ("tests", "deploying",
+        "planning"). Falls back to ``TRIVIAL`` when nothing matches (ADR 0004
+        §2: trivial work is answered directly).
         """
         haystack = (text or "").lower()
         for task_type in _CLASSIFY_ORDER:
             for keyword in CLASSIFY_KEYWORDS[task_type]:
-                if keyword in haystack:
+                if re.search(r"\b" + re.escape(keyword), haystack):
                     return task_type
         return TaskType.TRIVIAL
