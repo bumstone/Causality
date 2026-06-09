@@ -16,6 +16,16 @@
 |---|---|---|
 | [0001](0001-task-contract-as-binding-rules.md) | Task Contract — 범위 확장이 아닌 구속 규칙 계층 | Proposed |
 | [0002](0002-three-layer-control-stack.md) | 3계층 실행 제어 스택 (Stage Designer / Planner / Executor) | Proposed |
+| [0003](0003-contract-harness.md) | Contract Harness — 모든 실행 직전의 구속 의식 | Proposed |
+| [0004](0004-agent-harness-task-routing.md) | Agent Harness — 작업 유형별 아키텍처 디스패치 | Proposed |
+| [0005](0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 (Synergy 일부 차용) | Proposed |
+| [0006](0006-final-blended-architecture.md) | 최종 혼합 아키텍처 — 5계층 분리와 충돌·중복·최적화 | Proposed |
 
-두 ADR은 함께 읽도록 설계되었습니다. 0001은 작업을 감싸는 **구속 envelope**를
-정의하고, 0002는 그 envelope 안에서 작업을 수행하는 **실행 제어 구조**를 정의합니다.
+## 읽는 순서
+
+- **0001 · 0002**: 기반 결정. 작업을 감싸는 **구속 envelope**(0001)와 그 안의
+  **실행 제어 구조**(0002).
+- **0003 · 0004 · 0005**: 0001/0002 위에 얹는 운영 계층 — 실행 직전 의식(0003),
+  작업 유형 라우터(0004), 지속 기억·스킬 기반층(0005).
+- **0006**: 위 다섯을 하나의 **5계층 아키텍처**로 종합하고 충돌·중복·최적화를
+  해소하는 capstone. 전체 그림은 여기서 본다.

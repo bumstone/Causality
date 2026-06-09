@@ -165,6 +165,10 @@ docs/
   adr/
     0001-task-contract-as-binding-rules.md
     0002-three-layer-control-stack.md
+    0003-contract-harness.md
+    0004-agent-harness-task-routing.md
+    0005-identity-memory-skill-substrate.md
+    0006-final-blended-architecture.md
 examples/
   goal_contract.json
 plugins/
