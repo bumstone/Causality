@@ -24,3 +24,5 @@ skills/**/*.jsonl
 # Agenda backlog state (runtime / per-project).
 agenda.json
 *.agenda.json
+# Local evaluation/review artifacts (generated HTML reviews) — not shared.
+_review/
