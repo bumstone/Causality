@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="650" viewBox="0 0 880 650" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Noto Sans KR',sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6ea8fe"/>
+    </marker>
+    <marker id="arg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+  <style>
+    .panel{fill:#171a21;stroke:#2a3140;stroke-width:1}
+    .chip{fill:#1f2430;stroke:#6ea8fe;stroke-width:1}
+    .mini{fill:#1f2430;stroke:#2a3140;stroke-width:1}
+    .t{fill:#ffffff;font-size:15px;font-weight:700}
+    .s{fill:#9aa4b2;font-size:12px}
+    .c{fill:#cdd5e1;font-size:12.5px}
+    .lab{fill:#9aa4b2;font-size:12px}
+    .chiptext{fill:#6ea8fe;font-size:12px;font-weight:700}
+    .g{fill:#3fb950;font-size:11.5px}
+  </style>
+  <rect width="880" height="650" rx="14" fill="#0f1115"/>
+
+  <!-- L0 -->
+  <rect class="panel" x="60" y="22" width="580" height="96" rx="12"/>
+  <rect class="chip" x="74" y="34" width="44" height="22" rx="11"/>
+  <text class="chiptext" x="96" y="50" text-anchor="middle">L0</text>
+  <text class="t" x="130" y="50">Identity &amp; Memory Substrate</text>
+  <text class="s" x="130" y="69">정체성·기억 기반층 — 지속(cross-session) 상태</text>
+  <text class="c" x="76" y="98">Agent Identity · Typed Memory(6종) · Agenda · Skill Library(authored/earned)</text>
+
+  <!-- L0 -> L1 -->
+  <line x1="350" y1="118" x2="350" y2="144" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text class="lab" x="362" y="136">다음 작업 선택 · scoped memory/skill 주입</text>
+
+  <!-- L1 -->
+  <rect class="panel" x="60" y="146" width="580" height="96" rx="12"/>
+  <rect class="chip" x="74" y="158" width="44" height="22" rx="11"/>
+  <text class="chiptext" x="96" y="174" text-anchor="middle">L1</text>
+  <text class="t" x="130" y="174">Dispatch — Agent Harness</text>
+  <text class="s" x="130" y="193">작업 유형 라우터 — 작업유형당 플레이북 1개만 선택(블렌딩 금지)</text>
+  <text class="c" x="76" y="222">planning→gstack · implementation→Superpowers · long-running→Causality · release→gstack</text>
+
+  <!-- L1 -> L2 -->
+  <line x1="350" y1="242" x2="350" y2="268" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text class="lab" x="362" y="260">선택된 플레이북 1개</text>
+
+  <!-- L2 -->
+  <rect class="panel" x="60" y="270" width="580" height="96" rx="12"/>
+  <rect class="chip" x="74" y="282" width="44" height="22" rx="11"/>
+  <text class="chiptext" x="96" y="298" text-anchor="middle">L2</text>
+  <text class="t" x="130" y="298">Contract Harness</text>
+  <text class="s" x="130" y="317">실행 직전 Task Contract 동결(frozen) — 범위를 넓히지 않고 좁힌다</text>
+  <text class="c" x="76" y="346">objective · non-goals · allowed tools · verification · stop condition · escalation</text>
+
+  <!-- L2 -> L3 -->
+  <line x1="350" y1="366" x2="350" y2="392" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text class="lab" x="362" y="384">frozen Task Contract</text>
+
+  <!-- L3 -->
+  <rect class="panel" x="60" y="394" width="580" height="96" rx="12"/>
+  <rect class="chip" x="74" y="406" width="44" height="22" rx="11"/>
+  <text class="chiptext" x="96" y="422" text-anchor="middle">L3</text>
+  <text class="t" x="130" y="422">Execution Control</text>
+  <text class="s" x="130" y="441">실행 제어 — HITL 게이트: plan · action · completion</text>
+  <rect class="mini" x="76" y="452" width="150" height="28" rx="8"/>
+  <text class="c" x="151" y="471" text-anchor="middle">Stage Designer</text>
+  <line x1="226" y1="466" x2="252" y2="466" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ar)"/>
+  <rect class="mini" x="254" y="452" width="120" height="28" rx="8"/>
+  <text class="c" x="314" y="471" text-anchor="middle">Planner</text>
+  <line x1="374" y1="466" x2="400" y2="466" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ar)"/>
+  <rect class="mini" x="402" y="452" width="120" height="28" rx="8"/>
+  <text class="c" x="462" y="471" text-anchor="middle">Executor</text>
+  <text class="s" x="538" y="471">+ bounded loop</text>
+
+  <!-- L3 -> L4 -->
+  <line x1="350" y1="490" x2="350" y2="516" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text class="lab" x="362" y="508">모든 이벤트 기록</text>
+
+  <!-- L4 -->
+  <rect class="panel" x="60" y="518" width="580" height="96" rx="12"/>
+  <rect class="chip" x="74" y="530" width="44" height="22" rx="11"/>
+  <text class="chiptext" x="96" y="546" text-anchor="middle">L4</text>
+  <text class="t" x="130" y="546">Evidence Ledger</text>
+  <text class="s" x="130" y="565">증거 원장 — append-only JSONL</text>
+  <text class="c" x="76" y="594">SHA-256 해시 체인 · 산출물은 해시로 참조(컨텍스트 비대화 방지) · verify_chain()</text>
+
+  <!-- distill feedback (L4 -> L0) -->
+  <path d="M640,566 H730 V70 H652" fill="none" stroke="#3fb950" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#arg)"/>
+  <rect x="744" y="262" width="122" height="100" rx="10" fill="#11161d" stroke="#1f6f33"/>
+  <text class="g" x="805" y="286" text-anchor="middle" font-weight="700">↑ distill · 증류</text>
+  <text class="g" x="805" y="308" text-anchor="middle">실패 → guardrail</text>
+  <text class="g" x="805" y="328" text-anchor="middle">성공 → earned skill</text>
+  <text class="g" x="805" y="348" text-anchor="middle">(HITL 승급)</text>
+</svg>

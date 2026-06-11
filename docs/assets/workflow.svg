@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="770" viewBox="0 0 880 770" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Noto Sans KR',sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6ea8fe"/>
+    </marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d29922"/>
+    </marker>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f85149"/>
+    </marker>
+    <marker id="arg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+  <style>
+    .panel{fill:#171a21;stroke:#2a3140;stroke-width:1}
+    .dia{fill:#1f2430;stroke:#6ea8fe;stroke-width:1.2}
+    .t{fill:#ffffff;font-size:14px;font-weight:700}
+    .tc{fill:#ffffff;font-size:14px;font-weight:700;text-anchor:middle}
+    .s{fill:#9aa4b2;font-size:11.5px}
+    .sc{fill:#9aa4b2;font-size:11.5px;text-anchor:middle}
+    .c{fill:#cdd5e1;font-size:12px}
+    .cc{fill:#cdd5e1;font-size:12px;text-anchor:middle}
+    .chip{fill:#1f2430;stroke:#6ea8fe;stroke-width:1}
+    .chiptext{fill:#6ea8fe;font-size:11px;font-weight:700;text-anchor:middle}
+    .edge{stroke:#6ea8fe;stroke-width:1.6;fill:none}
+    .warn{fill:#d29922;font-size:11.5px}
+    .neg{fill:#f85149;font-size:11.5px}
+  </style>
+  <rect width="880" height="770" rx="14" fill="#0f1115"/>
+
+  <!-- Task arrives -->
+  <rect class="panel" x="350" y="18" width="180" height="40" rx="10"/>
+  <text class="tc" x="440" y="43">작업 도착 · Task</text>
+  <line class="edge" x1="440" y1="58" x2="440" y2="84" marker-end="url(#ar)"/>
+
+  <!-- Task type diamond -->
+  <polygon class="dia" points="440,86 545,120 440,154 335,120"/>
+  <text class="tc" x="440" y="117">작업 유형?</text>
+  <text class="sc" x="440" y="135">Agent Harness (L1)</text>
+
+  <!-- branches -->
+  <line class="edge" x1="385" y1="138" x2="118" y2="208" marker-end="url(#ar)"/>
+  <line class="edge" x1="415" y1="150" x2="328" y2="208" marker-end="url(#ar)"/>
+  <line class="edge" x1="465" y1="150" x2="552" y2="208" marker-end="url(#ar)"/>
+  <line class="edge" x1="495" y1="138" x2="762" y2="208" marker-end="url(#ar)"/>
+
+  <!-- 4 playbook boxes -->
+  <rect class="panel" x="16" y="210" width="200" height="66" rx="10"/>
+  <rect class="chip" x="28" y="220" width="92" height="20" rx="10"/>
+  <text class="chiptext" x="74" y="234">계획 planning</text>
+  <text class="c" x="28" y="262">gstack office-hours · ceo-review</text>
+
+  <rect class="panel" x="228" y="210" width="200" height="66" rx="10"/>
+  <rect class="chip" x="240" y="220" width="130" height="20" rx="10"/>
+  <text class="chiptext" x="305" y="234">구현 implementation</text>
+  <text class="c" x="240" y="262">Superpowers TDD · debugging</text>
+
+  <rect class="panel" x="440" y="210" width="200" height="66" rx="10"/>
+  <rect class="chip" x="452" y="220" width="120" height="20" rx="10"/>
+  <text class="chiptext" x="512" y="234">장기 long-running</text>
+  <text class="c" x="452" y="262">Contract Harness · limited loop</text>
+
+  <rect class="panel" x="652" y="210" width="200" height="66" rx="10"/>
+  <rect class="chip" x="664" y="220" width="92" height="20" rx="10"/>
+  <text class="chiptext" x="710" y="234">릴리스 release</text>
+  <text class="c" x="664" y="262">gstack ship · QA checklist</text>
+
+  <!-- converge to BIND -->
+  <line class="edge" x1="116" y1="276" x2="332" y2="334" marker-end="url(#ar)"/>
+  <line class="edge" x1="328" y1="276" x2="396" y2="332" marker-end="url(#ar)"/>
+  <line class="edge" x1="540" y1="276" x2="484" y2="332" marker-end="url(#ar)"/>
+  <line class="edge" x1="752" y1="276" x2="548" y2="334" marker-end="url(#ar)"/>
+
+  <!-- BIND -->
+  <rect class="panel" x="250" y="336" width="380" height="48" rx="10"/>
+  <text class="tc" x="440" y="356">Contract Harness — Task Contract 동결 (L2)</text>
+  <text class="sc" x="440" y="374">objective · non-goals · tools · verification · stop · escalation</text>
+  <line class="edge" x1="440" y1="384" x2="440" y2="416" marker-end="url(#ar)"/>
+
+  <!-- EXEC -->
+  <rect class="panel" x="250" y="418" width="380" height="48" rx="10"/>
+  <text class="tc" x="440" y="438">3계층 실행 + HITL 게이트 (L3)</text>
+  <text class="sc" x="440" y="456">Stage Designer → Planner → Executor · bounded loop</text>
+  <line class="edge" x1="440" y1="466" x2="440" y2="502" marker-end="url(#ar)"/>
+
+  <!-- Gate decision diamond -->
+  <polygon class="dia" points="440,504 548,540 440,576 332,540"/>
+  <text class="tc" x="440" y="537">게이트 결정</text>
+  <text class="sc" x="440" y="555">gate decision</text>
+
+  <!-- repair loop -->
+  <path d="M332,540 H220 V442 H246" fill="none" stroke="#d29922" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#arw)"/>
+  <text class="warn" x="120" y="500">repair → 재실행</text>
+  <text class="warn" x="120" y="516">(should_stop로 bounded)</text>
+
+  <!-- escalate -->
+  <line x1="548" y1="540" x2="636" y2="540" stroke="#f85149" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text class="neg" x="552" y="528">escalate / stop</text>
+  <rect class="panel" x="640" y="516" width="220" height="48" rx="10" stroke="#7a2620"/>
+  <text class="tc" x="750" y="536">사람 검토 · HITL</text>
+  <text class="sc" x="750" y="554">approve / reject / waive</text>
+  <path d="M750,564 V644 H598" fill="none" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ar)"/>
+
+  <!-- pass to ledger -->
+  <line class="edge" x1="440" y1="576" x2="440" y2="616" marker-end="url(#ar)"/>
+  <text class="s" x="452" y="602">pass</text>
+  <rect class="panel" x="290" y="618" width="300" height="48" rx="10"/>
+  <text class="tc" x="440" y="638">원장에 증거 기록 (L4)</text>
+  <text class="sc" x="440" y="656">append-only · hash chain</text>
+
+  <!-- done -->
+  <line x1="440" y1="666" x2="440" y2="700" stroke="#3fb950" stroke-width="1.6" marker-end="url(#arg)"/>
+  <rect class="panel" x="320" y="702" width="240" height="44" rx="10" stroke="#1f6f33"/>
+  <text class="tc" x="440" y="729">완료 게이트 PASS · done</text>
+</svg>
