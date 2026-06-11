@@ -21,14 +21,23 @@ from .loop import LoopResult, StepOutcome, run_bounded_loop
 from .memory import MEMORY_TYPES, MemoryEntry, MemoryGovernanceError, TypedMemory
 from .agent_harness import AgentHarness, Dispatch, TaskType
 from .reflect import Reflection, reflect_on_contract
+from .review import ReviewResult, Verifier, run_review
+from .skills import SkillCandidate, SkillPromotionError, SkillStore
+from .agenda import Agenda, AgendaError, AgendaItem
+from .engine import CausalityEngine, TaskRun
 from .browser_adapter import A11yBrowserAdapter
 
 __all__ = [
     "ActionType",
     "A11yBrowserAdapter",
+    "Agenda",
+    "AgendaError",
+    "AgendaItem",
     "AgentHarness",
     "AuditEventType",
     "BoundContract",
+    "Causality",
+    "CausalityEngine",
     "ContractHarness",
     "ContractHarnessError",
     "Dispatch",
@@ -43,16 +52,22 @@ __all__ = [
     "MEMORY_TYPES",
     "MemoryEntry",
     "MemoryGovernanceError",
-    "Causality",
     "PermissionContract",
     "Reflection",
+    "ReviewResult",
     "Risk",
+    "SkillCandidate",
+    "SkillPromotionError",
+    "SkillStore",
     "StateTransition",
     "StepOutcome",
     "TaskContract",
+    "TaskRun",
     "TaskType",
     "TypedMemory",
+    "Verifier",
     "VerifierDecision",
     "reflect_on_contract",
     "run_bounded_loop",
+    "run_review",
 ]

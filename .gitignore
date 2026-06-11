@@ -19,3 +19,10 @@ state.json
 # Note: *.md under memory/ is intentionally NOT ignored, so a curated,
 # shareable memory note can be committed without un-ignoring anything.
 memory/**/*.jsonl
+# Earned-skill store logs (candidates/promoted) — runtime; curated *.md stays tracked.
+skills/**/*.jsonl
+# Agenda backlog state (runtime / per-project).
+agenda.json
+*.agenda.json
+# Local evaluation/review artifacts (generated HTML reviews) — not shared.
+_review/

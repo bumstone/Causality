@@ -1,6 +1,6 @@
 # ADR 0006 — 최종 혼합 아키텍처: 5계층 분리와 충돌·중복·최적화
 
-- **상태(Status):** Proposed
+- **상태(Status):** Accepted — 구현 (`CausalityEngine`이 5계층을 end-to-end로 연결, 2026-06-09)
 - **날짜:** 2026-06-09
 - **종합 대상:** [ADR 0001](0001-task-contract-as-binding-rules.md) · [0002](0002-three-layer-control-stack.md) · [0003](0003-contract-harness.md) · [0004](0004-agent-harness-task-routing.md) · [0005](0005-identity-memory-skill-substrate.md)
 
@@ -118,29 +118,28 @@ L4(ledger) → **증류** → L0(typed memory + rewarded trajectory). 그 결과
 우로보로스 HITL의 *현재 프리미티브* 기준으로 각 단계가 실현 가능한지 검증한다.
 범례: ✅ 현재 가능 · 🟡 부분(기존 요소 조합 필요) · ❌ 신규 필요.
 
-| 단계 | 현재 매핑 가능한 프리미티브 | 판정 | 빠진 것 |
+범례 추가: ✔ **구현 완료**.
+
+| 단계 | 매핑 프리미티브 | 판정 | 비고 |
 |---|---|---|---|
-| **Run** | `record_evidence`/`record_verifier`로 ledger append (`orchestrator.py:70-91`) | ✅ | — |
-| **Review** | `HITLGate.complete`가 verifier 2-pass·증거를 *판정* (`gates.py:62-98`) | 🟡 | 자동 리뷰어(independent verifier)를 *호출*하는 주체. 현재는 verifier 결정이 외부에서 주입됨 |
-| **Fix** | `GateDecision.REPAIR` → 재계획 신호 (`contracts.py:54`) | 🟡 | REPAIR를 받아 *루프를 다시 도는* 외부 런타임. orchestrator는 퍼사드라 루프를 안 돎 |
-| **Reflect** | — | ❌ | retrospective 추출기, trajectory 캡처. `src`에 reflect/retro/trajectory 0건 |
-| **Skill update** | — | ❌ | skill 스토어, ledger 행동 시퀀스→절차 추출기, 재현성 측정기, 승급 게이트 |
+| **Run** | `record_evidence`/`record_verifier`로 ledger append | ✔ | `orchestrator.py` |
+| **Review** | `run_review`가 N개 독립 verifier를 호출·기록·집계(≥2 pass) | ✔ | `review.py` (이전 🟡 → 구현) |
+| **Fix** | `run_bounded_loop`이 `complete`의 `REPAIR`를 받아 재시도, `should_stop`로 정지 | ✔ | `loop.py` (이전 🟡 → 구현) |
+| **Reflect** | `reflect_on_contract`가 ledger를 retrospective+failures로 증류(contract-scoped provenance) | ✔ | `reflect.py` |
+| **Skill update** | `SkillStore` distill → 재현성 n-of-m → dedup → HITL 승급 | ✔ | `skills.py` |
+| **(통합)** | `CausalityEngine`이 Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill 연결 | ✔ | `engine.py` |
 
-**결론:** 루프의 **앞 절반(Run→Review→Fix)** 은 *기존 요소의 조합*으로 닫을 수 있다
-(verifier 주입 + REPAIR 소비 런타임만 추가). **뒤 절반(Reflect→Skill update)** 은
-**현재 전무**하며 ADR 0005의 신규 컴포넌트(증류기·skill 스토어·승급 게이트)에 전적으로
-의존한다. 즉 "자기개선 반복 루프"는 *원리상 이 아키텍처와 정합*하지만 **현재는
-실행 불가**이고, 단계적 구현이 필요하다.
+**결론(갱신):** 루프 앞 절반(Run→Review→Fix)과 뒤 절반(Reflect→Skill update)이 **모두
+코드로 동작**한다. C-LOOP-1(전무)은 해소되었고, "자기개선 반복 루프"는 원리적 정합을 넘어
+`CausalityEngine.run_task` / `run_next`로 **실행 가능**하다.
 
-### 6.1 단계적 구현 순서 (제안)
+### 6.1 단계적 구현 순서 (모두 완료)
 
-1. **Run→Fix 닫기:** `should_stop`(`stopping_policy` 소비) + REPAIR 소비 루프 런타임.
-   ✅ **구현됨**: `loop.py`의 `run_bounded_loop`가 `should_stop`로 정지하고 `complete`의
-   REPAIR를 받아 다시 돈다. "limited Causality loop" = `max_iterations` /
-   `no_progress_iterations` / `max_failed_hypotheses` 소비.
-2. **Review 자동화:** verifier 호출자(2개 독립 verifier) 표준화.
-3. **Reflect:** ledger에서 trajectory/실패 캡처 → `retrospectives/`·`failures/`.
-4. **Skill update:** 재현성 n-of-m + dedup + HITL 승급 → `playbooks/`/earned skill.
+1. ✔ **Run→Fix 닫기:** `loop.py run_bounded_loop`(`should_stop` + `REPAIR` 소비). "limited
+   Causality loop" = `max_iterations` / `no_progress_iterations` / `max_failed_hypotheses`.
+2. ✔ **Review 자동화:** `review.py run_review`(2개 독립 verifier 호출·기록·집계 표준화).
+3. ✔ **Reflect:** `reflect.py`가 ledger를 `retrospectives`·`failures`로 증류(decisions 미기록).
+4. ✔ **Skill update:** `skills.py SkillStore`(재현성 n-of-m + dedup + HITL 승급).
 
 ## 7. 알려진 위험 / 미해결 이슈 (code-review 반영)
 
@@ -152,7 +151,7 @@ L4(ledger) → **증류** → L0(typed memory + rewarded trajectory). 그 결과
 | C-MEM-2 | failure→guardrail 단방향 래칫(만료·범위 없음) | **해결**: ADR 0005 §2.5(3) TTL·scope·회수 |
 | C-MEM-3 | earned skill이 lucky/brittle 성공을 못 거름 + authored 중복 | **해결**: ADR 0005 §2.4 재현성 n-of-m + dedup |
 | C-MEM-4 | 기억 저장 스토리 3중 모순 + 해시체인 출처 소실 | **해결**: ADR 0005 §2.2 provenance(ledger `entry_hash`) 연결 |
-| C-LOOP-1 | Reflect/Skill-update 프리미티브 전무 | **명시**: §6 표(❌) + §6.1 단계 구현 |
+| C-LOOP-1 | Reflect/Skill-update 프리미티브 전무 | **해결**: `review.py`·`reflect.py`·`skills.py`·`engine.py` 구현으로 루프 닫힘(§6) |
 | C-STOP-1 | `should_stop`/stopping_policy 소비자 없음, "limited loop" 미정의 | **명시**: §3 C2 ⚠️ + §6.1(1) |
 | C-MAG-1 | Magentic stall→replan을 REPAIR로 "이미 구현됨" 오기재 | **정정**: §5.1 정정 박스 |
 | C-ESC-1 | TaskContract.escalation(무동작) vs gate 위험기반 ESCALATE 이중화 | **처리**: 게이트가 `contract.escalation`을 *읽도록* 일원화(ADR 0001 §2.3 보강) |
