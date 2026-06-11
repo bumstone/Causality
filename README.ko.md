@@ -61,8 +61,9 @@ flowchart TD
 일으키는 각 단계는 **액션 게이트**(`can_execute_action`)가, "완료" 주장은 **완료
 게이트**(`complete`)가 검사합니다. 고위험·비가역 작업은 사람에게 에스컬레이션됩니다.
 
-> 제어 흐름(L0→L4)과 루프의 앞 절반은 현재 구현되어 있습니다. 아래에서 위로 가는
-> **증류** 루프(L4→L0)는 목표 구조이며 대부분 아직 미구현입니다 —
+> 제어 흐름(L0→L4)과 아래에서 위로 가는 **증류** 루프(L4→L0)가 **모두 구현**되었습니다.
+> `CausalityEngine`이 사이클을 닫고, 증류된 실패/스킬이 메모리로 환류됩니다. 남은 공백은
+> 디스패치 시 earned skill의 *자동 재사용* 입니다 —
 > [자기개선 루프](#자기개선-루프)와 [구현 상태](#구현-상태-adrs) 참조.
 
 ---
@@ -112,28 +113,27 @@ flowchart TD
 
 ## 자기개선 루프
 
-의도된 루프는 두 절반으로 구성됩니다: **Run → Review → Fix**, 그리고
+루프는 두 절반으로 구성됩니다: **Run → Review → Fix**, 그리고
 **Reflect → Skill update**([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)).
-앞 절반은 기존 프리미티브의 조합으로 달성 가능하지만, 뒤 절반은 아직 존재하지 않는
-신규 컴포넌트에 의존합니다.
+두 절반 모두 구현되었고 `CausalityEngine`(`run_task` / `run_next`)이 묶습니다.
 
 ```mermaid
 flowchart LR
-    RUN["Run<br/>(구현됨)"] --> REVIEW["Review<br/>(부분)"]
-    REVIEW --> FIX["Fix<br/>(부분)"]
+    RUN["Run<br/>(구현됨)"] --> REVIEW["Review<br/>(구현됨)"]
+    REVIEW --> FIX["Fix<br/>(구현됨)"]
     FIX --> RUN
-    RUN -.-> REFLECT["Reflect<br/>(제안)"]
-    REFLECT -.-> SKILL["Skill update<br/>(제안)"]
+    RUN -.-> REFLECT["Reflect<br/>(구현됨)"]
+    REFLECT -.-> SKILL["Skill update<br/>(구현됨)"]
     SKILL -.-> RUN
 ```
 
 | 단계 | 상태 | 비고 |
 |---|---|---|
 | Run | 구현됨 | `record_evidence` / `record_verifier` 가 원장에 추가. |
-| Review | 부분 | `HITLGate.complete` 가 verifier 통과·증거를 판정하나, 자동 verifier 호출자는 미제공. |
-| Fix | 부분 | `GateDecision.REPAIR` 가 재계획 신호이나, 이를 소비하는 런타임 루프 없음. |
-| Reflect | 제안 | 회고 추출기·trajectory 캡처 없음. |
-| Skill update | 제안 | 스킬 스토어·증류기·재현성 검사·승급 게이트 없음. |
+| Review | 구현됨 | `run_review` 가 독립 verifier N개를 호출·기록하고 ≥2 pass / 치명실패 없음 규칙으로 집계. |
+| Fix | 구현됨 | `run_bounded_loop` 이 `GateDecision.REPAIR` 를 소비해 재계획, `should_stop` 으로 정지. |
+| Reflect | 구현됨 | `reflect_on_contract` 가 원장을 타입 `retrospectives`+`failures` 로 증류(contract-scoped provenance). |
+| Skill update | 구현됨 | `SkillStore`: distill → 재현성 n-of-m → authored dedup → HITL 승급. 디스패치 자동 재사용은 후속. |
 
 ---
 

@@ -63,9 +63,10 @@ flowchart TD
 (`can_execute_action`); and a claim of "done" is checked by the **completion
 gate** (`complete`). High-risk and irreversible work escalates to a human.
 
-> The control flow (L0 to L4) and the front half of the loop are implemented
-> today. The bottom-up **distill** loop (L4 to L0) is a target structure and is
-> largely not yet implemented — see [Self-improvement loop](#self-improvement-loop)
+> The control flow (L0 to L4) and the bottom-up **distill** loop (L4 to L0) are
+> both implemented: `CausalityEngine` closes the cycle and the distilled
+> failures/skills feed back into memory. The remaining gap is *automatic reuse*
+> of earned skills at dispatch — see [Self-improvement loop](#self-improvement-loop)
 > and [Status](#status-adrs).
 
 ---
@@ -119,28 +120,27 @@ read **on demand**:
 
 ## Self-improvement loop
 
-The intended loop has two halves: **Run to Review to Fix**, and **Reflect to
-Skill update** ([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)). The
-front half is achievable by composing existing primitives; the back half
-depends on new components that do not exist yet.
+The loop has two halves: **Run to Review to Fix**, and **Reflect to Skill
+update** ([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)). Both are
+now implemented and wired together by `CausalityEngine` (`run_task` / `run_next`).
 
 ```mermaid
 flowchart LR
-    RUN["Run<br/>(implemented)"] --> REVIEW["Review<br/>(partial)"]
-    REVIEW --> FIX["Fix<br/>(partial)"]
+    RUN["Run<br/>(implemented)"] --> REVIEW["Review<br/>(implemented)"]
+    REVIEW --> FIX["Fix<br/>(implemented)"]
     FIX --> RUN
-    RUN -.-> REFLECT["Reflect<br/>(proposed)"]
-    REFLECT -.-> SKILL["Skill update<br/>(proposed)"]
+    RUN -.-> REFLECT["Reflect<br/>(implemented)"]
+    REFLECT -.-> SKILL["Skill update<br/>(implemented)"]
     SKILL -.-> RUN
 ```
 
 | Step | Status | Notes |
 |---|---|---|
 | Run | Implemented | `record_evidence` / `record_verifier` append to the ledger. |
-| Review | Partial | `HITLGate.complete` judges verifier passes and evidence, but an automated verifier caller is not provided. |
-| Fix | Partial | `GateDecision.REPAIR` signals replan, but no runtime loop consumes it. |
-| Reflect | Proposed | No retrospective extractor or trajectory capture exists. |
-| Skill update | Proposed | No skill store, distiller, reproducibility check, or promotion gate. |
+| Review | Implemented | `run_review` calls N independent verifiers, records each, and aggregates the ≥2-pass / no-critical-failure rule. |
+| Fix | Implemented | `run_bounded_loop` consumes `GateDecision.REPAIR` and replans, bounded by `should_stop`. |
+| Reflect | Implemented | `reflect_on_contract` distills the ledger trail into typed `retrospectives` + `failures` (contract-scoped provenance). |
+| Skill update | Implemented | `SkillStore`: distill → n-of-m reproducibility → authored dedup → HITL promotion. Automatic *reuse* at dispatch is the remaining follow-up. |
 
 ---
 
