@@ -28,6 +28,13 @@ Each layer has a single responsibility and talks only to its neighbours. Top to
 bottom is the **control flow**; bottom to top is the **evolution (distill)
 feedback loop**.
 
+> **At a glance:** `Agenda → Dispatch → Contract → Execute (gates) → Ledger → distill ↩`
+
+![Causality five-layer architecture: control flows down L0→L4, the distill feedback loop flows back up](docs/assets/architecture.svg)
+
+<details>
+<summary>Diagram source (Mermaid — renders on github.com web; shown as code elsewhere)</summary>
+
 ```mermaid
 flowchart TD
     subgraph L0["L0 - Identity and Memory Substrate"]
@@ -58,6 +65,8 @@ flowchart TD
     L4 -.->|"distill: failures to guardrails, success to skills"| L0
 ```
 
+</details>
+
 **Gate placement (L3):** the `Planner` output is checked by the **plan gate**
 (`evaluate_plan`); each side-effecting step is checked by the **action gate**
 (`can_execute_action`); and a claim of "done" is checked by the **completion
@@ -77,6 +86,11 @@ When a task arrives, the Agent Harness (L1) selects exactly **one** playbook by
 task type, the Contract Harness (L2) freezes a Task Contract, execution runs
 through the three-layer control stack with HITL gates (L3), and every event is
 appended to the ledger (L4).
+
+![Operating-rule workflow: task type routes to one playbook, the contract is frozen, execution runs through HITL gates, evidence lands in the ledger](docs/assets/workflow.svg)
+
+<details>
+<summary>Diagram source (Mermaid)</summary>
 
 ```mermaid
 flowchart TD
@@ -99,6 +113,8 @@ flowchart TD
     HUMAN --> LEDGER
     LEDGER --> DONE["Completion gate"]
 ```
+
+</details>
 
 ### Context Economy
 
@@ -124,6 +140,11 @@ The loop has two halves: **Run to Review to Fix**, and **Reflect to Skill
 update** ([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)). Both are
 now implemented and wired together by `CausalityEngine` (`run_task` / `run_next`).
 
+![Self-improvement loop: Run → Review → Fix (solid) and Reflect → Skill update (dashed), all implemented](docs/assets/loop.svg)
+
+<details>
+<summary>Diagram source (Mermaid)</summary>
+
 ```mermaid
 flowchart LR
     RUN["Run<br/>(implemented)"] --> REVIEW["Review<br/>(implemented)"]
@@ -133,6 +154,8 @@ flowchart LR
     REFLECT -.-> SKILL["Skill update<br/>(implemented)"]
     SKILL -.-> RUN
 ```
+
+</details>
 
 | Step | Status | Notes |
 |---|---|---|
@@ -189,10 +212,17 @@ pollution: an unverified guess must never masquerade as confirmed knowledge.
 An assumption only becomes a decision through a **promotion gate** backed by
 confirming evidence.
 
+![Memory governance: an assumption becomes a decision only through the evidence-backed promotion gate; six typed stores](docs/assets/memory.svg)
+
+<details>
+<summary>Diagram source (Mermaid)</summary>
+
 ```mermaid
 flowchart LR
     A["assumption"] -->|"promotion gate (evidence)"| D["decision"]
 ```
+
+</details>
 
 ---
 
@@ -411,6 +441,11 @@ docs/
   agent_automation.md
   installation.md
   causality_integration.md
+  assets/                  # pre-rendered SVG diagrams used by this README
+    architecture.svg
+    workflow.svg
+    loop.svg
+    memory.svg
   adr/
     README.md
     0001-task-contract-as-binding-rules.md
@@ -420,6 +455,7 @@ docs/
     0005-identity-memory-skill-substrate.md
     0006-final-blended-architecture.md
     0007-context-economy-progressive-disclosure.md
+    0008-repository-hygiene-shared-vs-ignored.md
 examples/
   goal_contract.json
 plugins/

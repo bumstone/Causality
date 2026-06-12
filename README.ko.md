@@ -27,6 +27,13 @@ Causality은 Claude, Codex, 그리고 에이전트 기반 프로젝트를 위한
 단일 책임을 가지며 인접 계층과만 통신합니다. 위에서 아래로는 **제어 흐름**,
 아래에서 위로는 **진화(증류) 환류 루프**입니다.
 
+> **한눈에:** `Agenda → 디스패치 → 계약 동결 → 실행(게이트) → 원장 → 증류 ↩`
+
+![Causality 5계층 아키텍처: 제어 흐름은 L0→L4로 내려가고, 증류 환류는 다시 위로 올라간다](docs/assets/architecture.svg)
+
+<details>
+<summary>다이어그램 소스 (Mermaid — github.com 웹에서 렌더링, 그 외 환경에서는 코드로 표시)</summary>
+
 ```mermaid
 flowchart TD
     subgraph L0["L0 - 정체성 및 기억 기반층"]
@@ -57,6 +64,8 @@ flowchart TD
     L4 -.->|"증류: 실패는 guardrail로, 성공은 skill로"| L0
 ```
 
+</details>
+
 **게이트 배치(L3):** `Planner` 출력은 **계획 게이트**(`evaluate_plan`)가, 부작용을
 일으키는 각 단계는 **액션 게이트**(`can_execute_action`)가, "완료" 주장은 **완료
 게이트**(`complete`)가 검사합니다. 고위험·비가역 작업은 사람에게 에스컬레이션됩니다.
@@ -73,6 +82,11 @@ flowchart TD
 작업이 도착하면 에이전트 하네스(L1)가 작업 유형에 따라 **단 하나**의 플레이북을
 선택하고, 컨트랙트 하네스(L2)가 Task Contract를 동결하며, 실행은 HITL 게이트가
 있는 3계층 제어 스택(L3)을 통과하고, 모든 이벤트가 원장(L4)에 추가됩니다.
+
+![운영 규칙 워크플로: 작업 유형이 플레이북 1개로 라우팅되고, 계약이 동결되며, HITL 게이트를 통과해 증거가 원장에 쌓인다](docs/assets/workflow.svg)
+
+<details>
+<summary>다이어그램 소스 (Mermaid)</summary>
 
 ```mermaid
 flowchart TD
@@ -96,6 +110,8 @@ flowchart TD
     LEDGER --> DONE["완료 게이트"]
 ```
 
+</details>
+
 ### Context Economy(컨텍스트 경제)
 
 **상시 로드(always-loaded)** 컨텍스트를 최소화합니다
@@ -117,6 +133,11 @@ flowchart TD
 **Reflect → Skill update**([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)).
 두 절반 모두 구현되었고 `CausalityEngine`(`run_task` / `run_next`)이 묶습니다.
 
+![자기개선 루프: Run → Review → Fix (실선)와 Reflect → Skill update (점선), 모두 구현됨](docs/assets/loop.svg)
+
+<details>
+<summary>다이어그램 소스 (Mermaid)</summary>
+
 ```mermaid
 flowchart LR
     RUN["Run<br/>(구현됨)"] --> REVIEW["Review<br/>(구현됨)"]
@@ -126,6 +147,8 @@ flowchart LR
     REFLECT -.-> SKILL["Skill update<br/>(구현됨)"]
     SKILL -.-> RUN
 ```
+
+</details>
 
 | 단계 | 상태 | 비고 |
 |---|---|---|
@@ -179,10 +202,17 @@ flowchart LR
 추측이 확정 지식으로 둔갑해서는 안 됩니다. 가정은 확정 증거를 갖춘 **승급
 게이트**를 통해서만 결정으로 승격됩니다.
 
+![메모리 거버넌스: 가정은 증거 기반 승급 게이트를 통과해야만 결정이 된다 — 6개 타입 스토어](docs/assets/memory.svg)
+
+<details>
+<summary>다이어그램 소스 (Mermaid)</summary>
+
 ```mermaid
 flowchart LR
     A["가정 (assumption)"] -->|"승급 게이트 (증거)"| D["결정 (decision)"]
 ```
+
+</details>
 
 ---
 
@@ -397,6 +427,11 @@ docs/
   agent_automation.md
   installation.md
   causality_integration.md
+  assets/                  # README에서 쓰는 사전 렌더링 SVG 다이어그램
+    architecture.svg
+    workflow.svg
+    loop.svg
+    memory.svg
   adr/
     README.md
     0001-task-contract-as-binding-rules.md
@@ -406,6 +441,7 @@ docs/
     0005-identity-memory-skill-substrate.md
     0006-final-blended-architecture.md
     0007-context-economy-progressive-disclosure.md
+    0008-repository-hygiene-shared-vs-ignored.md
 examples/
   goal_contract.json
 plugins/
