@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__github__create_pull_request|mcp__github__create_pull_request_with_copilot",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Enforcing PR review-watch policy",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"A pull request was just created via the GitHub MCP. Per this project PR-review autofix policy (CLAUDE.md): (1) immediately call subscribe_pr_activity for the new PR number so its Codex/Copilot review and CI events wake this session; (2) on each review event, judge each comment validity against the code, then auto-apply confident small in-scope fixes by commit and push to the PR branch, ask the user via AskUserQuestion if a comment is ambiguous or architecturally significant, and skip silently if no action is needed; (3) keep watching until the PR is merged or closed. Do not poll with sleep; rely on webhook events.\"}}'"
+          }
+        ]
+      }
+    ]
+  }
+}
