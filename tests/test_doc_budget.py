@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from causality.doc_budget import check_docs, format_report, over_budget
+from causality.doc_budget import check_docs, expand_markdown, format_report, over_budget
 
 
 class DocBudgetTests(unittest.TestCase):
@@ -58,10 +58,39 @@ class DocBudgetTests(unittest.TestCase):
             self.assertIn("1/1 over 2000", report)
 
     def test_adr_0010_is_within_budget(self) -> None:
-        # Dogfood: the rule's own ADR must obey the rule.
+        # Dogfood: the rule's own ADR must obey the rule. Split assertions so an
+        # empty result fails clearly instead of IndexError-ing in the message
+        # (copilot review r3407679320).
         adr = Path(__file__).resolve().parents[1] / "docs/adr/0010-caveman-doc-budget.md"
         sizes = check_docs([adr], max_chars=2000)
-        self.assertTrue(sizes and not sizes[0].over, f"ADR 0010 is {sizes[0].chars} chars (>2000)")
+        self.assertEqual(len(sizes), 1)
+        self.assertFalse(sizes[0].over, f"ADR 0010 is {sizes[0].chars} chars (>2000)")
+
+    def test_expand_markdown_expands_dirs_and_passes_files(self) -> None:
+        # codex review r3407301817: a directory arg must expand to its *.md
+        # children, not be silently skipped by check_docs.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._write(root, "docs/a.md", 100)
+            self._write(root, "docs/sub/b.md", 100)
+            self._write(root, "docs/notes.txt", 100)
+
+            expanded = expand_markdown([root / "docs", str(root / "loose.md")])
+
+            self.assertEqual(
+                sorted(Path(p).name for p in expanded), ["a.md", "b.md", "loose.md"]
+            )
+            # The expanded dir's over-budget child is now measured.
+            self._write(root, "docs/big.md", 2500)
+            over = over_budget(check_docs(expand_markdown([root / "docs"]), max_chars=2000))
+            self.assertIn("big.md", [Path(o.path).name for o in over])
+
+    def test_non_utf8_file_is_skipped(self) -> None:
+        # copilot review r3407679325: a non-UTF8 file must be skipped, not crash.
+        with tempfile.TemporaryDirectory() as d:
+            bad = Path(d) / "bad.md"
+            bad.write_bytes(b"\xff\xfe not utf-8 \x80")
+            self.assertEqual(check_docs([bad], max_chars=2000), [])
 
 
 if __name__ == "__main__":

@@ -40,6 +40,23 @@ def _exempt(path: str, patterns: Sequence[str]) -> bool:
     return any(fnmatch(path, pat) or fnmatch(name, pat) for pat in patterns)
 
 
+def expand_markdown(paths: Iterable[str | Path]) -> list[str]:
+    """Expand any directory argument to its ``*.md`` children; pass files through.
+
+    A directory handed straight to :func:`check_docs` would raise
+    ``IsADirectoryError`` (an ``OSError``) and be silently skipped, giving a
+    false "0 over" pass (codex review r3407301817). Expanding first avoids that.
+    """
+    out: list[str] = []
+    for p in paths:
+        path = Path(p)
+        if path.is_dir():
+            out.extend(sorted(str(child) for child in path.rglob("*.md")))
+        else:
+            out.append(str(p))
+    return out
+
+
 def check_docs(
     paths: Iterable[str | Path],
     *,
@@ -56,7 +73,8 @@ def check_docs(
             continue
         try:
             text = Path(path).read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # Unreadable or non-UTF8 file: skip rather than crash the check.
             continue
         sizes.append(DocSize(path=sp, chars=len(text), max_chars=max_chars))
     return sizes

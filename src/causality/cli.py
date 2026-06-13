@@ -8,7 +8,13 @@ from pathlib import Path
 
 from .agent_bootstrap import install_agent_files
 from .contracts import AuditEventType
-from .doc_budget import DEFAULT_DOC_MAX_CHARS, check_docs, format_report, over_budget
+from .doc_budget import (
+    DEFAULT_DOC_MAX_CHARS,
+    check_docs,
+    expand_markdown,
+    format_report,
+    over_budget,
+)
 from .ledger import EvidenceLedger
 from .review_batches import (
     DEFAULT_MAX_LINES,
@@ -67,8 +73,18 @@ def main() -> int:
         "doc-budget",
         help="flag generated MD docs over the caveman char budget (ADR 0010)",
     )
-    doc_parser.add_argument("paths", nargs="*", help="MD files (default: docs/**/*.md)")
+    doc_parser.add_argument(
+        "paths",
+        nargs="*",
+        help="MD files or directories (default: docs/); directories expand to *.md",
+    )
     doc_parser.add_argument("--max-chars", type=int, default=DEFAULT_DOC_MAX_CHARS)
+    doc_parser.add_argument(
+        "--enforce",
+        action="store_true",
+        help="exit 2 if any doc is over budget (default: advisory report, exit 0, "
+        "so pre-rule grandfathered docs do not fail a bare run)",
+    )
     doc_parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
@@ -141,13 +157,15 @@ def main() -> int:
         return 2 if len(batches) > 1 or any(b.oversized for b in batches) else 0
 
     if args.command == "doc-budget":
-        paths = args.paths or [str(p) for p in Path("docs").rglob("*.md")]
+        paths = expand_markdown(args.paths or ["docs"])
         sizes = check_docs(paths, max_chars=args.max_chars)
         if args.json:
             print(json.dumps([d.to_dict() for d in sizes], ensure_ascii=True, indent=2))
         else:
             print(format_report(sizes, max_chars=args.max_chars))
-        return 2 if over_budget(sizes) else 0
+        # Advisory by default (a bare run must not fail on grandfathered docs);
+        # --enforce makes it a gate, e.g. `doc-budget --enforce <changed files>`.
+        return 2 if (args.enforce and over_budget(sizes)) else 0
 
     return 1
 

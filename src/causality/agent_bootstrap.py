@@ -57,7 +57,7 @@ checklists, role descriptions, or templates into the prompt.
 - Retrieve only scoped memory for the current task; never the whole `memory/`.
 - On completion: append only a typed summary to `memory/<type>/`.
 - Write generated docs caveman-terse, <=2000 chars/file (ADR 0010): tables/bullets
-  over prose, keep identifiers + decisions, drop filler. Verify: `causality doc-budget`.
+  over prose, keep identifiers + decisions, drop filler. Gate: `causality doc-budget --enforce <file>`.
 
 ## Local Commands
 

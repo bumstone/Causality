@@ -19,8 +19,9 @@ context economy(0007)는 *로드*를 줄였고, 본 규칙은 *생성 크기*를
 
 ## 집행
 
-- `doc_budget.check_docs(paths, max_chars=2000)` → 초과 파일 목록 (순수 함수, 테스트).
-- `causality doc-budget [paths]` → 리포트 출력, 초과 시 **exit 2** (CI/스크립트 분기).
+- `doc_budget.check_docs/expand_markdown` → 디렉터리는 `*.md`로 전개, 비UTF8/누락 스킵.
+- `causality doc-budget [paths]` = 기본 advisory(exit 0); `--enforce`면 초과 시 **exit 2**
+  (CI는 `--enforce <변경 파일>`). 기본 advisory라 grandfather 문서가 bare run을 깨지 않음.
 - `agent-rules.md` Context Economy에 1줄 추가 → 생성 시점에 적용.
 - dogfood: 본 ADR ≤2000자.
 
