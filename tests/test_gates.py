@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.contracts import (
+    AuditEventType,
     EvidenceKind,
     EvidenceRequirement,
     GateDecision,
@@ -141,6 +142,54 @@ class GateTests(unittest.TestCase):
                 runtime.should_stop(contract, {"failed_hypotheses": 3}).decision,
                 GateDecision.ESCALATE,
             )
+
+    def test_should_stop_continue_poll_records_no_gate_decision(self) -> None:
+        # Observer effect: the loop polls should_stop before every
+        # iteration, so a non-terminal "keep going" result must NOT append a
+        # GATE_DECISION. Recording each poll would flood the ledger with one
+        # event per iteration and inflate Reflect's gate_counts[pass]. Only a
+        # terminal STOP/ESCALATE is a material decision worth recording.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(
+                GoalContract(
+                    "Loop",
+                    "bounded",
+                    stopping_policy={"max_iterations": 3, "max_failed_hypotheses": 2},
+                )
+            )
+
+            def gate_decisions() -> list:
+                return [
+                    e
+                    for e in runtime.ledger.events()
+                    if e.event_type == AuditEventType.GATE_DECISION.value
+                    and e.contract_id == contract.goal_id
+                ]
+
+            # Many "keep going" polls leave no footprint in the ledger.
+            for _ in range(5):
+                self.assertEqual(
+                    runtime.should_stop(contract, {"iterations": 1}).decision,
+                    GateDecision.PASS,
+                )
+            self.assertEqual(gate_decisions(), [])
+
+            # A terminal STOP is recorded exactly once.
+            self.assertEqual(
+                runtime.should_stop(contract, {"iterations": 3}).decision,
+                GateDecision.STOP,
+            )
+            recorded = gate_decisions()
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(recorded[0].payload.get("decision"), GateDecision.STOP.value)
+
+            # A terminal ESCALATE (failed hypotheses exhausted) is also recorded.
+            self.assertEqual(
+                runtime.should_stop(contract, {"failed_hypotheses": 2}).decision,
+                GateDecision.ESCALATE,
+            )
+            self.assertEqual(len(gate_decisions()), 2)
 
     def test_same_verifier_twice_is_not_two_independent_passes(self) -> None:
         # Regression F1: counting raw events let one verifier passing across two
