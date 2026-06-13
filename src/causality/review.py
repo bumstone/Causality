@@ -68,10 +68,17 @@ def run_review(
 
     Aggregation:
 
-    - ``passes`` is the count of decisions where ``is_pass``.
-    - ``has_critical_failure`` is true if any decision ``is_critical_failure``.
-    - ``approved`` is ``passes >= min_passes`` and not ``has_critical_failure``
-      -- the "two independent verifier passes" rule (ADR 0006 §6.2).
+    - ``passes`` counts **distinct** verifiers whose latest verdict in this pass
+      is a pass. Counting per-verifier (not per-decision) matches
+      ``HITLGate.complete`` so two callbacks sharing a ``verifier`` name cannot
+      fake two independent passes -- which otherwise keeps ``approved``/progress
+      true forever and can hang a no-progress-bounded loop (codex review
+      r3407165600).
+    - ``has_critical_failure`` is true if any verifier's latest verdict is a
+      critical failure.
+    - ``approved`` is ``distinct passes >= min_passes`` and not
+      ``has_critical_failure`` -- the "independent verifier passes" rule
+      (ADR 0006 §6.2).
     """
     decisions: list[VerifierDecision] = []
     for verifier in verifiers:
@@ -79,8 +86,14 @@ def run_review(
         runtime.record_verifier(contract, decision)
         decisions.append(decision)
 
-    passes = sum(1 for decision in decisions if decision.is_pass)
-    has_critical_failure = any(decision.is_critical_failure for decision in decisions)
+    # Collapse to one latest verdict per verifier name (same rule as complete()).
+    latest: dict[str, VerifierDecision] = {}
+    for decision in decisions:
+        latest[decision.verifier] = decision
+    verdicts = list(latest.values())
+
+    passes = sum(1 for decision in verdicts if decision.is_pass)
+    has_critical_failure = any(decision.is_critical_failure for decision in verdicts)
     approved = passes >= min_passes and not has_critical_failure
 
     return ReviewResult(
