@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .agent_bootstrap import install_agent_files
 from .contracts import AuditEventType
+from .doc_budget import DEFAULT_DOC_MAX_CHARS, check_docs, format_report, over_budget
 from .ledger import EvidenceLedger
 from .review_batches import (
     DEFAULT_MAX_LINES,
@@ -61,6 +62,14 @@ def main() -> int:
         "--exclude", action="append", default=[], metavar="GLOB", help="path glob to drop (repeatable)"
     )
     review_parser.add_argument("--json", action="store_true")
+
+    doc_parser = subparsers.add_parser(
+        "doc-budget",
+        help="flag generated MD docs over the caveman char budget (ADR 0010)",
+    )
+    doc_parser.add_argument("paths", nargs="*", help="MD files (default: docs/**/*.md)")
+    doc_parser.add_argument("--max-chars", type=int, default=DEFAULT_DOC_MAX_CHARS)
+    doc_parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
     if args.command == "init":
@@ -130,6 +139,15 @@ def main() -> int:
             print(format_plan(batches, max_lines=args.max_lines))
         # Exit 2 signals "exceeds budget" so CI/scripts can branch on it.
         return 2 if len(batches) > 1 or any(b.oversized for b in batches) else 0
+
+    if args.command == "doc-budget":
+        paths = args.paths or [str(p) for p in Path("docs").rglob("*.md")]
+        sizes = check_docs(paths, max_chars=args.max_chars)
+        if args.json:
+            print(json.dumps([d.to_dict() for d in sizes], ensure_ascii=True, indent=2))
+        else:
+            print(format_report(sizes, max_chars=args.max_chars))
+        return 2 if over_budget(sizes) else 0
 
     return 1
 
