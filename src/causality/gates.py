@@ -157,6 +157,14 @@ class HITLGate:
         ``iteration_state`` is supplied by the loop runtime. Hitting the
         iteration or no-progress ceiling stops; exhausting failed hypotheses
         escalates (consistent with the root-cause protocol).
+
+        The loop polls this *before every iteration*, so a non-terminal "keep
+        going" result is a pure query and is deliberately NOT recorded:
+        appending a GATE_DECISION on each poll would flood the ledger with one
+        event per iteration and inflate Reflect's ``gate_counts[pass]`` with
+        observer noise -- the act of checking the stop condition would change
+        the very trail Reflect later distills (a should_stop observer effect).
+        Only a terminal STOP/ESCALATE is a material decision worth a record.
         """
         policy = contract.stopping_policy
         iterations = int(iteration_state.get("iterations", 0))
@@ -183,7 +191,10 @@ class HITLGate:
                 GateDecision.ESCALATE,
                 f"reached max_failed_hypotheses ({max_failed})",
             )
-        return self._record(contract, GateDecision.PASS, "stop condition not met")
+        # Keep going: a pure poll, not a material gate decision. Return without
+        # recording so the per-iteration check leaves no observer footprint in
+        # the ledger. The loop inspects only the decision value.
+        return GateResult(GateDecision.PASS, ("stop condition not met",))
 
     def _missing_required_evidence(self, contract: GoalContract) -> set[str]:
         required = contract.required_evidence_kinds()

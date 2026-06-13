@@ -18,6 +18,8 @@ from causality import (
     VerifierDecision,
     run_bounded_loop,
 )
+from causality.memory import TypedMemory
+from causality.reflect import reflect_on_contract
 
 
 class LoopTests(unittest.TestCase):
@@ -108,6 +110,41 @@ class LoopTests(unittest.TestCase):
             result = run_bounded_loop(runtime, contract, step)
             self.assertEqual(result.decision, GateDecision.STOP)
             self.assertEqual(result.iterations, 2)
+
+    def test_should_stop_polls_do_not_pollute_reflect_gate_counts(self) -> None:
+        # Observer effect: a multi-iteration loop polls should_stop before
+        # every iteration. Those "keep going" polls must not be distilled by
+        # Reflect as gate passes -- only the terminal completion PASS is a real
+        # pass. Before the fix, two should_stop polls would push pass=1 to pass=3.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = self._runtime(temp_dir)
+            memory = TypedMemory(Path(temp_dir))
+            contract = runtime.create_contract(
+                GoalContract(
+                    "Loop", "repairs once then completes",
+                    evidence_required=[EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "tests")],
+                    stopping_policy={"max_iterations": 5},
+                )
+            )
+
+            def step(c: GoalContract, i: int) -> StepOutcome:
+                # Satisfy completion only on the second iteration: iter 0 -> a
+                # REPAIR gate decision, iter 1 -> the terminal completion PASS.
+                if i >= 1:
+                    runtime.record_evidence(c, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
+                    runtime.record_verifier(c, VerifierDecision("correctness", "pass", "ok"))
+                    runtime.record_verifier(c, VerifierDecision("evidence", "pass", "ok"))
+                return StepOutcome(progress=True)
+
+            result = run_bounded_loop(runtime, contract, step)
+            self.assertEqual(result.decision, GateDecision.PASS)
+            self.assertEqual(result.iterations, 2)
+
+            reflection = reflect_on_contract(runtime.ledger, memory, contract)
+            summary = reflection.retrospective.summary
+            # Exactly one real gate pass (the terminal complete) and one repair.
+            self.assertIn("pass=1", summary)
+            self.assertIn("repair=1", summary)
 
 
 if __name__ == "__main__":
