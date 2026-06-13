@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from .agent_bootstrap import install_agent_files
 from .contracts import AuditEventType
 from .ledger import EvidenceLedger
+from .review_batches import (
+    DEFAULT_MAX_LINES,
+    format_plan,
+    parse_numstat,
+    plan_review_batches,
+)
 from .workflows import workflow_manifest
 
 
@@ -32,6 +40,27 @@ def main() -> int:
     )
     install_parser.add_argument("--project", default=".")
     install_parser.add_argument("--force", action="store_true")
+
+    review_parser = subparsers.add_parser(
+        "review-plan",
+        help="split a diff into <=N-line review batches (ADR 0009)",
+    )
+    review_parser.add_argument("--base", default="origin/main", help="diff base ref (default origin/main)")
+    review_parser.add_argument("--max-lines", type=int, default=DEFAULT_MAX_LINES)
+    review_parser.add_argument(
+        "--committed",
+        action="store_true",
+        help="plan only committed changes (base...HEAD), e.g. for PR planning; "
+        "default includes uncommitted working-tree changes (base vs working tree)",
+    )
+    review_parser.add_argument(
+        "--from-file",
+        help="read `git diff --numstat` from this file (use '-' for stdin) instead of running git",
+    )
+    review_parser.add_argument(
+        "--exclude", action="append", default=[], metavar="GLOB", help="path glob to drop (repeatable)"
+    )
+    review_parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
     if args.command == "init":
@@ -69,6 +98,38 @@ def main() -> int:
         result = install_agent_files(args.project, force=args.force)
         print(json.dumps(result.to_dict(), ensure_ascii=True, indent=2))
         return 0
+
+    if args.command == "review-plan":
+        if args.from_file == "-":
+            numstat = sys.stdin.read()
+        elif args.from_file:
+            numstat = Path(args.from_file).read_text(encoding="utf-8")
+        else:
+            # Default compares the base to the WORKING TREE (`git diff <base>`),
+            # which includes uncommitted tracked changes -- otherwise a large
+            # local diff reviewed before committing reports "(no changes)" and
+            # bypasses the budget (codex review r3407190893). `--committed` uses
+            # the commit-to-commit form for PR planning. (Untracked new files are
+            # not shown by git diff; `git add -N` them to include them.)
+            diff_range = f"{args.base}...HEAD" if args.committed else args.base
+            proc = subprocess.run(
+                ["git", "diff", "--numstat", diff_range],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                print(proc.stderr.strip(), file=sys.stderr)
+                return 1
+            numstat = proc.stdout
+        batches = plan_review_batches(
+            parse_numstat(numstat), max_lines=args.max_lines, exclude=args.exclude
+        )
+        if args.json:
+            print(json.dumps([b.to_dict() for b in batches], ensure_ascii=True, indent=2))
+        else:
+            print(format_plan(batches, max_lines=args.max_lines))
+        # Exit 2 signals "exceeds budget" so CI/scripts can branch on it.
+        return 2 if len(batches) > 1 or any(b.oversized for b in batches) else 0
 
     return 1
 
