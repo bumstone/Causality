@@ -109,9 +109,11 @@ L4(ledger) → **증류** → L0(typed memory + rewarded trajectory). 그 결과
 | **의도적 배제** | Synergy 협업 네트워크·사회적 관계·인격 |
 
 > ⚠️ **정정(리뷰 반영):** Magentic-One의 *정체→replan(stall→replan)* 은 **아직
-> 미구현**이다. 현재 `GateDecision.REPAIR`(`gates.py:62-98`)는 검증 미달(verifier<2 /
-> 치명 실패 / 증거 누락)에서만 발생하며 정체 카운터가 아니다. `no_progress_iterations`
-> 소비자는 없다. ADR 0002의 "이미 구현됨" 표기는 본 정정으로 무효화한다.
+> 미구현**이다. 현재 `GateDecision.REPAIR`(`gates.py`)는 검증 미달(verifier<2 /
+> 치명 실패 / 증거 누락)에서만 발생하며 정체 카운터가 아니다. `no_progress_iterations`는
+> `should_stop`이 소비해 **루프를 정지**시키지만(`gates.py:174`, `loop.py`로 카운트 공급),
+> 정체를 **replan(REPAIR)으로 전환하는 stall→replan은 없다**. ADR 0002의 "이미 구현됨"
+> 표기는 본 정정으로 무효화한다.
 
 ## 6. 자기개선 루프 실현 가능성 (Run → Review → Fix, Reflect → Skill update)
 
@@ -156,7 +158,7 @@ L4(ledger) → **증류** → L0(typed memory + rewarded trajectory). 그 결과
 | C-MEM-3 | earned skill이 lucky/brittle 성공을 못 거름 + authored 중복 | **부분 해결**: 재현성 n-of-m + dedup + HITL 승급은 구현. promoted skill의 자동 재사용은 미구현 |
 | C-MEM-4 | 기억 저장 스토리 3중 모순 + 해시체인 출처 소실 | **해결**: ADR 0005 §2.2 provenance(ledger `entry_hash`) 연결 |
 | C-LOOP-1 | Reflect/Skill-update 프리미티브 전무 | **부분 해결**: `review.py`·`reflect.py`·`skills.py`·`engine.py` 구현. 단, guardrail/skill read-path가 없어 완전 폐쇄 루프는 아님(§6) |
-| C-STOP-1 | `should_stop`/stopping_policy 소비자 없음, "limited loop" 미정의 | **명시**: §3 C2 ⚠️ + §6.1(1) |
+| C-STOP-1 | `should_stop`/stopping_policy 소비자 없음, "limited loop" 미정의 | **해결**: `should_stop`+`run_bounded_loop`이 stopping_policy(max_iterations/no_progress_iterations/max_failed_hypotheses)를 소비(`gates.py`/`loop.py`). "limited loop"=세 ceiling으로 정의. 남은 갭=stall→replan 신호·gate 배선(§5.1·§6.1) |
 | C-MAG-1 | Magentic stall→replan을 REPAIR로 "이미 구현됨" 오기재 | **정정**: §5.1 정정 박스 |
 | C-ESC-1 | TaskContract.escalation(무동작) vs gate 위험기반 ESCALATE 이중화 | **처리**: 게이트가 `contract.escalation`을 *읽도록* 일원화(ADR 0001 §2.3 보강) |
 | C-ROUTE-1 | agent-rules intent 라우팅이 3곳(AGENT_RULES/AGENTS_MD/CODEX_ROUTING) 잔존, "흡수" 과장 | **처리**: ADR 0004 §2.1 — 구현 시 3곳 제거를 마이그레이션 항목으로 명시 |

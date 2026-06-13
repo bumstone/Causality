@@ -228,9 +228,11 @@ flowchart LR
 | [0003](docs/adr/0003-contract-harness.md) | Contract Harness | **Accepted / 구현** |
 | [0004](docs/adr/0004-agent-harness-task-routing.md) | Agent Harness 작업 라우팅 | **Accepted / 구현** |
 | [0005](docs/adr/0005-identity-memory-skill-substrate.md) | 정체성·기억·스킬 기반층 | **Accepted / 구현** |
-| [0006](docs/adr/0006-final-blended-architecture.md) | 최종 혼합(5계층) 아키텍처 | **Accepted / 구현** |
+| [0006](docs/adr/0006-final-blended-architecture.md) | 최종 혼합(5계층) 아키텍처 | **Accepted / 부분** |
 | [0007](docs/adr/0007-context-economy-progressive-disclosure.md) | Context Economy / 점진적 공개 | **Accepted / 부분** |
 | [0008](docs/adr/0008-repository-hygiene-shared-vs-ignored.md) | 저장소 위생: 공유 vs 무시 | **Accepted / 구현** |
+| [0009](docs/adr/0009-review-change-budget.md) | Reviewable Change Budget (≤1000줄 리뷰) | **Accepted / 구현** |
+| [0010](docs/adr/0010-caveman-doc-budget.md) | Caveman Doc Budget (≤2000자) | **Accepted / 구현** |
 
 ADR 0001~0008의 핵심 구현 슬라이스는 머지되었고, `CausalityEngine`은
 Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill candidate의 happy path를 `run_task` /

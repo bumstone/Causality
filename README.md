@@ -240,9 +240,11 @@ Pulled from [docs/adr/README.md](docs/adr/README.md).
 | [0003](docs/adr/0003-contract-harness.md) | Contract Harness | **Accepted / Implemented** |
 | [0004](docs/adr/0004-agent-harness-task-routing.md) | Agent Harness task routing | **Accepted / Implemented** |
 | [0005](docs/adr/0005-identity-memory-skill-substrate.md) | Identity / memory / skill substrate | **Accepted / Implemented** |
-| [0006](docs/adr/0006-final-blended-architecture.md) | Final blended (5-layer) architecture | **Accepted / Implemented** |
+| [0006](docs/adr/0006-final-blended-architecture.md) | Final blended (5-layer) architecture | **Accepted / Partial** |
 | [0007](docs/adr/0007-context-economy-progressive-disclosure.md) | Context Economy / progressive disclosure | **Accepted / Partial** |
 | [0008](docs/adr/0008-repository-hygiene-shared-vs-ignored.md) | Repository hygiene: shared vs ignored | **Accepted / Implemented** |
+| [0009](docs/adr/0009-review-change-budget.md) | Reviewable change budget (≤1000-line review) | **Accepted / Implemented** |
+| [0010](docs/adr/0010-caveman-doc-budget.md) | Caveman doc budget (≤2000 chars) | **Accepted / Implemented** |
 
 The core ADR 0001–0008 implementation slices are merged, and `CausalityEngine`
 wires the happy path from Agenda → Dispatch → Harness → Loop → Review → Reflect
