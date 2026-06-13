@@ -19,6 +19,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .contracts import utc_now
+from .durable import write_text_durably
 
 VALID_STATUSES = ("pending", "active", "done", "dropped")
 
@@ -72,11 +73,9 @@ class Agenda:
         self._items = [AgendaItem.from_dict(item) for item in data.get("items", [])]
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"items": [item.to_dict() for item in self._items]}
-        self.path.write_text(
-            json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
-            encoding="utf-8",
+        write_text_durably(
+            self.path, json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
         )
 
     def add(self, objective: str, *, priority: int = 0) -> AgendaItem:
