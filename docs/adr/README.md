@@ -24,6 +24,7 @@
 | [0008](0008-repository-hygiene-shared-vs-ignored.md) | 저장소 위생 — 공유 설계 vs 무시할 런타임 state | **Accepted (구현)** |
 | [0009](0009-review-change-budget.md) | Reviewable Change Budget — ≤1000줄 단위 리뷰(PR 분할 + diff 배치) | **Accepted (구현)** |
 | [0010](0010-caveman-doc-budget.md) | Caveman Doc Budget — AI 생성 MD ≤2000자·텔레그래프 문체 | **Accepted (구현)** |
+| [0011](0011-ledger-persistence-indexing-durability.md) | Evidence Ledger 영속화 — latest-hash 캐시·contract 인덱스·durable write | **Accepted (부분 구현)** |
 
 ## 읽는 순서
 
@@ -75,9 +76,10 @@ Agent Harness·Reflect·3계층 메타데이터·저장소 위생 규칙, 이어
 | 0006 §2/§6 | **happy-path 엔진** `CausalityEngine`(Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill candidate) | `engine.py` | `test_engine.py` |
 | 0009 | Reviewable Change Budget(≤1000줄) + `causality review-plan` | `review_batches.py` | `test_review_batches.py` |
 | 0010 | Caveman Doc Budget(≤2000자) + `causality doc-budget` | `doc_budget.py` | `test_doc_budget.py` |
+| 0011 §2.1 | Ledger size-guarded latest-hash 캐시(append O(N²)→amortized O(1)) + `events_for_contract`/`latest_hash_for_contract` 접근자 | `ledger.py` | `test_ledger.py` |
 
 **정직한 상태(2026-06-13 재점검):** 프리미티브와 `CausalityEngine.run_task`/`run_next`
 happy-path 배선은 구현됨. 단 **완전 폐쇄 운영 루프는 아직 아님** — plan/action/tool/non-goal
 집행 게이트가 `work` 앞에 강제되지 않고, failures→non_goals 환류·TTL 만료/회수·earned skill
-자동 재사용·durable write path·ledger indexing이 남음. 상세·우선순위는
-[2026-06-13 코드리뷰](../code-review-2026-06-13.md) 기준으로 관리한다.
+자동 재사용·durable write path(ADR 0011 §2.2 R4)가 남음. ledger indexing(R2)은 ADR 0011
+§2.1로 구현됨. 상세·우선순위는 [2026-06-13 코드리뷰](../code-review-2026-06-13.md) 기준으로 관리한다.
