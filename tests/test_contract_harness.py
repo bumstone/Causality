@@ -79,6 +79,24 @@ class ContractHarnessTests(unittest.TestCase):
             with self.assertRaises(ContractHarnessError):
                 harness.bind(objective="o", verification=["x"], stop_condition={})
 
+    def test_bind_rejects_stop_condition_without_a_real_ceiling(self) -> None:
+        # Regression F4 + codex r3407165600: stop_condition must guarantee
+        # termination via a positive `max_iterations`. Irrelevant keys, zero, or
+        # only a progress-dependent ceiling (no_progress_iterations) are rejected
+        # because they cannot bound a loop whose progress signal may be wrong.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, harness = self._harness(temp_dir)
+            for bad in ({"foo": 1}, {"max_iterations": 0}, {"no_progress_iterations": 5}):
+                with self.assertRaises(ContractHarnessError):
+                    harness.bind(objective="o", verification=["x"], stop_condition=bad)
+            # max_iterations present -> accepted; extra ceilings are allowed.
+            bound = harness.bind(
+                objective="o",
+                verification=["x"],
+                stop_condition={"max_iterations": 3, "no_progress_iterations": 2},
+            )
+            self.assertEqual(bound.task.stop_condition["max_iterations"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

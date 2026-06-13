@@ -37,6 +37,17 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(event.artifacts[0]["bytes"], 2)
             self.assertIsNotNone(event.artifacts[0]["sha256"])
 
+    def test_tail_zero_returns_empty(self) -> None:
+        # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            ledger.append(AuditEventType.EVIDENCE, {"kind": "test_output"})
+            ledger.append(AuditEventType.VERIFIER_DECISION, {"status": "pass"})
+
+            self.assertEqual(ledger.tail(0), [])
+            self.assertEqual(len(ledger.tail(1)), 1)
+            self.assertEqual(len(ledger.tail(5)), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

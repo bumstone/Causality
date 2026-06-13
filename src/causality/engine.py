@@ -102,12 +102,17 @@ class CausalityEngine:
         reflect into typed memory -> on success, distill an earned-skill
         candidate.
         """
-        # L1 dispatch: an explicit TaskType wins; a string is classified; else
-        # classify the objective text.
+        # L1 dispatch: an explicit TaskType wins; a string is first tried as a
+        # TaskType value, then classified as free text; else classify the
+        # objective. Without the value coercion, "long_running" keyword-misses
+        # and falls to TRIVIAL (code review 2026-06-13, F7).
         if isinstance(task_type, TaskType):
             resolved_type = task_type
         elif isinstance(task_type, str):
-            resolved_type = self.dispatcher.classify(task_type)
+            try:
+                resolved_type = TaskType(task_type)
+            except ValueError:
+                resolved_type = self.dispatcher.classify(task_type)
         else:
             resolved_type = self.dispatcher.classify(objective)
         dispatch = self.dispatcher.route(resolved_type)
@@ -134,7 +139,7 @@ class CausalityEngine:
             last_review["result"] = review
             return StepOutcome(progress=review.approved)
 
-        loop_result = run_bounded_loop(self.runtime, contract, step)
+        loop_result = run_bounded_loop(self.runtime, contract, step, min_passes=min_passes)
 
         # L0 reflect: distill the contract's trail into typed memory.
         reflection = reflect_on_contract(self.runtime.ledger, self.memory, contract)
@@ -165,20 +170,27 @@ class CausalityEngine:
         """Pull the next pending agenda item and run it end to end.
 
         Activates the item, runs the task, and marks it done on a clean pass.
-        Returns ``None`` when the agenda has no pending work.
+        A run that fails, escalates, or raises defers the item back to pending
+        so the intention is never stranded "active" forever (code review
+        2026-06-13, F10). Returns ``None`` when the agenda has no pending work.
         """
         item: AgendaItem | None = self.agenda.next_pending()
         if item is None:
             return None
         self.agenda.activate(item.item_id)
-        run = self.run_task(
-            objective=item.objective,
-            work=work,
-            verifiers=verifiers,
-            verification=verification,
-            stop_condition=stop_condition,
-            **kwargs,
-        )
-        if run.passed:
-            self.agenda.complete(item.item_id)
-        return run
+        run: TaskRun | None = None
+        try:
+            run = self.run_task(
+                objective=item.objective,
+                work=work,
+                verifiers=verifiers,
+                verification=verification,
+                stop_condition=stop_condition,
+                **kwargs,
+            )
+            return run
+        finally:
+            if run is not None and run.passed:
+                self.agenda.complete(item.item_id)
+            else:
+                self.agenda.defer(item.item_id)

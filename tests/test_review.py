@@ -129,6 +129,21 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(result.decisions, ())
             self.assertEqual(runtime.ledger.find(AuditEventType.VERIFIER_DECISION), [])
 
+    def test_duplicate_verifier_names_count_once(self) -> None:
+        # codex review r3407165600: two callbacks sharing a verifier name must
+        # not fake two independent passes (which would keep approved/progress
+        # true forever and hang a no-progress-bounded loop).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = self._runtime(temp_dir)
+            contract = self._contract(runtime)
+
+            result = run_review(runtime, contract, [_pass("correctness"), _pass("correctness")], min_passes=2)
+
+            self.assertEqual(result.passes, 1)  # one distinct verifier
+            self.assertFalse(result.approved)
+            # Both raw decisions are still recorded in the ledger.
+            self.assertEqual(len(runtime.ledger.find(AuditEventType.VERIFIER_DECISION)), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

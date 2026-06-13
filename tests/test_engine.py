@@ -110,6 +110,44 @@ class EngineTests(unittest.TestCase):
             self.assertEqual([i.item_id for i in done], [item.item_id])
             self.assertIsNone(engine.agenda.next_pending())
 
+    def test_string_task_type_value_routes_correctly(self) -> None:
+        # Regression F7: a TaskType *value* string must route by value, not be
+        # keyword-classified ("long_running" misses keywords -> TRIVIAL).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = self._engine(temp_dir)
+            run = engine.run_task(
+                objective="migrate the data store overnight",
+                work=self._work(engine),
+                verifiers=_passing_verifiers(),
+                verification=["python -m unittest"],
+                stop_condition={"max_iterations": 3},
+                task_type="long_running",
+            )
+            self.assertEqual(run.dispatch.task_type, TaskType.LONG_RUNNING)
+            self.assertEqual(run.dispatch.architecture, "causality")
+
+    def test_failed_run_next_defers_item_back_to_pending(self) -> None:
+        # Regression F10: a non-passing run must not strand the item "active".
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = self._engine(temp_dir)
+            item = engine.agenda.add("implement the parser", priority=1)
+            failing = [lambda c: VerifierDecision("correctness", "fail", "nope")]
+
+            run = engine.run_next(
+                work=self._work(engine),
+                verifiers=failing,
+                verification=["python -m unittest"],
+                stop_condition={"max_iterations": 2, "no_progress_iterations": 99},
+            )
+
+            self.assertIsNotNone(run)
+            self.assertFalse(run.passed)
+            # Item is back in the queue, not stranded "active".
+            self.assertEqual(engine.agenda.items(status="active"), [])
+            nxt = engine.agenda.next_pending()
+            self.assertIsNotNone(nxt)
+            self.assertEqual(nxt.item_id, item.item_id)
+
 
 if __name__ == "__main__":
     unittest.main()

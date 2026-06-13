@@ -22,6 +22,11 @@ from .contracts import (
 from .orchestrator import Causality
 
 
+# The ceilings should_stop actually consumes (gates.py); bind() requires at
+# least one of them to be a positive int so every bound loop is truly bounded.
+STOP_CONDITION_KEYS = ("max_iterations", "no_progress_iterations", "max_failed_hypotheses")
+
+
 class ContractHarnessError(ValueError):
     """Raised when the pre-run ritual is incomplete.
 
@@ -84,6 +89,20 @@ class ContractHarness:
 
         if not stop_condition:
             raise ContractHarnessError("stop_condition is required (step 5: when to stop)")
+        # A stop condition must GUARANTEE termination. `no_progress_iterations`
+        # and `max_failed_hypotheses` depend on the step's self-reported
+        # progress/failure, which can be wrong or flap forever (codex review
+        # r3407165600); only `max_iterations` is an unconditional ceiling. So
+        # require it as the backstop -- the others are optional refinements. A
+        # typo'd or zero value ({"foo": 1}, {"max_iterations": 0}) is rejected.
+        max_iterations = stop_condition.get("max_iterations")
+        if not (isinstance(max_iterations, int) and not isinstance(max_iterations, bool) and max_iterations > 0):
+            raise ContractHarnessError(
+                "stop_condition must set a positive integer 'max_iterations' as the "
+                "unconditional termination backstop (additional ceilings allowed: "
+                + ", ".join(k for k in STOP_CONDITION_KEYS if k != "max_iterations")
+                + ")"
+            )
 
         evidence_required = [
             EvidenceRequirement(kind=evidence_kind, description=command, required=True)

@@ -63,21 +63,37 @@ class HITLGate:
         self,
         contract: GoalContract,
         verifier_decisions: Iterable[VerifierDecision] | None = None,
+        *,
+        min_passes: int = 2,
     ) -> GateResult:
-        verifier_records = list(verifier_decisions or self._verifier_decisions(contract.goal_id))
-        if any(item.is_critical_failure for item in verifier_records):
+        records = (
+            list(verifier_decisions)
+            if verifier_decisions is not None
+            else self._verifier_decisions(contract.goal_id)
+        )
+        # A verifier's verdict is its LATEST decision. Counting raw events let a
+        # single verifier passing in two loop iterations satisfy the
+        # "independent passes" rule, and let an already-fixed critical failure
+        # from an earlier iteration block completion forever (code review
+        # 2026-06-13, F1/F2).
+        latest: dict[str, VerifierDecision] = {}
+        for item in records:
+            latest[item.verifier] = item
+        verdicts = list(latest.values())
+
+        if any(item.is_critical_failure for item in verdicts):
             return self._record(
                 contract,
                 GateDecision.REPAIR,
                 "critical verifier failure remains unresolved",
             )
 
-        pass_count = sum(1 for item in verifier_records if item.is_pass)
-        if pass_count < 2:
+        pass_count = sum(1 for item in verdicts if item.is_pass)
+        if pass_count < min_passes:
             return self._record(
                 contract,
                 GateDecision.REPAIR,
-                "completion requires at least two independent verifier passes",
+                f"completion requires at least {min_passes} independent verifier passes",
             )
 
         missing = self._missing_required_evidence(contract)

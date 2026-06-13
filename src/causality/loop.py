@@ -47,15 +47,18 @@ def _normalize(value: Union[StepOutcome, bool, None]) -> StepOutcome:
         return StepOutcome()
     if isinstance(value, StepOutcome):
         return value
-    if isinstance(value, bool):
-        return StepOutcome(progress=value)
-    return StepOutcome()
+    # Any other report counts by truthiness, so a falsy non-bool (e.g. 0
+    # items changed) registers as no progress instead of silently defeating
+    # the no-progress ceiling (code review 2026-06-13, H6).
+    return StepOutcome(progress=bool(value))
 
 
 def run_bounded_loop(
     runtime: Causality,
     contract: GoalContract,
     step: Step,
+    *,
+    min_passes: int = 2,
 ) -> LoopResult:
     """Drive ``step`` until completion passes or the stop condition fires.
 
@@ -89,7 +92,7 @@ def run_bounded_loop(
             failed += 1
         no_progress = 0 if outcome.progress else no_progress + 1
 
-        result = runtime.complete(contract)
+        result = runtime.complete(contract, min_passes=min_passes)
         if result.decision is GateDecision.PASS:
             return LoopResult(GateDecision.PASS, iterations, _reason(result, "completed"))
         if result.decision is GateDecision.ESCALATE:
