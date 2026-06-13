@@ -72,11 +72,13 @@ flowchart TD
 (`can_execute_action`); and a claim of "done" is checked by the **completion
 gate** (`complete`). High-risk and irreversible work escalates to a human.
 
-> The control flow (L0 to L4) and the bottom-up **distill** loop (L4 to L0) are
-> both implemented: `CausalityEngine` closes the cycle and the distilled
-> failures/skills feed back into memory. The remaining gap is *automatic reuse*
-> of earned skills at dispatch — see [Self-improvement loop](#self-improvement-loop)
-> and [Status](#status-adrs).
+> The control flow (L0 to L4) and the bottom-up **distill** write-path are
+> implemented as a `CausalityEngine` happy path. The fully enforced service loop
+> is still partial: plan/action/tool/non-goal gates are not forced before the
+> `work` callback, failures are not yet injected into later `non_goals`, TTL is
+> not enforced on read, and earned skills are not automatically reused at
+> dispatch. See [Self-improvement loop](#self-improvement-loop),
+> [Status](#status-adrs), and the [2026-06-13 code review](docs/code-review-2026-06-13.md).
 
 ---
 
@@ -137,21 +139,22 @@ read **on demand**:
 ## Self-improvement loop
 
 The loop has two halves: **Run to Review to Fix**, and **Reflect to Skill
-update** ([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)). Both are
-now implemented and wired together by `CausalityEngine` (`run_task` / `run_next`).
+update** ([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)). The
+primitives and happy-path wiring exist, but several enforcement/read-path pieces
+remain partial.
 
-![Self-improvement loop: Run → Review → Fix (solid) and Reflect → Skill update (dashed), all implemented](docs/assets/loop.svg)
+![Self-improvement loop: Run → Review → Fix (solid) and Reflect → Skill update (dashed), with partial enforcement/read-path gaps](docs/assets/loop.svg)
 
 <details>
 <summary>Diagram source (Mermaid)</summary>
 
 ```mermaid
 flowchart LR
-    RUN["Run<br/>(implemented)"] --> REVIEW["Review<br/>(implemented)"]
+    RUN["Run<br/>(partial enforcement)"] --> REVIEW["Review<br/>(implemented)"]
     REVIEW --> FIX["Fix<br/>(implemented)"]
     FIX --> RUN
     RUN -.-> REFLECT["Reflect<br/>(implemented)"]
-    REFLECT -.-> SKILL["Skill update<br/>(implemented)"]
+    REFLECT -.-> SKILL["Skill update<br/>(partial reuse)"]
     SKILL -.-> RUN
 ```
 
@@ -159,11 +162,11 @@ flowchart LR
 
 | Step | Status | Notes |
 |---|---|---|
-| Run | Implemented | `record_evidence` / `record_verifier` append to the ledger. |
+| Run | Partial | Ledger append and `work` callback execution exist, but plan/action/tool/non-goal gates are not yet forced before `work`. |
 | Review | Implemented | `run_review` calls N independent verifiers, records each, and aggregates the ≥2-pass / no-critical-failure rule. |
 | Fix | Implemented | `run_bounded_loop` consumes `GateDecision.REPAIR` and replans, bounded by `should_stop`. |
 | Reflect | Implemented | `reflect_on_contract` distills the ledger trail into typed `retrospectives` + `failures` (contract-scoped provenance). |
-| Skill update | Implemented | `SkillStore`: distill → n-of-m reproducibility → authored dedup → HITL promotion. Automatic *reuse* at dispatch is the remaining follow-up. |
+| Skill update | Partial | `SkillStore`: distill → n-of-m reproducibility → authored dedup → HITL promotion exists; automatic *reuse* at dispatch is not yet implemented. |
 
 ---
 
@@ -237,26 +240,23 @@ Pulled from [docs/adr/README.md](docs/adr/README.md).
 | [0003](docs/adr/0003-contract-harness.md) | Contract Harness | **Accepted / Implemented** |
 | [0004](docs/adr/0004-agent-harness-task-routing.md) | Agent Harness task routing | **Accepted / Implemented** |
 | [0005](docs/adr/0005-identity-memory-skill-substrate.md) | Identity / memory / skill substrate | **Accepted / Implemented** |
-| [0006](docs/adr/0006-final-blended-architecture.md) | Final blended (5-layer) architecture | **Accepted / Implemented** |
+| [0006](docs/adr/0006-final-blended-architecture.md) | Final blended (5-layer) architecture | **Accepted / Partial** |
 | [0007](docs/adr/0007-context-economy-progressive-disclosure.md) | Context Economy / progressive disclosure | **Accepted / Partial** |
 | [0008](docs/adr/0008-repository-hygiene-shared-vs-ignored.md) | Repository hygiene: shared vs ignored | **Accepted / Implemented** |
+| [0009](docs/adr/0009-review-change-budget.md) | Reviewable change budget (≤1000-line review) | **Accepted / Implemented** |
+| [0010](docs/adr/0010-caveman-doc-budget.md) | Caveman doc budget (≤2000 chars) | **Accepted / Implemented** |
 
-The self-improvement loop is now closed end to end. Implemented: the `non_goals`
-field and frozen `TaskContract`; the enforcing gates (`check_tool_allowed` /
-`check_non_goal` / `should_stop`); `ContractHarness.bind` returning a
-`BoundContract`; the bounded loop driver (`run_bounded_loop`); automated Review
-(`run_review`); typed memory with governance (`TypedMemory`); the Reflect
-distiller (`reflect_on_contract`); the earned-skill store with n-of-m
-reproducibility, dedup, and HITL promotion (`SkillStore`); the persisted
-`Agenda`; the Agent Harness dispatcher (`AgentHarness`); three-layer workflow
-metadata (`WorkflowTemplate.layer`); the on-demand file layout (`workflow/`
-`checklists/` `skills/` `memory/<6 types>/`) with the Context Economy rule; the
-share-vs-ignore hygiene rules; and the **`CausalityEngine`** that wires
-Agenda → Dispatch → Harness → Loop → Review → Reflect → Skill into one
-`run_task` / `run_next`. Remaining (optional): a standard tool-execution adapter
-for the `work` callback, automatic reuse of earned skills at dispatch, a
-guardrail-TTL expiry sweep, and multi-agent collaboration (intentionally out of
-scope, ADR 0005).
+The core ADR 0001–0008 implementation slices are merged, and `CausalityEngine`
+wires the happy path from Agenda → Dispatch → Harness → Loop → Review → Reflect
+→ Skill candidate into `run_task` / `run_next`. Be precise, though: the service
+is not yet a fully enforced closed loop. `run_task` indirectly consumes
+`should_stop` and `complete`, but it does not yet force the plan/action/tool/
+non-goal gates before the `work` callback. Reflect writes failures, but later
+contracts do not yet read them back into `non_goals`; TTL is stored as metadata
+but not enforced on read; promoted earned skills are not automatically reused at
+dispatch; ledger/memory/skills/agenda writes are not yet lock/fsync/atomic-rename
+durable; and the ledger has no contract/event index. See
+[2026-06-13 code review](docs/code-review-2026-06-13.md) for the priority order.
 
 ---
 
