@@ -38,9 +38,9 @@ class LedgerTests(unittest.TestCase):
             self.assertIsNotNone(event.artifacts[0]["sha256"])
 
     def test_latest_hash_matches_last_event_and_survives_reload(self) -> None:
-        # R2: latest_hash() is served from the in-memory cache after the first
-        # load, but must equal the last appended event's hash, and a fresh
-        # instance on the same file must lazily reload the same value from disk.
+        # R2: latest_hash() is served from a size-guarded cache, but must equal
+        # the last appended event's hash, and a fresh instance on the same file
+        # must read the same value from disk.
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ledger.jsonl"
             ledger = EvidenceLedger(path)
@@ -56,6 +56,31 @@ class LedgerTests(unittest.TestCase):
             third = reloaded.append(AuditEventType.EVIDENCE, {"kind": "more"})
             self.assertEqual(third.previous_hash, last.entry_hash)
             self.assertTrue(reloaded.verify_chain())
+
+    def test_cache_invalidated_when_sibling_instance_appends(self) -> None:
+        # codex r3407872680: a second EvidenceLedger on the same file in this
+        # process (e.g. mcp_server's long-lived ledger vs install_agent_files')
+        # must not be served a stale latest_hash from its cache -- otherwise a
+        # later append on the first instance would break the hash chain. The
+        # size guard forces a re-read.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            a = EvidenceLedger(path)
+            b = EvidenceLedger(path)
+
+            first = a.append(AuditEventType.EVIDENCE, {"kind": "test_output"})
+            # b primes its cache from disk (sees `first`).
+            self.assertEqual(b.latest_hash(), first.entry_hash)
+            # a appends again; b's cache is now behind by one row.
+            second = a.append(AuditEventType.VERIFIER_DECISION, {"status": "pass"})
+
+            # b must observe a's newer append, not its stale cache.
+            self.assertEqual(b.latest_hash(), second.entry_hash)
+            self.assertEqual(len(b.events()), 2)
+            # ...and chain a fresh append onto the real tail.
+            third = b.append(AuditEventType.EVIDENCE, {"kind": "more"})
+            self.assertEqual(third.previous_hash, second.entry_hash)
+            self.assertTrue(b.verify_chain())
 
     def test_events_for_contract_scopes_and_orders(self) -> None:
         # R2: contract-scoped accessors replace the hand-rolled
@@ -75,14 +100,22 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(ledger.events_for_contract("missing"), [])
             self.assertIsNone(ledger.latest_hash_for_contract("missing"))
 
-    def test_events_returns_copy(self) -> None:
-        # Mutating the returned list must not corrupt the in-memory index.
+    def test_mutating_returned_event_does_not_corrupt_ledger(self) -> None:
+        # codex r3407872681: events() returns freshly parsed events, so mutating
+        # a returned event's payload must not change what a later read or
+        # verify_chain() sees (the prior cache shared mutable payload dicts).
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
             ledger.append(AuditEventType.EVIDENCE, {"kind": "test_output"})
+
             got = ledger.events()
+            got[0].payload["injected"] = "tampered"
             got.clear()
-            self.assertEqual(len(ledger.events()), 1)
+
+            fresh = ledger.events()
+            self.assertEqual(len(fresh), 1)
+            self.assertNotIn("injected", fresh[0].payload)
+            self.assertTrue(ledger.verify_chain())
 
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.

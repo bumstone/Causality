@@ -76,7 +76,7 @@ Agent Harness·Reflect·3계층 메타데이터·저장소 위생 규칙, 이어
 | 0006 §2/§6 | **happy-path 엔진** `CausalityEngine`(Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill candidate) | `engine.py` | `test_engine.py` |
 | 0009 | Reviewable Change Budget(≤1000줄) + `causality review-plan` | `review_batches.py` | `test_review_batches.py` |
 | 0010 | Caveman Doc Budget(≤2000자) + `causality doc-budget` | `doc_budget.py` | `test_doc_budget.py` |
-| 0011 §2.1 | Ledger latest-hash 캐시 + `_by_contract` 인덱스 + `events_for_contract`/`latest_hash_for_contract` (append O(N²)→O(1)) | `ledger.py` | `test_ledger.py` |
+| 0011 §2.1 | Ledger size-guarded latest-hash 캐시(append O(N²)→amortized O(1)) + `events_for_contract`/`latest_hash_for_contract` 접근자 | `ledger.py` | `test_ledger.py` |
 
 **정직한 상태(2026-06-13 재점검):** 프리미티브와 `CausalityEngine.run_task`/`run_next`
 happy-path 배선은 구현됨. 단 **완전 폐쇄 운영 루프는 아직 아님** — plan/action/tool/non-goal
