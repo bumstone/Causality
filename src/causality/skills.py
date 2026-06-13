@@ -90,9 +90,7 @@ class SkillStore:
         builds the reusable procedure. The candidate starts with no recorded
         attempts; reproducibility is accrued via :meth:`record_outcome`.
         """
-        matches = [
-            event for event in ledger.events() if event.contract_id == contract.goal_id
-        ]
+        matches = ledger.events_for_contract(contract.goal_id)
         if not matches:
             raise SkillPromotionError(
                 f"no ledger events for contract {contract.goal_id!r} to distill"

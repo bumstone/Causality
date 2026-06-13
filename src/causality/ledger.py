@@ -50,6 +50,36 @@ class EvidenceLedger:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # In-memory index, lazily loaded from disk on first access and then
+        # maintained on every append. This instance is the sole writer in the
+        # happy-path runtime (concurrent multi-writer durability is ADR 0011
+        # R4, still pending), so the cache stays authoritative without
+        # re-reading the file. It removes the O(N^2) cost of latest_hash()
+        # rescanning the whole ledger on every append, and gives O(1)
+        # contract-scoped lookups instead of a full read + filter.
+        self._loaded = False
+        self._events: list[LedgerEvent] = []
+        self._latest_hash: str | None = None
+        self._by_contract: dict[str | None, list[LedgerEvent]] = {}
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._events = []
+        self._latest_hash = None
+        self._by_contract = {}
+        if self.path.exists():
+            with self.path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    self._index_event(LedgerEvent(**json.loads(line)))
+        self._loaded = True
+
+    def _index_event(self, event: LedgerEvent) -> None:
+        self._events.append(event)
+        self._latest_hash = event.entry_hash
+        self._by_contract.setdefault(event.contract_id, []).append(event)
 
     def append(
         self,
@@ -59,7 +89,8 @@ class EvidenceLedger:
         contract_id: str | None = None,
         artifact_paths: Iterable[str | Path] = (),
     ) -> LedgerEvent:
-        previous_hash = self.latest_hash()
+        self._ensure_loaded()
+        previous_hash = self._latest_hash
         event_type_value = event_type.value if isinstance(event_type, AuditEventType) else str(event_type)
         artifacts = [self._artifact_record(path) for path in artifact_paths]
         entry_without_hash = {
@@ -76,18 +107,17 @@ class EvidenceLedger:
         entry["entry_hash"] = entry_hash
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=True, sort_keys=True) + "\n")
-        return LedgerEvent(**entry)
+        event = LedgerEvent(**entry)
+        # Maintain the index incrementally so we never re-read the file we just
+        # wrote (the cache is authoritative once loaded).
+        self._index_event(event)
+        return event
 
     def events(self) -> list[LedgerEvent]:
-        if not self.path.exists():
-            return []
-        result: list[LedgerEvent] = []
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                result.append(LedgerEvent(**json.loads(line)))
-        return result
+        self._ensure_loaded()
+        # Return a copy: LedgerEvent is frozen, but the list must not be mutated
+        # by callers or it would corrupt the index.
+        return list(self._events)
 
     def find(
         self,
@@ -107,14 +137,28 @@ class EvidenceLedger:
         return matches
 
     def latest_hash(self) -> str | None:
-        latest = None
-        if not self.path.exists():
-            return None
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    latest = json.loads(line)
-        return latest.get("entry_hash") if latest else None
+        self._ensure_loaded()
+        return self._latest_hash
+
+    def events_for_contract(self, contract_id: str | None) -> list[LedgerEvent]:
+        """Return one contract's events, in order, via the in-memory index.
+
+        Centralizes contract scoping so callers (Reflect, Skill distill) stop
+        re-implementing ``event.contract_id == ...`` over a full ledger read.
+        """
+        self._ensure_loaded()
+        return list(self._by_contract.get(contract_id, ()))
+
+    def latest_hash_for_contract(self, contract_id: str | None) -> str | None:
+        """Latest entry hash for one contract -- its provenance anchor.
+
+        Using this instead of :meth:`latest_hash` avoids the footgun where, in
+        interleaved multi-contract runs, the global latest hash belongs to a
+        different contract and breaks the audit trail (codex review r3382219479).
+        """
+        self._ensure_loaded()
+        scoped = self._by_contract.get(contract_id)
+        return scoped[-1].entry_hash if scoped else None
 
     def verify_chain(self) -> bool:
         previous_hash = None

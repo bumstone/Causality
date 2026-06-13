@@ -60,7 +60,7 @@ def reflect_on_contract(
     failure signal (critical-or-not verifier ``fail`` decisions and ``repair``
     gate decisions). Returns the :class:`Reflection` it wrote.
     """
-    events = [event for event in ledger.events() if event.contract_id == contract.goal_id]
+    events = ledger.events_for_contract(contract.goal_id)
 
     evidence = [e for e in events if e.event_type == AuditEventType.EVIDENCE.value]
     verifiers = [e for e in events if e.event_type == AuditEventType.VERIFIER_DECISION.value]
@@ -91,7 +91,7 @@ def reflect_on_contract(
     # Provenance must be contract-scoped: the last event for THIS contract, not
     # ledger.latest_hash() which, in interleaved multi-contract runs, may belong
     # to another contract and break the audit trail (codex review r3382219479).
-    provenance = events[-1].entry_hash if events else None
+    provenance = ledger.latest_hash_for_contract(contract.goal_id)
     retrospective = memory.record(
         "retrospectives",
         summary,

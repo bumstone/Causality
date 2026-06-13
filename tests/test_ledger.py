@@ -37,6 +37,53 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(event.artifacts[0]["bytes"], 2)
             self.assertIsNotNone(event.artifacts[0]["sha256"])
 
+    def test_latest_hash_matches_last_event_and_survives_reload(self) -> None:
+        # R2: latest_hash() is served from the in-memory cache after the first
+        # load, but must equal the last appended event's hash, and a fresh
+        # instance on the same file must lazily reload the same value from disk.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"kind": "test_output"})
+            last = ledger.append(AuditEventType.VERIFIER_DECISION, {"status": "pass"})
+
+            self.assertEqual(ledger.latest_hash(), last.entry_hash)
+
+            reloaded = EvidenceLedger(path)
+            self.assertEqual(reloaded.latest_hash(), last.entry_hash)
+            self.assertEqual(len(reloaded.events()), 2)
+            # A further append on the fresh instance chains onto the disk tail.
+            third = reloaded.append(AuditEventType.EVIDENCE, {"kind": "more"})
+            self.assertEqual(third.previous_hash, last.entry_hash)
+            self.assertTrue(reloaded.verify_chain())
+
+    def test_events_for_contract_scopes_and_orders(self) -> None:
+        # R2: contract-scoped accessors replace the hand-rolled
+        # `event.contract_id == ...` filter that callers used over a full read.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            a1 = ledger.append(AuditEventType.EVIDENCE, {"n": 1}, contract_id="A")
+            ledger.append(AuditEventType.EVIDENCE, {"n": 2}, contract_id="B")
+            a2 = ledger.append(AuditEventType.VERIFIER_DECISION, {"n": 3}, contract_id="A")
+
+            a_events = ledger.events_for_contract("A")
+            self.assertEqual([e.entry_hash for e in a_events], [a1.entry_hash, a2.entry_hash])
+            self.assertEqual(ledger.latest_hash_for_contract("A"), a2.entry_hash)
+            # B's latest differs from the global latest (A appended last).
+            self.assertNotEqual(ledger.latest_hash_for_contract("B"), ledger.latest_hash())
+            # Unknown contract: empty / None, never a cross-contract leak.
+            self.assertEqual(ledger.events_for_contract("missing"), [])
+            self.assertIsNone(ledger.latest_hash_for_contract("missing"))
+
+    def test_events_returns_copy(self) -> None:
+        # Mutating the returned list must not corrupt the in-memory index.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            ledger.append(AuditEventType.EVIDENCE, {"kind": "test_output"})
+            got = ledger.events()
+            got.clear()
+            self.assertEqual(len(ledger.events()), 1)
+
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
         with tempfile.TemporaryDirectory() as temp_dir:
