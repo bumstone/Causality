@@ -25,6 +25,15 @@ from .review import ReviewResult, Verifier, run_review
 from .skills import SkillCandidate, SkillPromotionError, SkillStore
 from .agenda import Agenda, AgendaError, AgendaItem
 from .engine import CausalityEngine, TaskRun
+from .review_batches import (
+    DEFAULT_MAX_LINES,
+    FileChange,
+    ReviewBatch,
+    format_plan,
+    parse_numstat,
+    plan_review_batches,
+    total_lines,
+)
 from .browser_adapter import A11yBrowserAdapter
 
 __all__ = [
@@ -40,7 +49,9 @@ __all__ = [
     "CausalityEngine",
     "ContractHarness",
     "ContractHarnessError",
+    "DEFAULT_MAX_LINES",
     "Dispatch",
+    "FileChange",
     "EvidenceKind",
     "EvidenceLedger",
     "EvidenceRequirement",
@@ -54,6 +65,7 @@ __all__ = [
     "MemoryGovernanceError",
     "PermissionContract",
     "Reflection",
+    "ReviewBatch",
     "ReviewResult",
     "Risk",
     "SkillCandidate",
@@ -67,7 +79,11 @@ __all__ = [
     "TypedMemory",
     "Verifier",
     "VerifierDecision",
+    "format_plan",
+    "parse_numstat",
+    "plan_review_batches",
     "reflect_on_contract",
     "run_bounded_loop",
     "run_review",
+    "total_lines",
 ]
