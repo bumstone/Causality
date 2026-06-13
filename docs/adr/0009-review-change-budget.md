@@ -44,10 +44,17 @@
 PR 없이 로컬/브랜치 변경을 리뷰할 때:
 
 ```bash
-causality review-plan --base origin/main            # 배치 계획 출력
-causality review-plan --base origin/main --json     # 기계가 소비할 형태
-git diff --numstat origin/main...HEAD | causality review-plan --from-file -
+causality review-plan --base origin/main            # 기본: 작업트리 포함(미커밋 변경까지)
+causality review-plan --base origin/main --json      # 기계가 소비할 형태
+causality review-plan --base origin/main --committed # 커밋만(base...HEAD), PR 계획용
+git diff --numstat origin/main | causality review-plan --from-file -
 ```
+
+**중요(codex r3407190893):** 비-PR 경로의 핵심은 "아직 리뷰 안 한 *로컬* 변경"이고
+그건 대개 **미커밋** 상태다. 따라서 기본은 `git diff <base>`(작업트리 대비)로 미커밋
+변경을 포함한다 — 커밋-대-커밋(`base...HEAD`)만 보면 큰 로컬 diff가 "(변경 없음)"으로
+예산을 우회한다. 커밋분만 보려면 `--committed`. (추적되지 않은 새 파일은 `git diff`에
+안 잡히므로 `git add -N`으로 intent-add 후 계획한다.)
 
 `/code-review`(또는 외부 리뷰 에이전트)는 이 계획을 받아 **배치마다 한 번씩** 리뷰를
 수행한다. 즉 "리뷰하지 않은 변경점"을 1000줄 이하 묶음으로 나눠 순차 리뷰한다.

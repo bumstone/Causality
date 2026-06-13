@@ -48,6 +48,12 @@ def main() -> int:
     review_parser.add_argument("--base", default="origin/main", help="diff base ref (default origin/main)")
     review_parser.add_argument("--max-lines", type=int, default=DEFAULT_MAX_LINES)
     review_parser.add_argument(
+        "--committed",
+        action="store_true",
+        help="plan only committed changes (base...HEAD), e.g. for PR planning; "
+        "default includes uncommitted working-tree changes (base vs working tree)",
+    )
+    review_parser.add_argument(
         "--from-file",
         help="read `git diff --numstat` from this file (use '-' for stdin) instead of running git",
     )
@@ -99,8 +105,15 @@ def main() -> int:
         elif args.from_file:
             numstat = Path(args.from_file).read_text(encoding="utf-8")
         else:
+            # Default compares the base to the WORKING TREE (`git diff <base>`),
+            # which includes uncommitted tracked changes -- otherwise a large
+            # local diff reviewed before committing reports "(no changes)" and
+            # bypasses the budget (codex review r3407190893). `--committed` uses
+            # the commit-to-commit form for PR planning. (Untracked new files are
+            # not shown by git diff; `git add -N` them to include them.)
+            diff_range = f"{args.base}...HEAD" if args.committed else args.base
             proc = subprocess.run(
-                ["git", "diff", "--numstat", f"{args.base}...HEAD"],
+                ["git", "diff", "--numstat", diff_range],
                 capture_output=True,
                 text=True,
             )
