@@ -70,10 +70,11 @@ flowchart TD
 일으키는 각 단계는 **액션 게이트**(`can_execute_action`)가, "완료" 주장은 **완료
 게이트**(`complete`)가 검사합니다. 고위험·비가역 작업은 사람에게 에스컬레이션됩니다.
 
-> 제어 흐름(L0→L4)과 아래에서 위로 가는 **증류** 루프(L4→L0)가 **모두 구현**되었습니다.
-> `CausalityEngine`이 사이클을 닫고, 증류된 실패/스킬이 메모리로 환류됩니다. 남은 공백은
-> 디스패치 시 earned skill의 *자동 재사용* 입니다 —
-> [자기개선 루프](#자기개선-루프)와 [구현 상태](#구현-상태-adrs) 참조.
+> 제어 흐름(L0→L4)과 아래에서 위로 가는 **증류 write-path**는 `CausalityEngine` happy
+> path로 구현되었습니다. 다만 완전히 강제되는 서비스 루프는 아직 부분 구현입니다. `work`
+> 콜백 앞 plan/action/tool/non-goal 게이트 강제, failures→non_goals 환류, TTL 읽기 검증,
+> earned skill 자동 재사용이 남아 있습니다. [자기개선 루프](#자기개선-루프),
+> [구현 상태](#구현-상태-adrs), [2026-06-13 코드리뷰](docs/code-review-2026-06-13.md)를 참조하세요.
 
 ---
 
@@ -131,20 +132,20 @@ flowchart TD
 
 루프는 두 절반으로 구성됩니다: **Run → Review → Fix**, 그리고
 **Reflect → Skill update**([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)).
-두 절반 모두 구현되었고 `CausalityEngine`(`run_task` / `run_next`)이 묶습니다.
+프리미티브와 happy-path 배선은 있지만, 실행 강제/read-path 일부는 아직 부분 구현입니다.
 
-![자기개선 루프: Run → Review → Fix (실선)와 Reflect → Skill update (점선), 모두 구현됨](docs/assets/loop.svg)
+![자기개선 루프: Run → Review → Fix (실선)와 Reflect → Skill update (점선), 실행 강제/read-path 갭 포함](docs/assets/loop.svg)
 
 <details>
 <summary>다이어그램 소스 (Mermaid)</summary>
 
 ```mermaid
 flowchart LR
-    RUN["Run<br/>(구현됨)"] --> REVIEW["Review<br/>(구현됨)"]
+    RUN["Run<br/>(부분: gate 강제 미완)"] --> REVIEW["Review<br/>(구현됨)"]
     REVIEW --> FIX["Fix<br/>(구현됨)"]
     FIX --> RUN
     RUN -.-> REFLECT["Reflect<br/>(구현됨)"]
-    REFLECT -.-> SKILL["Skill update<br/>(구현됨)"]
+    REFLECT -.-> SKILL["Skill update<br/>(부분: 재사용 미완)"]
     SKILL -.-> RUN
 ```
 
@@ -152,11 +153,11 @@ flowchart LR
 
 | 단계 | 상태 | 비고 |
 |---|---|---|
-| Run | 구현됨 | `record_evidence` / `record_verifier` 가 원장에 추가. |
+| Run | 부분 | 원장 append와 `work` 콜백 실행은 있으나, `work` 앞 plan/action/tool/non-goal 게이트 강제는 아직 없음. |
 | Review | 구현됨 | `run_review` 가 독립 verifier N개를 호출·기록하고 ≥2 pass / 치명실패 없음 규칙으로 집계. |
 | Fix | 구현됨 | `run_bounded_loop` 이 `GateDecision.REPAIR` 를 소비해 재계획, `should_stop` 으로 정지. |
 | Reflect | 구현됨 | `reflect_on_contract` 가 원장을 타입 `retrospectives`+`failures` 로 증류(contract-scoped provenance). |
-| Skill update | 구현됨 | `SkillStore`: distill → 재현성 n-of-m → authored dedup → HITL 승급. 디스패치 자동 재사용은 후속. |
+| Skill update | 부분 | `SkillStore`: distill → 재현성 n-of-m → authored dedup → HITL 승급은 있으나, 디스패치 자동 재사용은 미구현. |
 
 ---
 
@@ -231,17 +232,15 @@ flowchart LR
 | [0007](docs/adr/0007-context-economy-progressive-disclosure.md) | Context Economy / 점진적 공개 | **Accepted / 부분** |
 | [0008](docs/adr/0008-repository-hygiene-shared-vs-ignored.md) | 저장소 위생: 공유 vs 무시 | **Accepted / 구현** |
 
-자기개선 루프가 end-to-end로 닫혔습니다. 구현됨: `non_goals`와 동결된 `TaskContract`;
-집행 게이트(`check_tool_allowed` / `check_non_goal` / `should_stop`); `BoundContract`를
-반환하는 `ContractHarness.bind`; bounded 루프 드라이버(`run_bounded_loop`); Review 자동화
-(`run_review`); 거버넌스 포함 타입 메모리(`TypedMemory`); Reflect 증류기
-(`reflect_on_contract`); 재현성 n-of-m·dedup·HITL 승급을 갖춘 earned-skill 스토어
-(`SkillStore`); 영속 `Agenda`; Agent Harness 디스패처(`AgentHarness`); 3계층 워크플로
-메타데이터(`WorkflowTemplate.layer`); on-demand 파일 레이아웃과 Context Economy 규칙;
-공유 vs 무시 위생 규칙; 그리고 Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill을 하나의
-`run_task` / `run_next`로 묶는 **`CausalityEngine`**. 남은 선택 항목: `work` 콜백용 표준 도구
-실행 어댑터, 디스패치 시 earned skill 자동 재사용, guardrail TTL 만료 스윕, 다중 에이전트
-협업(의도적 범위 밖, ADR 0005).
+ADR 0001~0008의 핵심 구현 슬라이스는 머지되었고, `CausalityEngine`은
+Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill candidate의 happy path를 `run_task` /
+`run_next`로 묶습니다. 다만 서비스가 완전히 강제되는 폐쇄 루프라고 표현하면 과장입니다.
+`run_task`는 `should_stop`과 `complete`를 간접 소비하지만 `work` 콜백 앞에서 plan/action/tool/
+non-goal 게이트를 아직 강제하지 않습니다. Reflect는 failures를 쓰지만 이후 계약이 이를
+`non_goals`로 다시 읽어오지 않고, TTL은 metadata로 저장될 뿐 읽기 시 만료 검증이 없으며,
+promoted earned skill도 dispatch에서 자동 재사용되지 않습니다. ledger/memory/skills/agenda
+쓰기 경로에는 아직 lock/fsync/atomic rename이 없고, ledger contract/event index도 없습니다.
+우선순위는 [2026-06-13 코드리뷰](docs/code-review-2026-06-13.md)를 기준으로 관리합니다.
 
 ---
 

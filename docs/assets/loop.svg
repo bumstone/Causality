@@ -22,7 +22,7 @@
   <rect class="panel" x="60" y="44" width="190" height="62" rx="12"/>
   <text class="tc" x="155" y="70">Run</text>
   <text class="sc" x="155" y="87">증거·verifier 원장 기록</text>
-  <text class="ok" x="155" y="100">✓ 구현 implemented</text>
+  <text class="ok" x="155" y="100">◐ 부분 partial</text>
 
   <line class="edge" x1="250" y1="75" x2="343" y2="75" marker-end="url(#ar)"/>
 
@@ -52,10 +52,10 @@
 
   <rect class="panel" x="440" y="198" width="240" height="62" rx="12" stroke="#1f6f33"/>
   <text class="tc" x="560" y="224">Skill update</text>
-  <text class="sc" x="560" y="241">SkillStore · n-of-m 재현성 + HITL 승급</text>
-  <text class="ok" x="560" y="254">✓ 구현 implemented</text>
+  <text class="sc" x="560" y="241">SkillStore · 승급 구현 · 재사용 미완</text>
+  <text class="ok" x="560" y="254">◐ 부분 partial</text>
 
   <path class="dash" d="M560,260 V284 H30 V75 H56" marker-end="url(#arg)"/>
 
-  <text class="cap" x="455" y="304">실선: Run → Review → Fix · 점선: Reflect → Skill update — 다섯 단계 모두 CausalityEngine(run_task / run_next)으로 연결됨</text>
+  <text class="cap" x="455" y="304">실선: Run → Review → Fix · 점선: Reflect → Skill update — happy path 연결, gate/read-path 일부 미완</text>
 </svg>
