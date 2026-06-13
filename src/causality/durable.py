@@ -18,6 +18,7 @@ file move through here so durability lives in one place instead of four:
 
 from __future__ import annotations
 
+import errno
 import os
 import tempfile
 from contextlib import contextmanager
@@ -30,21 +31,28 @@ except ImportError:  # pragma: no cover - platform dependent
     fcntl = None  # type: ignore[assignment]
 
 
-def _fsync_fd(fd: int) -> None:
-    try:
-        os.fsync(fd)
-    except OSError:  # pragma: no cover - rare filesystem without fsync support
-        pass
+# Directory fsync is unsupported on some platforms/filesystems (it raises one of
+# these). Only those cases are best-effort: a *data*-file fsync failure is never
+# swallowed, because it means the write is NOT durable and the caller -- which
+# now believes the record is persisted -- must hear about it (codex r3408027988).
+_DIR_FSYNC_UNSUPPORTED = {
+    getattr(errno, name)
+    for name in ("EINVAL", "ENOTSUP", "EOPNOTSUPP")
+    if hasattr(errno, name)
+}
 
 
 def _fsync_dir(directory: Path) -> None:
     # Persist the directory entry so a rename (os.replace) survives a crash.
     try:
         dir_fd = os.open(str(directory), os.O_RDONLY)
-    except OSError:  # pragma: no cover - e.g. platforms that cannot open a dir fd
+    except OSError:  # platform cannot open a directory fd (e.g. Windows)
         return
     try:
-        _fsync_fd(dir_fd)
+        os.fsync(dir_fd)
+    except OSError as exc:  # unsupported here -> best-effort; real I/O errors raise
+        if exc.errno not in _DIR_FSYNC_UNSUPPORTED:
+            raise
     finally:
         os.close(dir_fd)
 
@@ -92,7 +100,7 @@ def write_text_durably(path: str | Path, text: str, *, lock: bool = True) -> Non
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(text)
                 handle.flush()
-                _fsync_fd(handle.fileno())
+                os.fsync(handle.fileno())
             os.replace(tmp_name, file_path)
         except BaseException:
             try:
@@ -129,7 +137,7 @@ class DurableJsonl:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
                 handle.flush()
-                _fsync_fd(handle.fileno())
+                os.fsync(handle.fileno())
 
         if lock:
             with file_lock(self.path):

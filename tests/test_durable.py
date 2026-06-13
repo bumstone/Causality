@@ -1,8 +1,11 @@
+import errno
 import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from causality.durable import DurableJsonl, file_lock, write_text_durably
 
@@ -126,6 +129,41 @@ class DurabilityTests(unittest.TestCase):
                 pass
             with file_lock(path):  # releasing then re-acquiring must not deadlock
                 pass
+
+
+class FsyncErrorPropagationTests(unittest.TestCase):
+    # codex r3408027988: a data-file fsync failure means the write is NOT durable,
+    # so it must propagate -- only an *unsupported directory* fsync is best-effort.
+    def test_append_propagates_data_fsync_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = DurableJsonl(Path(tmp) / "log.jsonl")
+            with mock.patch("causality.durable.os.fsync", side_effect=OSError(errno.EIO, "io")):
+                with self.assertRaises(OSError):
+                    store.append(json.dumps({"n": 1}))
+
+    def test_write_text_durably_propagates_data_fsync_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("causality.durable.os.fsync", side_effect=OSError(errno.ENOSPC, "nospc")):
+                with self.assertRaises(OSError):
+                    write_text_durably(Path(tmp) / "state.json", "data")
+
+    def test_directory_fsync_unsupported_is_best_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            real_fsync = os.fsync
+            calls = {"n": 0}
+
+            def fake_fsync(fd: int) -> None:
+                calls["n"] += 1
+                # 1st fsync = the data file (must succeed); 2nd = the directory,
+                # which we make report "unsupported".
+                if calls["n"] >= 2:
+                    raise OSError(errno.EINVAL, "dir fsync unsupported")
+                real_fsync(fd)
+
+            with mock.patch("causality.durable.os.fsync", side_effect=fake_fsync):
+                write_text_durably(path, "data")  # must NOT raise
+            self.assertEqual(path.read_text(encoding="utf-8"), "data")
 
 
 if __name__ == "__main__":
