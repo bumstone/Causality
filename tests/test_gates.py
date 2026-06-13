@@ -142,6 +142,63 @@ class GateTests(unittest.TestCase):
                 GateDecision.ESCALATE,
             )
 
+    def test_same_verifier_twice_is_not_two_independent_passes(self) -> None:
+        # Regression F1: counting raw events let one verifier passing across two
+        # loop iterations satisfy the >=2-pass rule.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(
+                GoalContract(
+                    "Repeat",
+                    "single verifier twice",
+                    evidence_required=[EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "tests")],
+                )
+            )
+            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
+            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "round 1"))
+            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "round 2"))
+
+            # One verifier, two events -> still only one independent pass.
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
+
+            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "second verifier"))
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
+
+    def test_fixed_critical_failure_no_longer_blocks_completion(self) -> None:
+        # Regression F2: a critical fail from an earlier round must not block
+        # forever once that verifier later passes.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(
+                GoalContract(
+                    "Heal",
+                    "critical then fixed",
+                    evidence_required=[EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "tests")],
+                )
+            )
+            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
+            runtime.record_verifier(
+                contract, VerifierDecision("safety", "fail", "unsafe", severity="critical")
+            )
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
+
+            # The same verifier now passes; a second independent verifier passes.
+            runtime.record_verifier(contract, VerifierDecision("safety", "pass", "now safe"))
+            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "evidence present"))
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
+
+    def test_complete_with_empty_list_does_not_fall_back_to_ledger(self) -> None:
+        # Regression H1: an explicit empty decision list is `is None`-distinct
+        # from "not supplied" and must not silently re-read ledger history.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(GoalContract("Empty", "no decisions"))
+            runtime.record_verifier(contract, VerifierDecision("a", "pass", "x"))
+            runtime.record_verifier(contract, VerifierDecision("b", "pass", "y"))
+
+            # Caller explicitly judges with no decisions -> REPAIR, not PASS.
+            self.assertEqual(runtime.gate.complete(contract, []).decision, GateDecision.REPAIR)
+
 
 if __name__ == "__main__":
     unittest.main()

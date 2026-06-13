@@ -96,8 +96,8 @@ class Causality:
     def can_execute_action(self, contract: GoalContract, action_kind: str) -> GateResult:
         return self.gate.can_execute_action(contract, action_kind)
 
-    def complete(self, contract: GoalContract) -> GateResult:
-        return self.gate.complete(contract)
+    def complete(self, contract: GoalContract, *, min_passes: int = 2) -> GateResult:
+        return self.gate.complete(contract, min_passes=min_passes)
 
     def check_tool_allowed(self, contract: GoalContract, tool: str) -> GateResult:
         return self.gate.check_tool_allowed(contract, tool)

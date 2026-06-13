@@ -79,6 +79,21 @@ class ContractHarnessTests(unittest.TestCase):
             with self.assertRaises(ContractHarnessError):
                 harness.bind(objective="o", verification=["x"], stop_condition={})
 
+    def test_bind_rejects_stop_condition_without_a_real_ceiling(self) -> None:
+        # Regression F4: a non-empty but irrelevant stop_condition would pass
+        # truthiness and leave run_bounded_loop unbounded.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, harness = self._harness(temp_dir)
+            with self.assertRaises(ContractHarnessError):
+                harness.bind(objective="o", verification=["x"], stop_condition={"foo": 1})
+            with self.assertRaises(ContractHarnessError):
+                harness.bind(objective="o", verification=["x"], stop_condition={"max_iterations": 0})
+            # A real positive ceiling is accepted.
+            bound = harness.bind(
+                objective="o", verification=["x"], stop_condition={"max_iterations": 3}
+            )
+            self.assertEqual(bound.task.stop_condition["max_iterations"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

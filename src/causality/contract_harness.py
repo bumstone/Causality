@@ -22,6 +22,11 @@ from .contracts import (
 from .orchestrator import Causality
 
 
+# The ceilings should_stop actually consumes (gates.py); bind() requires at
+# least one of them to be a positive int so every bound loop is truly bounded.
+STOP_CONDITION_KEYS = ("max_iterations", "no_progress_iterations", "max_failed_hypotheses")
+
+
 class ContractHarnessError(ValueError):
     """Raised when the pre-run ritual is incomplete.
 
@@ -84,6 +89,20 @@ class ContractHarness:
 
         if not stop_condition:
             raise ContractHarnessError("stop_condition is required (step 5: when to stop)")
+        # A stop condition must actually bound the loop. `should_stop` treats a
+        # missing or zero ceiling as disabled, so a typo'd key ({"foo": 1})
+        # would otherwise pass truthiness here and loop forever (code review
+        # 2026-06-13, F4).
+        ceilings = {
+            key: stop_condition.get(key)
+            for key in STOP_CONDITION_KEYS
+            if isinstance(stop_condition.get(key), int) and stop_condition.get(key) > 0
+        }
+        if not ceilings:
+            raise ContractHarnessError(
+                "stop_condition must set at least one positive ceiling out of: "
+                + ", ".join(STOP_CONDITION_KEYS)
+            )
 
         evidence_required = [
             EvidenceRequirement(kind=evidence_kind, description=command, required=True)

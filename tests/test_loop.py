@@ -88,6 +88,27 @@ class LoopTests(unittest.TestCase):
             self.assertEqual(result.decision, GateDecision.ESCALATE)
             self.assertEqual(result.iterations, 2)
 
+    def test_falsy_nonbool_step_counts_as_no_progress(self) -> None:
+        # Regression H6: a step returning 0 (falsy non-bool) must register as
+        # no-progress so the no-progress ceiling can fire, not be treated as
+        # progress by an `isinstance(value, bool)`-only path.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = self._runtime(temp_dir)
+            contract = runtime.create_contract(
+                GoalContract(
+                    "Loop", "no progress",
+                    evidence_required=[EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "tests")],
+                    stopping_policy={"max_iterations": 99, "no_progress_iterations": 2},
+                )
+            )
+
+            def step(c: GoalContract, i: int):
+                return 0  # falsy non-bool: zero units changed -> no progress
+
+            result = run_bounded_loop(runtime, contract, step)
+            self.assertEqual(result.decision, GateDecision.STOP)
+            self.assertEqual(result.iterations, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

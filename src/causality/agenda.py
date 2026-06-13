@@ -127,3 +127,12 @@ class Agenda:
 
     def drop(self, item_id: str) -> AgendaItem:
         return self._transition(item_id, "dropped")
+
+    def defer(self, item_id: str) -> AgendaItem:
+        """Return an active item to the pending queue.
+
+        Used when a run did not finish the item (failed, escalated, or raised),
+        so the intention stays visible instead of being stranded "active"
+        forever (code review 2026-06-13, F10).
+        """
+        return self._transition(item_id, "pending")

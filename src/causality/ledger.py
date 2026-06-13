@@ -136,6 +136,10 @@ class EvidenceLedger:
         return True
 
     def tail(self, limit: int = 5) -> list[dict[str, Any]]:
+        # [-0:] would return the whole list, dumping the full ledger when a
+        # caller asks for zero entries (code review 2026-06-13, H5).
+        if limit <= 0:
+            return []
         events = self.events()[-limit:]
         return [
             {
