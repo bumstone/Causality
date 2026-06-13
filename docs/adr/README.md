@@ -23,6 +23,7 @@
 | [0007](0007-context-economy-progressive-disclosure.md) | Context Economy & Progressive Disclosure (운영 규칙) | **Accepted (부분 구현)** |
 | [0008](0008-repository-hygiene-shared-vs-ignored.md) | 저장소 위생 — 공유 설계 vs 무시할 런타임 state | **Accepted (구현)** |
 | [0009](0009-review-change-budget.md) | Reviewable Change Budget — ≤1000줄 단위 리뷰(PR 분할 + diff 배치) | **Accepted (구현)** |
+| [0010](0010-caveman-doc-budget.md) | Caveman Doc Budget — AI 생성 MD ≤2000자·텔레그래프 문체 | **Accepted (구현)** |
 
 ## 읽는 순서
 

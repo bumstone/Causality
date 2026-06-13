@@ -34,6 +34,12 @@ from .review_batches import (
     plan_review_batches,
     total_lines,
 )
+from .doc_budget import (
+    DEFAULT_DOC_MAX_CHARS,
+    DocSize,
+    check_docs,
+    over_budget,
+)
 from .browser_adapter import A11yBrowserAdapter
 
 __all__ = [
@@ -49,8 +55,10 @@ __all__ = [
     "CausalityEngine",
     "ContractHarness",
     "ContractHarnessError",
+    "DEFAULT_DOC_MAX_CHARS",
     "DEFAULT_MAX_LINES",
     "Dispatch",
+    "DocSize",
     "FileChange",
     "EvidenceKind",
     "EvidenceLedger",
@@ -79,7 +87,9 @@ __all__ = [
     "TypedMemory",
     "Verifier",
     "VerifierDecision",
+    "check_docs",
     "format_plan",
+    "over_budget",
     "parse_numstat",
     "plan_review_batches",
     "reflect_on_contract",
