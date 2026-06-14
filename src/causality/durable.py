@@ -8,8 +8,9 @@ file move through here so durability lives in one place instead of four:
 - **R4b** makes them crash-safe: :func:`write_text_durably` writes a temp
   sibling, ``fsync``s it, then ``os.replace``s it into place (atomic) and
   ``fsync``s the directory; :meth:`DurableJsonl.append` ``fsync``s each record
-  and truncates a torn trailing line (a half-written record from a crashed
-  append) before writing, so records never merge; :meth:`DurableJsonl.read_lines`
+  (and the parent directory on the append that creates the file) and truncates a
+  torn trailing line (a half-written record from a crashed append) before
+  writing, so records never merge; :meth:`DurableJsonl.read_lines`
   drops a torn trailing line on read.
 - **R4c** serializes writers: :func:`file_lock` takes an exclusive ``flock`` on a
   ``<path>.lock`` sidecar. ``EvidenceLedger.append`` holds it across its
@@ -134,10 +135,18 @@ class DurableJsonl:
 
         def _do() -> None:
             self._repair_torn_tail()
+            created = not self.path.exists()
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            if created:
+                # The append that creates the file must persist the parent
+                # directory entry too, else a crash after this returns can lose
+                # the whole new file and its first record (codex r3409054886).
+                # Later appends don't change the directory, so they skip this and
+                # stay amortized O(1).
+                _fsync_dir(self.path.parent)
 
         if lock:
             with file_lock(self.path):

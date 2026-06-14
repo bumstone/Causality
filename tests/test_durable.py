@@ -122,6 +122,18 @@ class DurabilityTests(unittest.TestCase):
             self.assertEqual(len(values), 150)
             self.assertEqual(len(set(values)), 150)
 
+    def test_first_append_fsyncs_parent_dir_then_skips(self) -> None:
+        # codex r3409054886: the append that creates the file must fsync the
+        # parent directory (so the new file's directory entry is durable);
+        # appends to an already-existing file must not (keeps append O(1)).
+        with tempfile.TemporaryDirectory() as tmp:
+            store = DurableJsonl(Path(tmp) / "log.jsonl")
+            with mock.patch("causality.durable._fsync_dir") as fsync_dir:
+                store.append(json.dumps({"n": 1}))
+                self.assertEqual(fsync_dir.call_count, 1)
+                store.append(json.dumps({"n": 2}))
+                self.assertEqual(fsync_dir.call_count, 1)
+
     def test_file_lock_is_reentrant_across_sequential_acquires(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "log.jsonl"
