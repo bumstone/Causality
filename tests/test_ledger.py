@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -116,6 +117,52 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(len(fresh), 1)
             self.assertNotIn("injected", fresh[0].payload)
             self.assertTrue(ledger.verify_chain())
+
+    def test_concurrent_appends_keep_chain_valid(self) -> None:
+        # R4c: separate EvidenceLedger instances on the same file appending at
+        # once must serialize on the flock so no two reads see the same
+        # previous_hash and fork the chain. After the storm the chain verifies
+        # and every event is present exactly once.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+
+            def worker() -> None:
+                ledger = EvidenceLedger(path)
+                for _ in range(20):
+                    ledger.append(AuditEventType.EVIDENCE, {"kind": "concurrent"})
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            reader = EvidenceLedger(path)
+            events = reader.events()
+            self.assertEqual(len(events), 80)
+            self.assertEqual(len({e.entry_hash for e in events}), 80)
+            self.assertTrue(reader.verify_chain())
+
+    def test_torn_tail_recovered_on_next_append(self) -> None:
+        # R4b: a crashed append can leave a half-written final line. The next
+        # append must drop that torn partial and chain onto the last complete
+        # event, not merge bytes into it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"kind": "first"})
+            second = ledger.append(AuditEventType.VERIFIER_DECISION, {"status": "pass"})
+            # Simulate a crashed third append: a partial line with no newline.
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write('{"event_id": "partial", "payload": {"k"')
+
+            fresh = EvidenceLedger(path)
+            self.assertEqual(len(fresh.events()), 2)
+            self.assertEqual(fresh.latest_hash(), second.entry_hash)
+            third = fresh.append(AuditEventType.EVIDENCE, {"kind": "after_crash"})
+            self.assertEqual(third.previous_hash, second.entry_hash)
+            self.assertEqual(len(fresh.events()), 3)
+            self.assertTrue(fresh.verify_chain())
 
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
