@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable
 from uuid import uuid4
 
 from .contracts import AuditEventType, utc_now
+from .durable import DurableJsonl
 
 
 def _stable_json(value: Any) -> str:
@@ -65,6 +66,9 @@ class EvidenceLedger:
         # concurrency still needs locking -- ADR 0011 R4.)
         self._cached_latest_hash: str | None = None
         self._synced_size = -1
+        # All JSONL file moves go through one helper so R4b/R4c can add fsync,
+        # atomic rewrite, and flock in a single place (ADR 0011 §2.2).
+        self._store = DurableJsonl(self.path)
 
     def _current_size(self) -> int:
         try:
@@ -105,8 +109,7 @@ class EvidenceLedger:
         entry_hash = sha256_text(_stable_json(entry_without_hash))
         entry = dict(entry_without_hash)
         entry["entry_hash"] = entry_hash
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=True, sort_keys=True) + "\n")
+        self._store.append(json.dumps(entry, ensure_ascii=True, sort_keys=True))
         # Resync to the row we just wrote so the next append is O(1) and the size
         # guard stays consistent with what is on disk.
         self._cached_latest_hash = entry_hash
@@ -114,15 +117,7 @@ class EvidenceLedger:
         return LedgerEvent(**entry)
 
     def events(self) -> list[LedgerEvent]:
-        if not self.path.exists():
-            return []
-        result: list[LedgerEvent] = []
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                result.append(LedgerEvent(**json.loads(line)))
-        return result
+        return [LedgerEvent(**json.loads(line)) for line in self._store.read_lines()]
 
     def find(
         self,

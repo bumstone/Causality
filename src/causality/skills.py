@@ -24,6 +24,7 @@ from typing import Any
 from uuid import uuid4
 
 from .contracts import GoalContract
+from .durable import DurableJsonl
 from .ledger import EvidenceLedger
 
 
@@ -184,23 +185,15 @@ class SkillStore:
         return latest
 
     def _read(self, path: Path) -> list[SkillCandidate]:
-        if not path.exists():
-            return []
-        records: list[SkillCandidate] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                records.append(SkillCandidate.from_dict(json.loads(line)))
-        return records
+        return [
+            SkillCandidate.from_dict(json.loads(line))
+            for line in DurableJsonl(path).read_lines()
+        ]
 
     def _append(self, path: Path, candidate: SkillCandidate) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(candidate.to_dict(), ensure_ascii=True) + "\n")
+        DurableJsonl(path).append(json.dumps(candidate.to_dict(), ensure_ascii=True))
 
     def _rewrite(self, path: Path, candidates: Any) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [
+        DurableJsonl(path).rewrite(
             json.dumps(candidate.to_dict(), ensure_ascii=True) for candidate in candidates
-        ]
-        path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+        )

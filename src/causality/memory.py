@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import utc_now
+from .durable import DurableJsonl
 
 MEMORY_TYPES = (
     "decisions",
@@ -135,15 +136,8 @@ class TypedMemory:
     def entries(self, mem_type: str) -> list[MemoryEntry]:
         if mem_type not in MEMORY_TYPES:
             raise MemoryGovernanceError(f"unknown memory type: {mem_type!r}")
-        path = self._log_path(mem_type)
-        if not path.exists():
-            return []
-        records: list[MemoryEntry] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                records.append(MemoryEntry.from_dict(json.loads(line)))
-        return records
+        store = DurableJsonl(self._log_path(mem_type))
+        return [MemoryEntry.from_dict(json.loads(line)) for line in store.read_lines()]
 
     def _append(
         self,
@@ -161,8 +155,7 @@ class TypedMemory:
             provenance=provenance,
             metadata=dict(metadata),
         )
-        path = self._log_path(mem_type)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry.to_dict(), ensure_ascii=True) + "\n")
+        DurableJsonl(self._log_path(mem_type)).append(
+            json.dumps(entry.to_dict(), ensure_ascii=True)
+        )
         return entry
