@@ -75,9 +75,9 @@ gate** (`complete`). High-risk and irreversible work escalates to a human.
 > The control flow (L0 to L4) and the bottom-up **distill** write-path are
 > implemented as a `CausalityEngine` happy path. The fully enforced service loop
 > is still partial: plan/action/tool/non-goal gates are not forced before the
-> `work` callback, failures are not yet injected into later `non_goals`, TTL is
-> not enforced on read, and earned skills are not automatically reused at
-> dispatch. See [Self-improvement loop](#self-improvement-loop),
+> `work` callback, failures are not yet injected into later `non_goals`, TTL
+> expiry filtering exists in memory but the run loop does not yet apply it, and
+> earned skills are not automatically reused at dispatch. See [Self-improvement loop](#self-improvement-loop),
 > [Status](#status-adrs), and the [2026-06-13 code review](docs/code-review-2026-06-13.md).
 
 ---
@@ -252,8 +252,9 @@ wires the happy path from Agenda → Dispatch → Harness → Loop → Review �
 is not yet a fully enforced closed loop. `run_task` indirectly consumes
 `should_stop` and `complete`, but it does not yet force the plan/action/tool/
 non-goal gates before the `work` callback. Reflect writes failures, but later
-contracts do not yet read them back into `non_goals`; TTL is stored as metadata
-but not enforced on read; promoted earned skills are not automatically reused at
+contracts do not yet read them back into `non_goals`; TTL expiry filtering
+(`entries(active_only)`/`sweep`/`revoke`) is implemented in memory but the run
+loop does not yet apply it; promoted earned skills are not automatically reused at
 dispatch; ledger/memory/skills/agenda writes are not yet lock/fsync/atomic-rename
 durable; and the ledger has no contract/event index. See
 [2026-06-13 code review](docs/code-review-2026-06-13.md) for the priority order.

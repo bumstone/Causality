@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .contracts import utc_now
 from .durable import DurableJsonl
@@ -42,6 +44,10 @@ class MemoryEntry:
     provenance: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now)
+    # Stable identity so a specific entry can be revoked before its TTL. Entries
+    # written before this field existed fall back to a fresh id on read (their
+    # data is ephemeral runtime state, ADR 0008), so revoke targets new entries.
+    entry_id: str = field(default_factory=lambda: uuid4().hex)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +56,7 @@ class MemoryEntry:
             "provenance": self.provenance,
             "metadata": dict(self.metadata),
             "created_at": self.created_at,
+            "entry_id": self.entry_id,
         }
 
     @classmethod
@@ -60,7 +67,31 @@ class MemoryEntry:
             provenance=value.get("provenance"),
             metadata=dict(value.get("metadata", {})),
             created_at=value.get("created_at", ""),
+            entry_id=value.get("entry_id") or uuid4().hex,
         )
+
+    def expiry(self) -> datetime | None:
+        """When this entry expires, or ``None`` if it carries no ``ttl_days``."""
+        ttl_days = self.metadata.get("ttl_days")
+        if ttl_days is None:
+            return None
+        created = _parse_timestamp(self.created_at)
+        if created is None:
+            return None
+        return created + timedelta(days=float(ttl_days))
+
+    def is_expired(self, now: datetime) -> bool:
+        expiry = self.expiry()
+        return expiry is not None and now >= expiry
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    # Compare in UTC; treat a naive timestamp as UTC rather than raising.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 @dataclass
@@ -133,11 +164,59 @@ class TypedMemory:
             metadata["confidence"] = confidence
         return self._append("failures", summary, provenance, metadata)
 
-    def entries(self, mem_type: str) -> list[MemoryEntry]:
+    def entries(
+        self,
+        mem_type: str,
+        *,
+        active_only: bool = False,
+        now: datetime | None = None,
+    ) -> list[MemoryEntry]:
+        """Return a type's entries; with ``active_only`` expired ones are hidden.
+
+        ``active_only`` filters on read only -- expired entries stay on disk until
+        :meth:`sweep` reclaims them, so the filter never mutates the log. ``now``
+        is injectable for deterministic expiry (defaults to the current UTC time).
+        """
         if mem_type not in MEMORY_TYPES:
             raise MemoryGovernanceError(f"unknown memory type: {mem_type!r}")
         store = DurableJsonl(self._log_path(mem_type))
-        return [MemoryEntry.from_dict(json.loads(line)) for line in store.read_lines()]
+        records = [MemoryEntry.from_dict(json.loads(line)) for line in store.read_lines()]
+        if not active_only:
+            return records
+        moment = now or datetime.now(timezone.utc)
+        return [entry for entry in records if not entry.is_expired(moment)]
+
+    def revoke(self, mem_type: str, entry_id: str) -> bool:
+        """Drop one entry early (before its TTL) by id. Returns whether it existed.
+
+        The audit trail lives in the EvidenceLedger; this L0 memory log may be
+        rewritten, so revoke removes the entry rather than tombstoning it.
+        """
+        if mem_type not in MEMORY_TYPES:
+            raise MemoryGovernanceError(f"unknown memory type: {mem_type!r}")
+        records = self.entries(mem_type)
+        kept = [entry for entry in records if entry.entry_id != entry_id]
+        if len(kept) == len(records):
+            return False
+        self._rewrite(mem_type, kept)
+        return True
+
+    def sweep(self, mem_type: str, *, now: datetime | None = None) -> int:
+        """Reclaim expired entries from disk. Returns how many were removed."""
+        if mem_type not in MEMORY_TYPES:
+            raise MemoryGovernanceError(f"unknown memory type: {mem_type!r}")
+        moment = now or datetime.now(timezone.utc)
+        records = self.entries(mem_type)
+        kept = [entry for entry in records if not entry.is_expired(moment)]
+        removed = len(records) - len(kept)
+        if removed:
+            self._rewrite(mem_type, kept)
+        return removed
+
+    def _rewrite(self, mem_type: str, records: list[MemoryEntry]) -> None:
+        DurableJsonl(self._log_path(mem_type)).rewrite(
+            json.dumps(entry.to_dict(), ensure_ascii=True) for entry in records
+        )
 
     def _append(
         self,

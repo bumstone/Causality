@@ -72,7 +72,7 @@ flowchart TD
 
 > 제어 흐름(L0→L4)과 아래에서 위로 가는 **증류 write-path**는 `CausalityEngine` happy
 > path로 구현되었습니다. 다만 완전히 강제되는 서비스 루프는 아직 부분 구현입니다. `work`
-> 콜백 앞 plan/action/tool/non-goal 게이트 강제, failures→non_goals 환류, TTL 읽기 검증,
+> 콜백 앞 plan/action/tool/non-goal 게이트 강제, failures→non_goals 환류(+TTL 루프 적용),
 > earned skill 자동 재사용이 남아 있습니다. [자기개선 루프](#자기개선-루프),
 > [구현 상태](#구현-상태-adrs), [2026-06-13 코드리뷰](docs/code-review-2026-06-13.md)를 참조하세요.
 
@@ -239,8 +239,8 @@ Agenda→Dispatch→Harness→Loop→Review→Reflect→Skill candidate의 happy
 `run_next`로 묶습니다. 다만 서비스가 완전히 강제되는 폐쇄 루프라고 표현하면 과장입니다.
 `run_task`는 `should_stop`과 `complete`를 간접 소비하지만 `work` 콜백 앞에서 plan/action/tool/
 non-goal 게이트를 아직 강제하지 않습니다. Reflect는 failures를 쓰지만 이후 계약이 이를
-`non_goals`로 다시 읽어오지 않고, TTL은 metadata로 저장될 뿐 읽기 시 만료 검증이 없으며,
-promoted earned skill도 dispatch에서 자동 재사용되지 않습니다. ledger/memory/skills/agenda
+`non_goals`로 다시 읽어오지 않고, TTL 만료 필터(`entries(active_only)`/`sweep`/`revoke`)는
+구현됐으나 run-loop가 아직 적용하지 않으며, promoted earned skill도 dispatch에서 자동 재사용되지 않습니다. ledger/memory/skills/agenda
 쓰기 경로에는 아직 lock/fsync/atomic rename이 없고, ledger contract/event index도 없습니다.
 우선순위는 [2026-06-13 코드리뷰](docs/code-review-2026-06-13.md)를 기준으로 관리합니다.
 
