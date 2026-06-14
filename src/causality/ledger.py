@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 from uuid import uuid4
 
 from .contracts import AuditEventType, utc_now
-from .durable import DurableJsonl
+from .durable import DurableJsonl, file_lock
 
 
 def _stable_json(value: Any) -> str:
@@ -77,14 +77,10 @@ class EvidenceLedger:
             return 0
 
     def _read_latest_hash_from_disk(self) -> str | None:
-        if not self.path.exists():
-            return None
-        latest = None
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    latest = line
-        return json.loads(latest).get("entry_hash") if latest else None
+        # Via the store so a torn trailing line (crashed append) is ignored when
+        # picking the chain anchor (ADR 0011 §2.2 R4b).
+        lines = self._store.read_lines()
+        return json.loads(lines[-1]).get("entry_hash") if lines else None
 
     def append(
         self,
@@ -94,26 +90,34 @@ class EvidenceLedger:
         contract_id: str | None = None,
         artifact_paths: Iterable[str | Path] = (),
     ) -> LedgerEvent:
-        previous_hash = self.latest_hash()
         event_type_value = event_type.value if isinstance(event_type, AuditEventType) else str(event_type)
         artifacts = [self._artifact_record(path) for path in artifact_paths]
-        entry_without_hash = {
-            "event_id": str(uuid4()),
-            "timestamp": utc_now(),
-            "event_type": event_type_value,
-            "contract_id": contract_id,
-            "payload": payload,
-            "artifacts": artifacts,
-            "previous_hash": previous_hash,
-        }
-        entry_hash = sha256_text(_stable_json(entry_without_hash))
-        entry = dict(entry_without_hash)
-        entry["entry_hash"] = entry_hash
-        self._store.append(json.dumps(entry, ensure_ascii=True, sort_keys=True))
-        # Resync to the row we just wrote so the next append is O(1) and the size
-        # guard stays consistent with what is on disk.
-        self._cached_latest_hash = entry_hash
-        self._synced_size = self._current_size()
+        # Hold the store lock across read-latest-hash + append so a second writer
+        # to the same file cannot read the same previous_hash and fork the chain
+        # (ADR 0011 §2.2 R4c). The size guard re-reads the tail if another writer
+        # appended since our last sync; the store append runs lock=False since we
+        # already hold it.
+        with file_lock(self.path):
+            previous_hash = self.latest_hash()
+            entry_without_hash = {
+                "event_id": str(uuid4()),
+                "timestamp": utc_now(),
+                "event_type": event_type_value,
+                "contract_id": contract_id,
+                "payload": payload,
+                "artifacts": artifacts,
+                "previous_hash": previous_hash,
+            }
+            entry_hash = sha256_text(_stable_json(entry_without_hash))
+            entry = dict(entry_without_hash)
+            entry["entry_hash"] = entry_hash
+            self._store.append(
+                json.dumps(entry, ensure_ascii=True, sort_keys=True), lock=False
+            )
+            # Resync to the row we just wrote so the next append is O(1) and the
+            # size guard stays consistent with what is on disk.
+            self._cached_latest_hash = entry_hash
+            self._synced_size = self._current_size()
         return LedgerEvent(**entry)
 
     def events(self) -> list[LedgerEvent]:
