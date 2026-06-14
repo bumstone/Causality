@@ -2,20 +2,23 @@
 
 ## PR 리뷰 자동 반영 프로토콜 (필수)
 
-PR을 열면 **백그라운드 에이전트가 대기하다 Codex/Copilot 리뷰를 자동 확인·반영**한다.
+PR을 열면 **에이전트가 ~5분 bounded watch로 Codex/Copilot 리뷰를 자동 확인·반영**한다.
 `.claude/settings.json`의 PostToolUse 훅이 PR 생성 직후 이 절차를 상기시킨다(훅은
-리마인더만 주입하고, 실제 fetch·적용은 에이전트가 수행).
+리마인더만 주입하고, 실제 watch·fetch·적용은 에이전트가 수행).
 
 매 PR마다:
 
-1. **구독:** PR 생성 직후 `subscribe_pr_activity`를 호출해 그 PR의 리뷰·CI 이벤트가
-   세션을 깨우게 한다.
+1. **구독 + bounded watch:** PR 생성 직후 `subscribe_pr_activity`를 호출하고, **~5분 동안
+   60~90초 간격으로 그 PR의 리뷰·CI를 능동 재확인**한다(webhook이 세션을 못 깨워도 첫
+   리뷰를 잡기 위함).
 2. **반영:** 리뷰 이벤트가 오면 각 코멘트의 **타당성을 코드와 대조**해 판단한 뒤
    - 확신 있고 작고 범위 내 → **바로 수정**(commit+push, 매 라운드 narration 금지, diff가 기록)
    - 모호하거나 아키텍처적으로 중대 → **`AskUserQuestion`으로 확인 후** 진행
    - 중복/무행동이면 **조용히 skip**
-3. **지속:** PR이 **merge/close될 때까지** 감시한다. CI 성공·머지·충돌 전환은 webhook으로
-   오지 않으니 `sleep` 폴링하지 말고 이벤트에 의존한다.
+3. **지속/재무장:** fix를 push할 때마다 **~5분 watch를 재무장**한다(Codex가 새 커밋을
+   재리뷰). PR이 **merge/close될 때까지** 감시하되 bounded watch 창 밖에서는 webhook
+   이벤트에 의존한다(무기한 `sleep` 폴링 금지). green+리뷰반영(merge-ready)이면 보고하고
+   실제 머지는 사용자 지시에 따른다.
 4. **CI 그린화 작업:** "머지 가능하게/babysit"가 과제면 실패마다 재진단·재시도하고
    성공 상태를 보고가 곧 산출물이다.
 
