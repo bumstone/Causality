@@ -82,7 +82,14 @@ class MemoryEntry:
 
     def is_expired(self, now: datetime) -> bool:
         expiry = self.expiry()
-        return expiry is not None and now >= expiry
+        if expiry is None:
+            return False
+        # Normalize an injected naive `now` to UTC, the same way _parse_timestamp
+        # treats naive stored timestamps -- otherwise comparing a naive `now`
+        # against the tz-aware expiry raises TypeError (codex #15 r3408928746).
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return now >= expiry
 
 
 def _parse_timestamp(value: str) -> datetime | None:

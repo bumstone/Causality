@@ -117,6 +117,18 @@ class TtlEnforcementTests(unittest.TestCase):
             # Unknown id is a no-op returning False.
             self.assertFalse(mem.revoke("assumptions", "no-such-id"))
 
+    def test_naive_now_is_treated_as_utc(self) -> None:
+        # codex #15 P2: an injected naive `now` (e.g. datetime.utcnow()) must be
+        # normalized to UTC, not raise TypeError against the tz-aware expiry.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mem = TypedMemory(Path(temp_dir))
+            mem.note_assumption("temporary guess", ttl_days=7)
+            created = datetime.fromisoformat(mem.entries("assumptions")[0].created_at)
+            naive_after = (created + timedelta(days=8)).replace(tzinfo=None)
+
+            self.assertEqual(len(mem.entries("assumptions", active_only=True, now=naive_after)), 0)
+            self.assertEqual(mem.sweep("assumptions", now=naive_after), 1)
+
     def test_sweep_and_revoke_reject_unknown_type(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             mem = TypedMemory(Path(temp_dir))
