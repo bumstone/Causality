@@ -72,7 +72,7 @@
   <h1>Causality — 진행 현황 &amp; 로드맵</h1>
   <p class="sub">자기개선 운영 루프(HITL)의 구현 상태. 기준 브랜치 <code>main</code> · 갱신 2026-06-20 · 출처 <code>docs/code-review-2026-06-13.md</code></p>
 
-  <div class="banner"><b>마일스톤:</b> P0(실행-강제·실패 환류) + P1(skill 재사용) <b>read-path 전부 닫힘</b>. 5계층 파이프라인 순방향 + 진화 되먹임 3종 배선 완료. R4f 조회 read-path 캐시까지 닫혀 <b>잔여 코어 갭 없음</b>.</div>
+  <div class="banner"><b>마일스톤:</b> 5계층 파이프라인 순방향 + 진화 되먹임 3종(실행-강제·실패 환류·skill 재사용) + R4f 조회 캐시까지 <b>루프 배선·read-path 전부 닫힘</b>(머지 #11–#23, 196 tests). 단, <b>"닫힘"은 배선/경로</b>를 뜻한다 — <b>깊이·품질·실사용 검증</b> 갭은 남아 있다(아래 "다음 작업").</div>
 
   <div class="legend">
     <span class="tag t-done">✅ 반영됨</span>
@@ -130,16 +130,61 @@
     <div class="bar-row"><span class="lbl">earned skill 재사용(P1)</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
     <div class="bar-row"><span class="lbl">조회 read-path 캐시(R4f)</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
   </div>
-  <p class="sub" style="margin-top:10px">요약: <b style="color:var(--green)">write-path + 모든 read-path(실행-강제·환류·재사용·조회) 닫힘</b>. 영속 .idx 인덱스만 현 규모 과설계로 보류.</p>
+  <p class="sub" style="margin-top:10px">위 막대는 <b>루프 배선(read/write-path)</b> 트랙이다 — 전부 닫힘. 별개로 <b style="color:var(--amber)">깊이·품질·검증 트랙</b>은 진행 중(스킬 절차 깊이, verifier 실질, intent 강건성, e2e 검증). 아래 "다음 작업" 참조.</p>
 
-  <h2>🚧 남은 작업 — 코어 갭 없음</h2>
+  <h2>🚧 다음 작업 — 깊이·품질·검증 (배선 너머)</h2>
+  <p class="sub" style="margin-bottom:10px">루프는 닫혔다. 남은 건 각 단계의 <b>실효성</b>이다 — 각 카드의 코드 참조(<code>src/causality/*.py</code>) + 계획 <code>docs/code-review-2026-06-13.md</code>를 대조해 선별.</p>
   <div class="grid">
+
     <div class="card todo">
-      <h3><span class="tag t-low">보류</span> 영속 오프셋 인덱스 (.idx)</h3>
-      <div class="row"><b>상태</b> R4f 인메모리 캐시로 조회 재읽기·재파싱 제거 — 코어 read-path 갭 없음.</div>
-      <div class="row"><b>보류</b> 디스크 <code>.idx</code> 오프셋 인덱스는 거대 원장에서만 이득, 현 규모엔 과설계(ADR 0011 §3).</div>
-      <div class="deps">의존: 없음 · 트리거: 원장이 메모리에 안 들어올 때</div>
+      <h3><span class="tag t-todo">P2</span> 스킬 절차 깊이</h3>
+      <div class="row"><b>현재</b> <code>distill</code>이 <code>event_type:kind</code> 문자열 trace만 생성(<code>skills.py</code>). 재사용은 배선됐으나(P1) 내용이 얕다.</div>
+      <div class="row"><b>다음</b> 재현 가능한 절차(도구·인자·아티팩트 바인딩)로 distill 강화 + 의미 기반 dedup(현재는 objective 소문자 매칭).</div>
+      <div class="deps">영역: skills · 효과: 재사용 실효성</div>
     </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-todo">P2</span> Verifier 실질 검증</h3>
+      <div class="row"><b>현재</b> 게이트가 distinct-verifier 2-pass는 집행(<code>gates.py</code>, 이름 기준 중복 방지). 그러나 검증의 <b>내용/실질</b>은 무검증.</div>
+      <div class="row"><b>다음</b> 공허·형식적 verifier 통과 차단(검사 대상·증거 연결 요구) — 독립성을 이름 너머로.</div>
+      <div class="deps">영역: review/safety · 효과: 게이트 신뢰도</div>
+    </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-todo">P2</span> Intent 분류 강건성</h3>
+      <div class="row"><b>현재</b> 키워드 휴리스틱(<code>agent_harness.py</code> <code>re.search(\b…)</code>). 키워드 없으면 <code>TRIVIAL</code>로 떨어져 governance 우회 가능.</div>
+      <div class="row"><b>다음</b> 미분류·모호 시 보수적 게이트로 폴백(안전측), 또는 의미 분류 보강.</div>
+      <div class="deps">영역: execution/safety · 효과: 우회 방지</div>
+    </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-todo">P3</span> End-to-end 실사용 검증</h3>
+      <div class="row"><b>현재</b> 단위·스모크 위주(<code>test_loop.py</code>). 다회 반복·다계약 전 경로(게이트→distill→승급→재사용) 미검증.</div>
+      <div class="row"><b>다음</b> 5–10 반복 실워크로드 시나리오 테스트로 "루프 닫힘"을 실측.</div>
+      <div class="deps">영역: process · 효과: 닫힘의 증거</div>
+    </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-todo">P3</span> 실행 어댑터 + Playbook 실체화</h3>
+      <div class="row"><b>현재</b> 범용 <code>work</code> 어댑터는 <code>browser_adapter</code>뿐. 라우팅(<code>_ROUTING</code>)은 라벨만 부여, 플레이북 벤더링·실행 없음.</div>
+      <div class="row"><b>다음</b> subprocess/file/API 어댑터 번들 + 플레이북을 참조→실행/검증 가능하게.</div>
+      <div class="deps">영역: execution/memory · 효과: 운영성</div>
+    </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-todo">P3</span> autofix 워크플로 레드 제거</h3>
+      <div class="row"><b>현재</b> <code>ANTHROPIC_API_KEY</code> 시크릿 미설정 → Codex 리뷰 PR마다 <code>autofix</code> 잡 ❌(기능은 의도상 inert). <code>test</code> 잡은 green.</div>
+      <div class="row"><b>다음</b> 시크릿 부재 시 green-skip 가드(레드 노이즈 제거) + 활성화(App 설치+시크릿) 1회 안내.</div>
+      <div class="deps">영역: process · 효과: CI 신호 정합</div>
+    </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-low">후순위</span> 원장 rotation/.idx + 토큰 예산</h3>
+      <div class="row"><b>원장</b> 파일 무한 증가 — R4f 캐시는 메모리 한정. 규모 시 rotation/archival + 영속 <code>.idx</code>(ADR 0011 §3).</div>
+      <div class="row"><b>토큰</b> contract+tail 항상 주입분의 상한·절단 메커니즘 부재.</div>
+      <div class="deps">영역: performance/token · 트리거: 규모</div>
+    </div>
+
   </div>
 
   <h2>✅ 반영됨</h2>
@@ -182,9 +227,10 @@
   </div>
 
   <div class="foot">
-    <div><b>검증 상태</b> &nbsp; <span class="ok-dot">●</span> 전체 <b>196 tests</b> green &nbsp;·&nbsp; <span class="ok-dot">●</span> doc-budget(≤2000) &nbsp;·&nbsp; <span class="ok-dot">●</span> 머지됨 #11–#22</div>
-    <div style="margin-top:8px"><b>다음(선택)</b> &nbsp; 영속 .idx 인덱스만 보류 — 원장이 메모리에 안 들어올 때 착수</div>
-    <div style="margin-top:8px"><b>출처</b> &nbsp; 코드 <code>src/causality/{engine,execution,gates,ledger,memory,reflect,skills}.py</code> · 계획 <code>docs/code-review-2026-06-13.md</code></div>
+    <div><b>검증 상태</b> &nbsp; <span class="ok-dot">●</span> 전체 <b>196 tests</b> green &nbsp;·&nbsp; <span class="ok-dot">●</span> doc-budget(≤2000) &nbsp;·&nbsp; <span class="ok-dot">●</span> 머지됨 #11–#23 · <code>test</code> CI green</div>
+    <div style="margin-top:8px"><b>다음</b> &nbsp; 깊이·품질(P2: 스킬 절차·verifier 실질·intent 강건성) → 검증/운영(P3: e2e·어댑터·CI) → 규모(후순위: rotation/.idx·토큰예산)</div>
+    <div style="margin-top:8px"><b>정직 메모</b> &nbsp; "닫힘"은 <b>배선/경로</b>를 의미 — 깊이·실사용 검증은 위 트랙으로 관리(CLAUDE.md 정직-상태 원칙)</div>
+    <div style="margin-top:8px"><b>출처</b> &nbsp; 코드 <code>src/causality/*.py</code> · 계획 <code>docs/code-review-2026-06-13.md</code> · ADR <code>docs/adr/</code></div>
   </div>
 
 </div>
