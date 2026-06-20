@@ -72,7 +72,7 @@
   <h1>Causality — 진행 현황 &amp; 로드맵</h1>
   <p class="sub">자기개선 운영 루프(HITL)의 구현 상태. 기준 브랜치 <code>main</code> · 갱신 2026-06-20 · 출처 <code>docs/code-review-2026-06-13.md</code></p>
 
-  <div class="banner"><b>마일스톤:</b> P0(실행-강제·실패 환류) + P1(skill 재사용) <b>read-path 전부 닫힘</b>. 5계층 파이프라인의 순방향과 진화 되먹임 3종이 모두 배선됨. 잔여는 R4f(전체 인덱싱, 후순위)뿐.</div>
+  <div class="banner"><b>마일스톤:</b> P0(실행-강제·실패 환류) + P1(skill 재사용) <b>read-path 전부 닫힘</b>. 5계층 파이프라인 순방향 + 진화 되먹임 3종 배선 완료. R4f 조회 read-path 캐시까지 닫혀 <b>잔여 코어 갭 없음</b>.</div>
 
   <div class="legend">
     <span class="tag t-done">✅ 반영됨</span>
@@ -128,17 +128,17 @@
     <div class="bar-row"><span class="lbl">실행-강제 게이트(P0-A)</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
     <div class="bar-row"><span class="lbl">실패 환류·TTL(P0-B)</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
     <div class="bar-row"><span class="lbl">earned skill 재사용(P1)</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
-    <div class="bar-row"><span class="lbl">전체 read-path 인덱싱(R4f)</span><div class="track"><div class="fill" style="width:0%;background:var(--amber)"></div></div><span class="pct">후순위</span></div>
+    <div class="bar-row"><span class="lbl">조회 read-path 캐시(R4f)</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
   </div>
-  <p class="sub" style="margin-top:10px">요약: <b style="color:var(--green)">write-path + 실행-강제·환류·재사용 read-path 닫힘</b>. 남은 R4f는 성능 최적화(현 규모 과설계)라 트리거 시 착수.</p>
+  <p class="sub" style="margin-top:10px">요약: <b style="color:var(--green)">write-path + 모든 read-path(실행-강제·환류·재사용·조회) 닫힘</b>. 영속 .idx 인덱스만 현 규모 과설계로 보류.</p>
 
-  <h2>🚧 남은 작업</h2>
+  <h2>🚧 남은 작업 — 코어 갭 없음</h2>
   <div class="grid">
     <div class="card todo">
-      <h3><span class="tag t-low">후순위</span> R4f 전체 read-path 인덱싱</h3>
-      <div class="row"><b>현재</b> R2 캐시로 append는 O(1). <code>events()</code> 조회는 매번 디스크 재파싱.</div>
-      <div class="row"><b>다음</b> 원장 규모가 커질 때만 오프셋(.idx) 인덱스 검토. 현 규모엔 과설계.</div>
-      <div class="deps">의존: 없음 · 트리거: 성능 필요 시</div>
+      <h3><span class="tag t-low">보류</span> 영속 오프셋 인덱스 (.idx)</h3>
+      <div class="row"><b>상태</b> R4f 인메모리 캐시로 조회 재읽기·재파싱 제거 — 코어 read-path 갭 없음.</div>
+      <div class="row"><b>보류</b> 디스크 <code>.idx</code> 오프셋 인덱스는 거대 원장에서만 이득, 현 규모엔 과설계(ADR 0011 §3).</div>
+      <div class="deps">의존: 없음 · 트리거: 원장이 메모리에 안 들어올 때</div>
     </div>
   </div>
 
@@ -167,7 +167,12 @@
     <div class="card done">
       <h3>영속성 R2·R4 <span class="tag t-pr">#11</span> <span class="tag t-pr">#13</span> <span class="tag t-pr">#14</span> <span class="tag t-pr">#17</span></h3>
       <div class="row">size-guarded latest-hash 캐시(append O(N²)→O(1)) + <code>durable.py</code> atomic·fsync·<code>flock</code>(체인 fork 방지).</div>
-      <div class="deps">ADR 0011</div>
+      <div class="deps">ADR 0011 §2.1–2.2</div>
+    </div>
+    <div class="card done">
+      <h3>R4f 조회 read-path 캐시 <span class="tag t-pr">R4f</span></h3>
+      <div class="row">size-guarded parsed-events 캐시로 <code>events()</code>/<code>find()</code> 재읽기·재파싱 제거(크기 불변 시). <code>verify_chain()</code>은 무결성 검사라 디스크 재파싱 유지. <code>_isolate()</code> 사본 반환으로 가변 공유 차단.</div>
+      <div class="deps">ADR 0011 §2.3 · 조회 read-path 닫힘</div>
     </div>
     <div class="card done">
       <h3>리뷰 자동반영 + 거버넌스 <span class="tag t-pr">#16</span> <span class="tag t-pr">#18</span></h3>
@@ -177,9 +182,9 @@
   </div>
 
   <div class="foot">
-    <div><b>검증 상태</b> &nbsp; <span class="ok-dot">●</span> 전체 <b>187 tests</b> green &nbsp;·&nbsp; <span class="ok-dot">●</span> doc-budget 1386자(≤2000) &nbsp;·&nbsp; <span class="ok-dot">●</span> 머지됨 #11–#21</div>
-    <div style="margin-top:8px"><b>다음(선택)</b> &nbsp; R4f 전체 인덱싱은 후순위 — 원장 규모가 성능을 압박할 때 착수</div>
-    <div style="margin-top:8px"><b>출처</b> &nbsp; 코드 <code>src/causality/{engine,execution,gates,memory,reflect,skills}.py</code> · 계획 <code>docs/code-review-2026-06-13.md</code></div>
+    <div><b>검증 상태</b> &nbsp; <span class="ok-dot">●</span> 전체 <b>196 tests</b> green &nbsp;·&nbsp; <span class="ok-dot">●</span> doc-budget(≤2000) &nbsp;·&nbsp; <span class="ok-dot">●</span> 머지됨 #11–#22</div>
+    <div style="margin-top:8px"><b>다음(선택)</b> &nbsp; 영속 .idx 인덱스만 보류 — 원장이 메모리에 안 들어올 때 착수</div>
+    <div style="margin-top:8px"><b>출처</b> &nbsp; 코드 <code>src/causality/{engine,execution,gates,ledger,memory,reflect,skills}.py</code> · 계획 <code>docs/code-review-2026-06-13.md</code></div>
   </div>
 
 </div>

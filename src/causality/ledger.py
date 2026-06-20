@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from uuid import uuid4
@@ -51,7 +52,7 @@ class EvidenceLedger:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Cache ONLY the latest hash, guarded by the file size. append() needs
+        # Cache the latest hash, guarded by the file size. append() needs
         # the previous hash to chain; recomputing it by scanning the whole file
         # every append made N appends cost O(N^2). The cache makes the common
         # single-writer case O(1) per append, while the size guard keeps it
@@ -60,12 +61,21 @@ class EvidenceLedger:
         # install_agent_files appends through its own instance, codex r3407872680):
         # a size change invalidates the cache and we re-read the tail. The append
         # log only grows, so size strictly increases and is a reliable signal.
-        # We deliberately do NOT cache parsed events: events()/find() re-read and
-        # re-parse on each call, so callers can never mutate shared cached state
-        # (codex r3407872681) and never observe a stale list. (Cross-process
-        # concurrency still needs locking -- ADR 0011 R4.)
+        # R4f extends the same size guard to the PARSED events so events() and
+        # find() stop re-reading + re-parsing the whole file on every call.
+        # (verify_chain() deliberately still parses from disk -- it is an
+        # integrity check, codex r3445873874.) The two original objections to
+        # caching parsed events are
+        # handled head-on: staleness across sibling instances is caught by the
+        # size guard (a sibling append changes the size and forces a rebuild),
+        # and the shared-mutable-state footgun (codex r3407872681) is closed by
+        # handing callers isolated copies via _isolate() -- only read-only
+        # internal scans touch the cache directly. (Cross-process concurrency
+        # still needs locking -- ADR 0011 R4.)
         self._cached_latest_hash: str | None = None
         self._synced_size = -1
+        self._cached_events: list[LedgerEvent] | None = None
+        self._events_synced_size = -1
         # All JSONL file moves go through one helper so R4b/R4c can add fsync,
         # atomic rewrite, and flock in a single place (ADR 0011 §2.2).
         self._store = DurableJsonl(self.path)
@@ -75,12 +85,6 @@ class EvidenceLedger:
             return self.path.stat().st_size
         except FileNotFoundError:
             return 0
-
-    def _read_latest_hash_from_disk(self) -> str | None:
-        # Via the store so a torn trailing line (crashed append) is ignored when
-        # picking the chain anchor (ADR 0011 §2.2 R4b).
-        lines = self._store.read_lines()
-        return json.loads(lines[-1]).get("entry_hash") if lines else None
 
     def append(
         self,
@@ -111,17 +115,69 @@ class EvidenceLedger:
             entry_hash = sha256_text(_stable_json(entry_without_hash))
             entry = dict(entry_without_hash)
             entry["entry_hash"] = entry_hash
-            self._store.append(
-                json.dumps(entry, ensure_ascii=True, sort_keys=True), lock=False
-            )
+            # Capture the size the cache was synced at BEFORE we grow the file,
+            # so we can tell whether the parsed-events cache is exactly one row
+            # behind (safe to extend) or stale from a sibling write (rebuild).
+            # The exact JSON row persisted to disk; reused for the warm-cache
+            # entry below so a warm read parses the same bytes a cold read would.
+            serialized = json.dumps(entry, ensure_ascii=True, sort_keys=True)
+            pre_size = self._current_size()
+            self._store.append(serialized, lock=False)
             # Resync to the row we just wrote so the next append is O(1) and the
             # size guard stays consistent with what is on disk.
             self._cached_latest_hash = entry_hash
-            self._synced_size = self._current_size()
+            new_size = self._current_size()
+            self._synced_size = new_size
+            # Keep the parsed-events cache warm across append-then-read, but only
+            # when it reflected the file right before this append; otherwise drop
+            # it so _load_events() rebuilds under the size guard.
+            if self._cached_events is not None and self._events_synced_size == pre_size:
+                # Build the cached event from the persisted JSON row, not the
+                # in-memory entry: json normalizes some payloads (tuple->array,
+                # non-str keys->strings), so parsing the row keeps warm reads
+                # identical to cold disk reads -- and yields fresh objects, so the
+                # cache never aliases the caller's payload (codex r3445847631,
+                # r3445774529).
+                self._cached_events.append(LedgerEvent(**json.loads(serialized)))
+                self._events_synced_size = new_size
+            else:
+                self._cached_events = None
+                self._events_synced_size = -1
         return LedgerEvent(**entry)
 
+    def _load_events(self) -> list[LedgerEvent]:
+        # Size-guarded parsed-events cache (R4f). The append log only grows, so a
+        # size change is the same reliable "someone wrote" signal R2 uses for
+        # latest_hash. While the size is unchanged we reuse the parsed list
+        # instead of re-reading + re-parsing the whole file on every call. The
+        # returned list is the SHARED cache: callers that may hand events out
+        # must go through events()/_isolate(); only read-only internal scans use
+        # it directly.
+        size = self._current_size()
+        if self._cached_events is None or size != self._events_synced_size:
+            lines, torn = self._store.read_lines_with_torn()
+            self._cached_events = [LedgerEvent(**json.loads(line)) for line in lines]
+            # A torn tail means stat size counts bytes read_lines just dropped; a
+            # later repair+append of the same length would leave the size
+            # unchanged and hide the new event. Don't trust the size then --
+            # force a re-read next call (codex r3445819560).
+            self._events_synced_size = -1 if torn else size
+        return self._cached_events
+
+    @staticmethod
+    def _isolate(event: LedgerEvent) -> LedgerEvent:
+        # Hand callers a copy whose mutable payload/artifacts cannot alias the
+        # cache, so mutating events()/find() output never corrupts a later read
+        # or verify_chain() (codex r3407872681 -- the regression that argued
+        # against caching parsed events at all). Scalar fields are immutable.
+        return replace(
+            event,
+            payload=copy.deepcopy(event.payload),
+            artifacts=copy.deepcopy(event.artifacts),
+        )
+
     def events(self) -> list[LedgerEvent]:
-        return [LedgerEvent(**json.loads(line)) for line in self._store.read_lines()]
+        return [self._isolate(event) for event in self._load_events()]
 
     def find(
         self,
@@ -132,20 +188,36 @@ class EvidenceLedger:
         if event_type is not None:
             event_type_value = event_type.value if isinstance(event_type, AuditEventType) else str(event_type)
         matches = []
-        for event in self.events():
+        # Iterate a snapshot (list(...)), not the live cache: a predicate that
+        # appends to this same ledger extends _cached_events, which would
+        # otherwise grow the active scan mid-loop (even unboundedly) and include
+        # events that did not exist at scan start (codex r3445896987).
+        for event in list(self._load_events()):
             if event_type_value is not None and event.event_type != event_type_value:
                 continue
-            if predicate is not None and not predicate(event):
+            # Isolate BEFORE the predicate: it is caller code that may mutate or
+            # stash the event it receives, and running it against the shared
+            # cache would let that corrupt later reads (codex r3445798584). The
+            # cheap event_type filter runs first so only candidates are copied.
+            candidate = self._isolate(event)
+            if predicate is not None and not predicate(candidate):
                 continue
-            matches.append(event)
+            matches.append(candidate)
         return matches
 
     def latest_hash(self) -> str | None:
         size = self._current_size()
         if size != self._synced_size:
             # First read, or another writer changed the file: recompute + resync.
-            self._cached_latest_hash = self._read_latest_hash_from_disk()
-            self._synced_size = size
+            # A torn trailing line is ignored when picking the chain anchor, so
+            # don't key the cache to a stat size that counts those dropped bytes
+            # either -- otherwise a same-length repair+append could serve a stale
+            # anchor and fork the chain (codex r3445819560).
+            lines, torn = self._store.read_lines_with_torn()
+            self._cached_latest_hash = (
+                json.loads(lines[-1]).get("entry_hash") if lines else None
+            )
+            self._synced_size = -1 if torn else size
         return self._cached_latest_hash
 
     def events_for_contract(self, contract_id: str | None) -> list[LedgerEvent]:
@@ -154,7 +226,11 @@ class EvidenceLedger:
         Centralizes contract scoping so callers (Reflect, Skill distill) stop
         re-implementing ``event.contract_id == ...`` over a full ledger read.
         """
-        return [event for event in self.events() if event.contract_id == contract_id]
+        return [
+            self._isolate(event)
+            for event in self._load_events()
+            if event.contract_id == contract_id
+        ]
 
     def latest_hash_for_contract(self, contract_id: str | None) -> str | None:
         """Latest entry hash for one contract -- its provenance anchor.
@@ -163,12 +239,23 @@ class EvidenceLedger:
         interleaved multi-contract runs, the global latest hash belongs to a
         different contract and breaks the audit trail (codex review r3382219479).
         """
-        scoped = self.events_for_contract(contract_id)
-        return scoped[-1].entry_hash if scoped else None
+        # entry_hash is an immutable str, so scan the shared cache directly
+        # rather than materializing isolated copies just to read one field.
+        latest = None
+        for event in self._load_events():
+            if event.contract_id == contract_id:
+                latest = event.entry_hash
+        return latest
 
     def verify_chain(self) -> bool:
+        # Integrity check: read straight from disk, NOT the size-guarded cache.
+        # A same-length in-place edit (e.g. flipping a payload byte without
+        # fixing entry_hash) leaves the file size unchanged, so a cached scan
+        # would still pass; re-parsing the persisted bytes catches it (codex
+        # r3445873874).
         previous_hash = None
-        for event in self.events():
+        for line in self._store.read_lines():
+            event = LedgerEvent(**json.loads(line))
             entry = {
                 "event_id": event.event_id,
                 "timestamp": event.timestamp,
@@ -190,13 +277,16 @@ class EvidenceLedger:
         # caller asks for zero entries (code review 2026-06-13, H5).
         if limit <= 0:
             return []
-        events = self.events()[-limit:]
+        events = self._load_events()[-limit:]
         return [
             {
                 "event_id": event.event_id,
                 "event_type": event.event_type,
                 "timestamp": event.timestamp,
-                "payload": event.payload,
+                # Deep-copy: this slices the shared cache, so handing back the
+                # cached payload dict raw would let a caller mutating a tail
+                # result corrupt the ledger cache (codex r3445774531).
+                "payload": copy.deepcopy(event.payload),
             }
             for event in events
         ]

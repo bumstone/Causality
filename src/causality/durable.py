@@ -156,16 +156,29 @@ class DurableJsonl:
 
     def read_lines(self) -> list[str]:
         """Return the non-blank record lines, in order; a torn tail is dropped."""
+        return self.read_lines_with_torn()[0]
+
+    def read_lines_with_torn(self) -> tuple[list[str], bool]:
+        """Like :meth:`read_lines`, plus whether the tail was torn.
+
+        The torn partial of a crashed append is dropped from the returned lines,
+        but its presence is reported so a size-guarded cache does not key its
+        freshness to a ``stat`` size that still counts the dropped bytes -- a
+        later repair+append of the same length would otherwise leave the size
+        unchanged and hide the new record (codex r3445819560).
+        """
         if not self.path.exists():
-            return []
+            return [], False
         raw = self.path.read_text(encoding="utf-8")
         if not raw:
-            return []
+            return [], False
         # Every complete record ends in "\n", so split() leaves a trailing piece:
         # "" when the tail is clean, or the torn partial bytes of a crashed append.
-        # Either way the last piece is never a complete record -- drop it.
+        # Either way the last piece is never a complete record -- drop it, and
+        # flag the torn case so size-based caches can refuse to trust the size.
+        torn = not raw.endswith("\n")
         parts = raw.split("\n")[:-1]
-        return [part for part in parts if part.strip()]
+        return [part for part in parts if part.strip()], torn
 
     def rewrite(self, lines: Iterable[str], *, lock: bool = True) -> None:
         materialized = list(lines)
