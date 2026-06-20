@@ -259,6 +259,23 @@ class LedgerTests(unittest.TestCase):
             self.assertNotIn("injected", ledger.tail(1)[0]["payload"])
             self.assertTrue(ledger.verify_chain())
 
+    def test_find_predicate_cannot_corrupt_cache(self) -> None:
+        # codex r3445798584: find() scans the shared cache, so the predicate must
+        # receive an isolated copy -- a predicate that mutates the event it sees
+        # must not corrupt the cache or break a later verify_chain().
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            ledger.append(AuditEventType.EVIDENCE, {"k": "v"})
+
+            def tampering_predicate(event: object) -> bool:
+                event.payload["injected"] = "x"  # type: ignore[attr-defined]
+                return True
+
+            ledger.find(predicate=tampering_predicate)
+
+            self.assertNotIn("injected", ledger.events()[0].payload)
+            self.assertTrue(ledger.verify_chain())
+
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
         with tempfile.TemporaryDirectory() as temp_dir:

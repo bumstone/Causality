@@ -190,10 +190,15 @@ class EvidenceLedger:
         for event in self._load_events():
             if event_type_value is not None and event.event_type != event_type_value:
                 continue
-            if predicate is not None and not predicate(event):
+            # Isolate BEFORE the predicate: it is caller code that may mutate or
+            # stash the event it receives, and running it against the shared
+            # cache would let that corrupt later reads (codex r3445798584). The
+            # cheap event_type filter runs first so only candidates are copied.
+            candidate = self._isolate(event)
+            if predicate is not None and not predicate(candidate):
                 continue
-            matches.append(event)
-        return [self._isolate(event) for event in matches]
+            matches.append(candidate)
+        return matches
 
     def latest_hash(self) -> str | None:
         size = self._current_size()

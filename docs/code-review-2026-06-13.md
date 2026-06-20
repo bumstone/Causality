@@ -2,7 +2,7 @@
 
 > 최종 갱신 2026-06-20: #11~#22 + R4f 반영. 시각화: `docs/status/roadmap.html`.
 
-ADR 0001~0011 프리미티브 + `CausalityEngine` 배선 머지됨(191 tests). **P0 실행-강제·환류 + P1 skill 재사용 + R4f read-path 캐시까지 닫힘** — 코어 갭 없음. 상세 로컬본: `docs/_review/`.
+ADR 0001~0011 프리미티브 + `CausalityEngine` 배선 머지됨(192 tests). **P0 실행-강제·환류 + P1 skill 재사용 + R4f read-path 캐시까지 닫힘** — 코어 갭 없음. 상세 로컬본: `docs/_review/`.
 
 ## 남은 갭
 
