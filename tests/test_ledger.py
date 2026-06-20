@@ -264,6 +264,30 @@ class LedgerTests(unittest.TestCase):
             self.assertIsInstance(warm, list)
             self.assertTrue(ledger.verify_chain())
 
+    def test_find_predicate_appends_do_not_affect_active_scan(self) -> None:
+        # codex r3445896987: find() must iterate a snapshot, so a predicate that
+        # appends to the same ledger cannot extend the list being scanned (which
+        # could loop unboundedly) or include events that did not exist at start.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            ledger.events()  # warm the cache so a mid-scan append extends it
+
+            seen = {"count": 0}
+
+            def appending_predicate(event: object) -> bool:
+                seen["count"] += 1
+                if seen["count"] <= 1:  # append once, from inside the scan
+                    ledger.append(AuditEventType.EVIDENCE, {"n": 99})
+                return True
+
+            result = ledger.find(AuditEventType.EVIDENCE, predicate=appending_predicate)
+            # The scan saw only the event present when find() started.
+            self.assertEqual(seen["count"], 1)
+            self.assertEqual(len(result), 1)
+            # The append still landed and is visible to a later read.
+            self.assertEqual(len(ledger.events()), 2)
+
     def test_tail_returns_isolated_payload(self) -> None:
         # codex r3445774531: tail() slices the shared cache, so mutating a
         # returned tail payload must not corrupt the ledger cache.

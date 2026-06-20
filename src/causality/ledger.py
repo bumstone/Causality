@@ -61,9 +61,11 @@ class EvidenceLedger:
         # install_agent_files appends through its own instance, codex r3407872680):
         # a size change invalidates the cache and we re-read the tail. The append
         # log only grows, so size strictly increases and is a reliable signal.
-        # R4f extends the same size guard to the PARSED events so events()/
-        # find()/verify_chain() stop re-reading + re-parsing the whole file on
-        # every call. The two original objections to caching parsed events are
+        # R4f extends the same size guard to the PARSED events so events() and
+        # find() stop re-reading + re-parsing the whole file on every call.
+        # (verify_chain() deliberately still parses from disk -- it is an
+        # integrity check, codex r3445873874.) The two original objections to
+        # caching parsed events are
         # handled head-on: staleness across sibling instances is caught by the
         # size guard (a sibling append changes the size and forces a rebuild),
         # and the shared-mutable-state footgun (codex r3407872681) is closed by
@@ -186,7 +188,11 @@ class EvidenceLedger:
         if event_type is not None:
             event_type_value = event_type.value if isinstance(event_type, AuditEventType) else str(event_type)
         matches = []
-        for event in self._load_events():
+        # Iterate a snapshot (list(...)), not the live cache: a predicate that
+        # appends to this same ledger extends _cached_events, which would
+        # otherwise grow the active scan mid-loop (even unboundedly) and include
+        # events that did not exist at scan start (codex r3445896987).
+        for event in list(self._load_events()):
             if event_type_value is not None and event.event_type != event_type_value:
                 continue
             # Isolate BEFORE the predicate: it is caller code that may mutate or

@@ -171,7 +171,7 @@
     </div>
     <div class="card done">
       <h3>R4f 조회 read-path 캐시 <span class="tag t-pr">R4f</span></h3>
-      <div class="row">size-guarded parsed-events 캐시로 <code>events()</code>/<code>find()</code>/<code>verify_chain()</code> 재읽기·재파싱 제거(크기 불변 시). <code>_isolate()</code> 사본 반환으로 가변 공유 차단.</div>
+      <div class="row">size-guarded parsed-events 캐시로 <code>events()</code>/<code>find()</code> 재읽기·재파싱 제거(크기 불변 시). <code>verify_chain()</code>은 무결성 검사라 디스크 재파싱 유지. <code>_isolate()</code> 사본 반환으로 가변 공유 차단.</div>
       <div class="deps">ADR 0011 §2.3 · 조회 read-path 닫힘</div>
     </div>
     <div class="card done">
@@ -182,7 +182,7 @@
   </div>
 
   <div class="foot">
-    <div><b>검증 상태</b> &nbsp; <span class="ok-dot">●</span> 전체 <b>195 tests</b> green &nbsp;·&nbsp; <span class="ok-dot">●</span> doc-budget(≤2000) &nbsp;·&nbsp; <span class="ok-dot">●</span> 머지됨 #11–#22</div>
+    <div><b>검증 상태</b> &nbsp; <span class="ok-dot">●</span> 전체 <b>196 tests</b> green &nbsp;·&nbsp; <span class="ok-dot">●</span> doc-budget(≤2000) &nbsp;·&nbsp; <span class="ok-dot">●</span> 머지됨 #11–#22</div>
     <div style="margin-top:8px"><b>다음(선택)</b> &nbsp; 영속 .idx 인덱스만 보류 — 원장이 메모리에 안 들어올 때 착수</div>
     <div style="margin-top:8px"><b>출처</b> &nbsp; 코드 <code>src/causality/{engine,execution,gates,ledger,memory,reflect,skills}.py</code> · 계획 <code>docs/code-review-2026-06-13.md</code></div>
   </div>
