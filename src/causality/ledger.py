@@ -84,12 +84,6 @@ class EvidenceLedger:
         except FileNotFoundError:
             return 0
 
-    def _read_latest_hash_from_disk(self) -> str | None:
-        # Via the store so a torn trailing line (crashed append) is ignored when
-        # picking the chain anchor (ADR 0011 §2.2 R4b).
-        lines = self._store.read_lines()
-        return json.loads(lines[-1]).get("entry_hash") if lines else None
-
     def append(
         self,
         event_type: AuditEventType | str,
@@ -157,10 +151,13 @@ class EvidenceLedger:
         # it directly.
         size = self._current_size()
         if self._cached_events is None or size != self._events_synced_size:
-            self._cached_events = [
-                LedgerEvent(**json.loads(line)) for line in self._store.read_lines()
-            ]
-            self._events_synced_size = size
+            lines, torn = self._store.read_lines_with_torn()
+            self._cached_events = [LedgerEvent(**json.loads(line)) for line in lines]
+            # A torn tail means stat size counts bytes read_lines just dropped; a
+            # later repair+append of the same length would leave the size
+            # unchanged and hide the new event. Don't trust the size then --
+            # force a re-read next call (codex r3445819560).
+            self._events_synced_size = -1 if torn else size
         return self._cached_events
 
     @staticmethod
@@ -204,8 +201,15 @@ class EvidenceLedger:
         size = self._current_size()
         if size != self._synced_size:
             # First read, or another writer changed the file: recompute + resync.
-            self._cached_latest_hash = self._read_latest_hash_from_disk()
-            self._synced_size = size
+            # A torn trailing line is ignored when picking the chain anchor, so
+            # don't key the cache to a stat size that counts those dropped bytes
+            # either -- otherwise a same-length repair+append could serve a stale
+            # anchor and fork the chain (codex r3445819560).
+            lines, torn = self._store.read_lines_with_torn()
+            self._cached_latest_hash = (
+                json.loads(lines[-1]).get("entry_hash") if lines else None
+            )
+            self._synced_size = -1 if torn else size
         return self._cached_latest_hash
 
     def events_for_contract(self, contract_id: str | None) -> list[LedgerEvent]:

@@ -175,13 +175,13 @@ class LedgerTests(unittest.TestCase):
             a.append(AuditEventType.EVIDENCE, {"n": 1})
 
             reads = {"count": 0}
-            real_read_lines = a._store.read_lines
+            real_read = a._store.read_lines_with_torn
 
-            def counting_read_lines() -> list[str]:
+            def counting_read() -> tuple[list[str], bool]:
                 reads["count"] += 1
-                return real_read_lines()
+                return real_read()
 
-            a._store.read_lines = counting_read_lines  # type: ignore[assignment]
+            a._store.read_lines_with_torn = counting_read  # type: ignore[assignment]
 
             # First read parses once; repeats reuse the cache (no extra reads).
             self.assertEqual(len(a.events()), 1)
@@ -275,6 +275,34 @@ class LedgerTests(unittest.TestCase):
 
             self.assertNotIn("injected", ledger.events()[0].payload)
             self.assertTrue(ledger.verify_chain())
+
+    def test_torn_tail_read_is_not_trusted_as_cache_key(self) -> None:
+        # codex r3445819560: reading over a torn tail must not key the cache to
+        # the stat size (which counts the dropped partial). Otherwise a sibling
+        # that repairs the tail and appends a same-length record leaves the size
+        # unchanged and the reader keeps serving the stale cached list.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            writer = EvidenceLedger(path)
+            writer.append(AuditEventType.EVIDENCE, {"k": "first"})
+            # Crashed third append: a half-written final line (no newline).
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write('{"event_id": "partial"')
+
+            reader = EvidenceLedger(path)
+            self.assertEqual(len(reader.events()), 1)  # drops torn, caches first
+
+            # Simulate the size collision: pin the reported size to the torn
+            # size, then have a sibling repair the tail and append a real event.
+            torn_size = reader._current_size()
+            reader._current_size = lambda: torn_size  # type: ignore[assignment]
+            writer.append(AuditEventType.VERIFIER_DECISION, {"k": "second"})
+
+            # Despite the unchanged (pinned) size, the reader must re-read because
+            # its previous read saw a torn tail -- not serve the stale [first].
+            fresh = reader.events()
+            self.assertEqual(len(fresh), 2)
+            self.assertTrue(reader.verify_chain())
 
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
