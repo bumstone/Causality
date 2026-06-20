@@ -246,6 +246,23 @@ class LedgerTests(unittest.TestCase):
             self.assertNotIn("injected2", fresh[0].payload)
             self.assertTrue(ledger.verify_chain())
 
+    def test_warm_append_matches_disk_normalized_shape(self) -> None:
+        # codex r3445847631: a warm-cache append must reflect the JSON-normalized
+        # shape (e.g. tuple -> list) a cold disk read produces, not the caller's
+        # in-memory payload, so warm and reloaded reads never diverge.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.events()  # warm the cache so append takes the warm path
+            ledger.append(AuditEventType.EVIDENCE, {"items": (1, 2)})
+
+            warm = ledger.events()[0].payload["items"]
+            cold = EvidenceLedger(path).events()[0].payload["items"]
+            self.assertEqual(warm, cold)
+            self.assertEqual(warm, [1, 2])
+            self.assertIsInstance(warm, list)
+            self.assertTrue(ledger.verify_chain())
+
     def test_tail_returns_isolated_payload(self) -> None:
         # codex r3445774531: tail() slices the shared cache, so mutating a
         # returned tail payload must not corrupt the ledger cache.

@@ -116,10 +116,11 @@ class EvidenceLedger:
             # Capture the size the cache was synced at BEFORE we grow the file,
             # so we can tell whether the parsed-events cache is exactly one row
             # behind (safe to extend) or stale from a sibling write (rebuild).
+            # The exact JSON row persisted to disk; reused for the warm-cache
+            # entry below so a warm read parses the same bytes a cold read would.
+            serialized = json.dumps(entry, ensure_ascii=True, sort_keys=True)
             pre_size = self._current_size()
-            self._store.append(
-                json.dumps(entry, ensure_ascii=True, sort_keys=True), lock=False
-            )
+            self._store.append(serialized, lock=False)
             # Resync to the row we just wrote so the next append is O(1) and the
             # size guard stays consistent with what is on disk.
             self._cached_latest_hash = entry_hash
@@ -129,12 +130,13 @@ class EvidenceLedger:
             # when it reflected the file right before this append; otherwise drop
             # it so _load_events() rebuilds under the size guard.
             if self._cached_events is not None and self._events_synced_size == pre_size:
-                # Cache an ISOLATED copy, not LedgerEvent(**entry): entry's
-                # payload is the caller's dict and is also returned below, so
-                # caching it raw would let a post-append mutation of the caller's
-                # payload or the returned event corrupt the cache (codex
+                # Build the cached event from the persisted JSON row, not the
+                # in-memory entry: json normalizes some payloads (tuple->array,
+                # non-str keys->strings), so parsing the row keeps warm reads
+                # identical to cold disk reads -- and yields fresh objects, so the
+                # cache never aliases the caller's payload (codex r3445847631,
                 # r3445774529).
-                self._cached_events.append(self._isolate(LedgerEvent(**entry)))
+                self._cached_events.append(LedgerEvent(**json.loads(serialized)))
                 self._events_synced_size = new_size
             else:
                 self._cached_events = None
