@@ -242,8 +242,14 @@ class EvidenceLedger:
         return latest
 
     def verify_chain(self) -> bool:
+        # Integrity check: read straight from disk, NOT the size-guarded cache.
+        # A same-length in-place edit (e.g. flipping a payload byte without
+        # fixing entry_hash) leaves the file size unchanged, so a cached scan
+        # would still pass; re-parsing the persisted bytes catches it (codex
+        # r3445873874).
         previous_hash = None
-        for event in self._load_events():
+        for line in self._store.read_lines():
+            event = LedgerEvent(**json.loads(line))
             entry = {
                 "event_id": event.event_id,
                 "timestamp": event.timestamp,

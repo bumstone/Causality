@@ -183,10 +183,12 @@ class LedgerTests(unittest.TestCase):
 
             a._store.read_lines_with_torn = counting_read  # type: ignore[assignment]
 
-            # First read parses once; repeats reuse the cache (no extra reads).
+            # First read parses once; repeated events()/find() reuse the cache
+            # (no extra reads). verify_chain() is excluded -- it reads disk by
+            # design (integrity check, see test_verify_chain_reads_disk_not_cache).
             self.assertEqual(len(a.events()), 1)
             self.assertEqual(len(a.find()), 1)
-            self.assertTrue(a.verify_chain())
+            self.assertEqual(len(a.events()), 1)
             self.assertEqual(reads["count"], 1)
 
             # An append on this instance keeps the cache warm: the new row shows
@@ -200,7 +202,6 @@ class LedgerTests(unittest.TestCase):
             EvidenceLedger(path).append(AuditEventType.EVIDENCE, {"n": 3})
             self.assertEqual(len(a.events()), 3)
             self.assertEqual(reads["count"], 2)
-            self.assertTrue(a.verify_chain())
 
     def test_warm_cache_returns_isolated_copies(self) -> None:
         # R4f keeps the mutation guarantee even when served from a warm cache:
@@ -320,6 +321,27 @@ class LedgerTests(unittest.TestCase):
             fresh = reader.events()
             self.assertEqual(len(fresh), 2)
             self.assertTrue(reader.verify_chain())
+
+    def test_verify_chain_reads_disk_not_cache(self) -> None:
+        # codex r3445873874: verify_chain() is an integrity check, so it must
+        # read the persisted bytes, not the size-guarded cache. A same-length
+        # in-place edit leaves the file size unchanged; a warmed instance must
+        # still catch it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"k": "zzzzz"})
+            self.assertTrue(ledger.verify_chain())  # warms the cache, valid
+
+            # Tamper in place: same-length value swap leaves entry_hash stale and
+            # the file size unchanged, so a size-guarded cache would miss it.
+            raw = path.read_text(encoding="utf-8")
+            self.assertIn("zzzzz", raw)
+            tampered = raw.replace("zzzzz", "yyyyy")
+            self.assertEqual(len(tampered), len(raw))
+            path.write_text(tampered, encoding="utf-8")
+
+            self.assertFalse(ledger.verify_chain())
 
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
