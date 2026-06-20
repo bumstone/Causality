@@ -67,6 +67,20 @@ class RecallRankingTests(unittest.TestCase):
                 _promote(store, SkillCandidate(f"s{i}", "parse grammar variant", ()))
             self.assertEqual(len(store.recall("parse grammar", limit=2)), 2)
 
+    def test_duplicate_promoted_rows_collapse_to_latest(self) -> None:
+        # codex #21: promote is append-only, so a re-promotion leaves two rows
+        # for one skill_id; recall must return it once (latest wins), not twice.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = self._store(temp_dir)
+            _promote(store, SkillCandidate("dup", "parse grammar", (), successes=1, attempts=2))
+            _promote(store, SkillCandidate("dup", "parse grammar", (), successes=3, attempts=3))
+            _promote(store, SkillCandidate("other", "parse grammar tokens", ()))
+            recalled = store.recall("parse grammar", limit=5)
+            ids = [s.skill_id for s in recalled]
+            self.assertEqual(ids.count("dup"), 1)
+            self.assertIn("other", ids)
+            self.assertEqual(next(s for s in recalled if s.skill_id == "dup").successes, 3)
+
     def test_objective_with_no_content_tokens_recalls_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = self._store(temp_dir)

@@ -192,7 +192,13 @@ class SkillStore:
         return list(self._latest_candidates().values())
 
     def promoted(self) -> list[SkillCandidate]:
-        return self._read(self._promoted_path())
+        """Promoted skills, the authoritative latest row per ``skill_id``.
+
+        ``promote`` is append-only, so re-promoting a skill appends another row;
+        collapse to the latest like :meth:`candidates` so a consumer (e.g.
+        :meth:`recall`) never sees or counts the same earned skill twice (codex
+        #21)."""
+        return list(self._latest_by_id(self._promoted_path()).values())
 
     def recall(
         self,
@@ -237,8 +243,12 @@ class SkillStore:
         return (authored_hits + earned_hits)[:limit]
 
     def _latest_candidates(self) -> dict[str, SkillCandidate]:
+        return self._latest_by_id(self._candidates_path())
+
+    def _latest_by_id(self, path: Path) -> dict[str, SkillCandidate]:
+        """Latest row per ``skill_id`` from an append-only JSONL skill file."""
         latest: dict[str, SkillCandidate] = {}
-        for candidate in self._read(self._candidates_path()):
+        for candidate in self._read(path):
             latest[candidate.skill_id] = candidate
         return latest
 
