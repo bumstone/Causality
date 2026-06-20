@@ -24,7 +24,7 @@ from .agenda import Agenda, AgendaItem
 from .agent_harness import AgentHarness, Dispatch, TaskType
 from .contract_harness import ContractHarness
 from .contracts import GateDecision, GoalContract, Risk, TaskContract
-from .execution import ActionBlocked, ExecutionAdapter
+from .execution import ActionBlocked, ApprovePlan, ExecutionAdapter
 from .gates import GateResult
 from .loop import LoopResult, StepOutcome, run_bounded_loop
 from .memory import TypedMemory
@@ -130,6 +130,7 @@ class CausalityEngine:
         task_type: TaskType | str | None = None,
         min_passes: int = 2,
         distill_skill: bool = True,
+        approve_plan: ApprovePlan | None = None,
     ) -> TaskRun:
         """Run one task end to end and return its :class:`TaskRun`.
 
@@ -166,9 +167,17 @@ class CausalityEngine:
         contract = bound.contract
 
         # L2 plan gate: a high-risk plan must clear human approval BEFORE any
-        # execution. evaluate_plan PASSes for a low-risk contract (the common
-        # case), so this is a no-op there; for an unapproved high-risk plan it
-        # ESCALATEs and we return without running ``work`` at all.
+        # execution. For an approval-required contract, consult the approve_plan
+        # hook on the freshly bound contract -- a returned PlanApproval records
+        # the plan-stage HUMAN_DECISION so evaluate_plan can pass (the caller had
+        # no other way to approve a goal_id minted inside run_task). evaluate_plan
+        # PASSes outright for a low-risk contract (the common case), so all of
+        # this is a no-op there; an unapproved high-risk plan ESCALATEs and we
+        # return without running ``work`` at all.
+        if contract.approval_required and approve_plan is not None:
+            approval = approve_plan(contract)
+            if approval is not None:
+                self.runtime.approve(contract, "plan", approval.approver, approval.rationale)
         plan_gate = self.runtime.evaluate_plan(contract)
         if not plan_gate.allowed:
             return self._gated_out(dispatch, bound.task, contract, plan_gate)

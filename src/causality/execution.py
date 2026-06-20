@@ -16,12 +16,32 @@ loop terminates with the gate's decision instead of silently proceeding.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol, TypeVar
+from typing import Callable, Optional, Protocol, TypeVar
 
 from .contracts import GoalContract
 from .gates import GateResult
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class PlanApproval:
+    """A human approval of a freshly bound high-risk plan (HITL).
+
+    ``run_task`` binds a fresh contract (a new ``goal_id``) internally, so a
+    caller cannot pre-record the plan-stage ``HUMAN_DECISION`` an
+    approval-required contract needs. An ``approve_plan`` hook closes that gap:
+    it receives the bound contract and returns a :class:`PlanApproval` to record
+    that decision (so ``evaluate_plan`` can pass), or ``None`` to decline and let
+    the plan ESCALATE.
+    """
+
+    approver: str
+    rationale: str = ""
+
+
+# Hook consulted for an approval-required plan: bound contract -> approval|None.
+ApprovePlan = Callable[[GoalContract], Optional[PlanApproval]]
 
 
 class _Gated(Protocol):

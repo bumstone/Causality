@@ -14,7 +14,7 @@ from causality.contracts import (
     Risk,
 )
 from causality.engine import CausalityEngine, _accepts_adapter
-from causality.execution import ActionBlocked, ExecutionAdapter
+from causality.execution import ActionBlocked, ExecutionAdapter, PlanApproval
 
 
 def _passing_verifiers():
@@ -210,6 +210,68 @@ class EngineGatingTests(unittest.TestCase):
             self.assertIsNone(run.skill)
             # Reflect still captured the refused plan.
             self.assertEqual(len(engine.memory.entries("retrospectives")), 1)
+
+    def test_approve_plan_hook_clears_plan_gate_and_runs_work(self) -> None:
+        # With an approve_plan hook, an approval-required (high-risk) plan records
+        # its plan-stage HUMAN_DECISION on the freshly bound contract, so the plan
+        # gate clears and work actually runs (before this fix it short-circuited
+        # before work could ever execute, even with human approval).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            calls: list[int] = []
+
+            def work(contract, iteration, adapter):
+                calls.append(iteration)
+                adapter.execute(
+                    tool="Bash",
+                    action_kind="click",
+                    description="run the unit tests",
+                    run=lambda: engine.runtime.record_evidence(
+                        contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+                    ),
+                )
+
+            run = engine.run_task(
+                objective="ship the high-risk change",
+                work=work,
+                verifiers=_passing_verifiers(),
+                verification=["pytest"],
+                stop_condition={"max_iterations": 3},
+                allowed_tools=["Bash"],
+                risk=Risk.HIGH,
+                approve_plan=lambda c: PlanApproval("alice", "release sign-off"),
+            )
+            self.assertTrue(calls)  # work ran past the plan gate
+            self.assertIsNotNone(run.review)
+            evidence = [
+                e
+                for e in engine.runtime.ledger.find(AuditEventType.EVIDENCE)
+                if e.contract_id == run.task.goal_id
+            ]
+            self.assertTrue(evidence)
+
+    def test_approve_plan_hook_declining_escalates_before_work(self) -> None:
+        # A hook that returns None declines: the plan still ESCALATEs, work never
+        # runs -- the same terminal state as supplying no hook at all.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            calls: list[int] = []
+
+            def work(contract, iteration, adapter):
+                calls.append(iteration)
+
+            run = engine.run_task(
+                objective="ship the high-risk change",
+                work=work,
+                verifiers=_passing_verifiers(),
+                verification=["pytest"],
+                stop_condition={"max_iterations": 3},
+                risk=Risk.HIGH,
+                approve_plan=lambda c: None,
+            )
+            self.assertEqual(run.loop.decision, GateDecision.ESCALATE)
+            self.assertEqual(calls, [])
+            self.assertIsNone(run.review)
 
     def test_two_arg_work_runs_ungated_backcompat(self) -> None:
         # A legacy two-arg work that would breach a non-goal is NOT gated (it
