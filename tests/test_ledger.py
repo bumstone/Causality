@@ -164,6 +164,68 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(len(fresh.events()), 3)
             self.assertTrue(fresh.verify_chain())
 
+    def test_events_cache_reuses_parse_until_size_changes(self) -> None:
+        # R4f: events()/find()/verify_chain() are served from a size-guarded
+        # parsed-events cache. Repeated reads must not re-read+re-parse the file,
+        # an append on this instance must keep the cache warm, and a sibling
+        # instance's append must invalidate it through the size guard.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            a = EvidenceLedger(path)
+            a.append(AuditEventType.EVIDENCE, {"n": 1})
+
+            reads = {"count": 0}
+            real_read_lines = a._store.read_lines
+
+            def counting_read_lines() -> list[str]:
+                reads["count"] += 1
+                return real_read_lines()
+
+            a._store.read_lines = counting_read_lines  # type: ignore[assignment]
+
+            # First read parses once; repeats reuse the cache (no extra reads).
+            self.assertEqual(len(a.events()), 1)
+            self.assertEqual(len(a.find()), 1)
+            self.assertTrue(a.verify_chain())
+            self.assertEqual(reads["count"], 1)
+
+            # An append on this instance keeps the cache warm: the new row shows
+            # up without re-reading the whole file.
+            a.append(AuditEventType.VERIFIER_DECISION, {"n": 2})
+            self.assertEqual(len(a.events()), 2)
+            self.assertEqual(reads["count"], 1)
+
+            # A sibling instance appends behind a's back: the size guard must
+            # force a re-read so a never serves a stale two-event view.
+            EvidenceLedger(path).append(AuditEventType.EVIDENCE, {"n": 3})
+            self.assertEqual(len(a.events()), 3)
+            self.assertEqual(reads["count"], 2)
+            self.assertTrue(a.verify_chain())
+
+    def test_warm_cache_returns_isolated_copies(self) -> None:
+        # R4f keeps the mutation guarantee even when served from a warm cache:
+        # tampering with events()/find() output (payload, artifacts, or the list
+        # itself) must not corrupt a later read or verify_chain().
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact = Path(temp_dir) / "a.txt"
+            artifact.write_text("x", encoding="utf-8")
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            ledger.append(AuditEventType.EVIDENCE, {"k": "v"}, artifact_paths=[artifact])
+
+            warm = ledger.events()  # warms the cache
+            warm[0].payload["injected"] = "x"
+            warm[0].artifacts[0]["path"] = "hacked"
+            found = ledger.find(AuditEventType.EVIDENCE)
+            found[0].payload["injected2"] = "y"
+            found.append(found[0])
+
+            fresh = ledger.events()
+            self.assertEqual(len(fresh), 1)
+            self.assertNotIn("injected", fresh[0].payload)
+            self.assertNotIn("injected2", fresh[0].payload)
+            self.assertEqual(fresh[0].artifacts[0]["path"], str(artifact))
+            self.assertTrue(ledger.verify_chain())
+
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
         with tempfile.TemporaryDirectory() as temp_dir:
