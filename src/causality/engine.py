@@ -15,6 +15,7 @@ loop, the standardized review, reflection, and skill distillation together.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -23,6 +24,8 @@ from .agenda import Agenda, AgendaItem
 from .agent_harness import AgentHarness, Dispatch, TaskType
 from .contract_harness import ContractHarness
 from .contracts import GateDecision, GoalContract, Risk, TaskContract
+from .execution import ActionBlocked, ApprovePlan, ExecutionAdapter
+from .gates import GateResult
 from .loop import LoopResult, StepOutcome, run_bounded_loop
 from .memory import TypedMemory
 from .orchestrator import Causality
@@ -31,7 +34,40 @@ from .review import ReviewResult, Verifier, run_review
 from .skills import SkillCandidate, SkillStore
 
 # A unit of work for one loop iteration: do the work (record evidence, etc.).
-Work = Callable[[GoalContract, int], Any]
+# A two-arg ``work(contract, iteration)`` runs ungated (back-compatible); a
+# three-arg ``work(contract, iteration, adapter)`` opts into per-action gating
+# by routing its side effects through the ExecutionAdapter (see _invoke_work).
+Work = Callable[..., Any]
+
+
+def _accepts_adapter(work: Work) -> bool:
+    """Whether ``work`` takes the ExecutionAdapter as a third positional arg.
+
+    Counts only positional parameters (``inspect.signature`` already drops
+    ``self`` for bound methods); ``*args`` is treated as accepting it. Anything
+    without an introspectable signature falls back to the two-arg call.
+    """
+    try:
+        parameters = inspect.signature(work).parameters
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for param in parameters.values():
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional += 1
+    return positional >= 3
+
+
+def _invoke_work(work: Work, contract: GoalContract, iteration: int, adapter: ExecutionAdapter) -> Any:
+    """Call ``work``, handing it the gating adapter only if it accepts one."""
+    if _accepts_adapter(work):
+        return work(contract, iteration, adapter)
+    return work(contract, iteration)
 
 
 @dataclass(frozen=True)
@@ -94,6 +130,7 @@ class CausalityEngine:
         task_type: TaskType | str | None = None,
         min_passes: int = 2,
         distill_skill: bool = True,
+        approve_plan: ApprovePlan | None = None,
     ) -> TaskRun:
         """Run one task end to end and return its :class:`TaskRun`.
 
@@ -129,17 +166,44 @@ class CausalityEngine:
         )
         contract = bound.contract
 
+        # L2 plan gate: a high-risk plan must clear human approval BEFORE any
+        # execution. For an approval-required contract, consult the approve_plan
+        # hook on the freshly bound contract -- a returned PlanApproval records
+        # the plan-stage HUMAN_DECISION so evaluate_plan can pass (the caller had
+        # no other way to approve a goal_id minted inside run_task). evaluate_plan
+        # PASSes outright for a low-risk contract (the common case), so all of
+        # this is a no-op there; an unapproved high-risk plan ESCALATEs and we
+        # return without running ``work`` at all.
+        if contract.approval_required and approve_plan is not None:
+            approval = approve_plan(contract)
+            if approval is not None:
+                self.runtime.approve(contract, "plan", approval.approver, approval.rationale)
+        plan_gate = self.runtime.evaluate_plan(contract)
+        if not plan_gate.allowed:
+            return self._gated_out(dispatch, bound.task, contract, plan_gate)
+
         # L3 bounded loop: each iteration does the work then a standardized review
-        # so the completion gate sees the recorded verifier passes.
+        # so the completion gate sees the recorded verifier passes. The adapter
+        # enforces the contract's per-action gates for any work that opts in; a
+        # refused action raises ActionBlocked and terminates the loop below.
+        adapter = ExecutionAdapter(self.runtime, contract)
         last_review: dict[str, ReviewResult] = {}
+        progress = {"iterations": 0}
 
         def step(current: GoalContract, iteration: int) -> StepOutcome:
-            work(current, iteration)
+            progress["iterations"] = iteration
+            _invoke_work(work, current, iteration, adapter)
             review = run_review(self.runtime, current, verifiers, min_passes=min_passes)
             last_review["result"] = review
             return StepOutcome(progress=review.approved)
 
-        loop_result = run_bounded_loop(self.runtime, contract, step, min_passes=min_passes)
+        try:
+            loop_result = run_bounded_loop(self.runtime, contract, step, min_passes=min_passes)
+        except ActionBlocked as blocked:
+            # A per-action gate refused an action: the run terminates with the
+            # gate's decision (STOP for a non-goal breach, ESCALATE for a tool or
+            # irreversibility breach). The refused action never executed.
+            loop_result = LoopResult(blocked.result.decision, progress["iterations"], str(blocked))
 
         # L0 reflect: distill the contract's trail into typed memory.
         reflection = reflect_on_contract(self.runtime.ledger, self.memory, contract)
@@ -156,6 +220,30 @@ class CausalityEngine:
             review=last_review.get("result"),
             reflection=reflection,
             skill=skill,
+        )
+
+    def _gated_out(
+        self,
+        dispatch: Dispatch,
+        task: TaskContract,
+        contract: GoalContract,
+        gate: GateResult,
+    ) -> TaskRun:
+        """Build the TaskRun for a plan refused at the plan gate.
+
+        No ``work`` ran and there is no review, but Reflect still distills the
+        contract's trail (the GOAL_CONTRACT plus the escalating GATE_DECISION) so
+        the refusal lands in typed memory like any other terminal run.
+        """
+        reflection = reflect_on_contract(self.runtime.ledger, self.memory, contract)
+        reason = gate.reasons[0] if gate.reasons else "plan requires approval"
+        return TaskRun(
+            dispatch=dispatch,
+            task=task,
+            loop=LoopResult(gate.decision, 0, reason),
+            review=None,
+            reflection=reflection,
+            skill=None,
         )
 
     def run_next(
