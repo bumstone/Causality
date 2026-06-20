@@ -54,6 +54,7 @@ def reflect_on_contract(
     contract: GoalContract,
     *,
     failure_scope: str | None = None,
+    failure_ttl_days: int | None = None,
 ) -> Reflection:
     """Distill ``contract``'s ledger trail into typed long-term memory.
 
@@ -68,6 +69,10 @@ def reflect_on_contract(
     guardrails for *future* runs passes a stable scope (e.g. a task family), so
     the next run in that scope can recall them (see ``CausalityEngine.run_task``
     ``failure_scope``/``confirm_guardrails``).
+
+    ``failure_ttl_days`` stamps a TTL on the recorded failures so a fed-forward
+    guardrail expires from ``entries(active_only=True)`` instead of being offered
+    forever; ``None`` records no TTL (the failure persists until swept/revoked).
     """
     events = ledger.events_for_contract(contract.goal_id)
 
@@ -121,6 +126,7 @@ def reflect_on_contract(
                 failure_summary,
                 scope=scope,
                 provenance=event.entry_hash,
+                ttl_days=failure_ttl_days,
             )
         )
 
@@ -134,6 +140,7 @@ def reflect_on_contract(
                 f"repair gate decision: {reason}",
                 scope=scope,
                 provenance=event.entry_hash,
+                ttl_days=failure_ttl_days,
             )
         )
 

@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -148,6 +149,38 @@ class GuardrailFeedforwardTests(unittest.TestCase):
                 confirm_guardrails=lambda candidates: ["do not touch the lexer"],
             )
             self.assertEqual(run.task.non_goals.count("do not touch the lexer"), 1)
+
+    def test_reflected_scoped_failures_carry_and_honor_ttl(self) -> None:
+        # codex #20: reflected scoped failures must accept a TTL so the
+        # feed-forward expires instead of being offered forever.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            run = engine.run_task(
+                objective="parse the grammar",
+                work=_evidence_work(engine),
+                verifiers=_failing_verifiers(),
+                verification=["pytest"],
+                stop_condition={"max_iterations": 1, "no_progress_iterations": 99},
+                failure_scope="parser-tasks",
+                failure_ttl_days=7,
+            )
+            self.assertFalse(run.passed)
+            scoped = [
+                e
+                for e in engine.memory.entries("failures")
+                if e.metadata.get("scope") == "parser-tasks"
+            ]
+            self.assertTrue(scoped)
+            self.assertTrue(all(e.metadata.get("ttl_days") == 7 for e in scoped))
+
+            # Past the TTL the reflected failures are no longer active.
+            future = datetime.now(timezone.utc) + timedelta(days=8)
+            still_active = [
+                e
+                for e in engine.memory.entries("failures", active_only=True, now=future)
+                if e.metadata.get("scope") == "parser-tasks"
+            ]
+            self.assertEqual(still_active, [])
 
     def test_default_scope_unchanged_without_failure_scope(self) -> None:
         # Regression guard: omitting failure_scope keeps the per-contract scope.

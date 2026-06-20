@@ -141,6 +141,7 @@ class CausalityEngine:
         approve_plan: ApprovePlan | None = None,
         failure_scope: str | None = None,
         confirm_guardrails: GuardrailConfirm | None = None,
+        failure_ttl_days: int | None = None,
     ) -> TaskRun:
         """Run one task end to end and return its :class:`TaskRun`.
 
@@ -197,7 +198,9 @@ class CausalityEngine:
                 self.runtime.approve(contract, "plan", approval.approver, approval.rationale)
         plan_gate = self.runtime.evaluate_plan(contract)
         if not plan_gate.allowed:
-            return self._gated_out(dispatch, bound.task, contract, plan_gate, failure_scope)
+            return self._gated_out(
+                dispatch, bound.task, contract, plan_gate, failure_scope, failure_ttl_days
+            )
 
         # L3 bounded loop: each iteration does the work then a standardized review
         # so the completion gate sees the recorded verifier passes. The adapter
@@ -225,7 +228,11 @@ class CausalityEngine:
         # L0 reflect: distill the contract's trail into typed memory. Recording
         # failures under failure_scope lets the next run in that scope recall them.
         reflection = reflect_on_contract(
-            self.runtime.ledger, self.memory, contract, failure_scope=failure_scope
+            self.runtime.ledger,
+            self.memory,
+            contract,
+            failure_scope=failure_scope,
+            failure_ttl_days=failure_ttl_days,
         )
 
         # Back half: on a clean pass, distill an earned-skill candidate.
@@ -281,6 +288,7 @@ class CausalityEngine:
         contract: GoalContract,
         gate: GateResult,
         failure_scope: str | None = None,
+        failure_ttl_days: int | None = None,
     ) -> TaskRun:
         """Build the TaskRun for a plan refused at the plan gate.
 
@@ -289,7 +297,11 @@ class CausalityEngine:
         the refusal lands in typed memory like any other terminal run.
         """
         reflection = reflect_on_contract(
-            self.runtime.ledger, self.memory, contract, failure_scope=failure_scope
+            self.runtime.ledger,
+            self.memory,
+            contract,
+            failure_scope=failure_scope,
+            failure_ttl_days=failure_ttl_days,
         )
         reason = gate.reasons[0] if gate.reasons else "plan requires approval"
         return TaskRun(
