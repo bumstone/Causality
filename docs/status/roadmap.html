@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Causality — 진행 현황 & 로드맵</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#2b3340; --green:#3fb950; --greenbg:#11301a; --amber:#d29922; --amberbg:#341f06;
+    --blue:#4493f8; --bluebg:#0d2747; --purple:#bc8cff; --red:#f85149;
+    --shadow:0 1px 0 rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.25);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Apple SD Gothic Neo",Roboto,"Noto Sans KR",sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px 80px}
+  h1{font-size:26px;margin:0 0 4px;letter-spacing:-.3px}
+  h2{font-size:19px;margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  .sub{color:var(--muted);margin:0 0 22px}
+  .tag{display:inline-block;font-size:12px;font-weight:600;padding:2px 9px;border-radius:999px;border:1px solid var(--line)}
+  .t-done{color:var(--green);background:var(--greenbg);border-color:#1f5c2e}
+  .t-todo{color:var(--amber);background:var(--amberbg);border-color:#5c4711}
+  .t-p0{color:var(--red);background:#3a1412;border-color:#6e2420}
+  .t-p1{color:var(--purple);background:#241a3a;border-color:#46306e}
+  .t-low{color:var(--muted);background:#1a2029;border-color:var(--line)}
+  .t-pr{color:var(--blue);background:var(--bluebg);border-color:#1b497e;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+  /* progress */
+  .bars{display:grid;gap:12px;margin:8px 0 4px}
+  .bar-row{display:grid;grid-template-columns:170px 1fr 48px;align-items:center;gap:12px}
+  .bar-row .lbl{color:var(--muted);font-size:13px}
+  .track{height:10px;background:#0a0e14;border:1px solid var(--line);border-radius:999px;overflow:hidden}
+  .fill{height:100%;border-radius:999px}
+  .pct{font-variant-numeric:tabular-nums;font-size:13px;color:var(--muted);text-align:right}
+
+  /* pipeline */
+  .pipe{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:6px 0 4px}
+  .node{flex:1 1 0;min-width:120px;background:var(--panel2);border:1px solid #234d2e;border-radius:10px;
+    padding:10px 12px;text-align:center;position:relative}
+  .node .l{font-size:11px;color:var(--green);font-weight:700}
+  .node .n{font-size:13px;font-weight:600;margin-top:2px}
+  .node .d{font-size:11px;color:var(--muted);margin-top:2px}
+  .arrow{align-self:center;color:var(--green);padding:0 6px;font-size:18px;flex:0 0 auto}
+
+  /* feedback callouts */
+  .fb{display:grid;gap:10px;margin-top:14px}
+  .fb-item{display:grid;grid-template-columns:26px 1fr;gap:12px;border:1px dashed #5c4711;background:var(--amberbg);
+    border-radius:10px;padding:12px 14px}
+  .fb-item.ok{border-style:solid;border-color:#1f5c2e;background:var(--greenbg)}
+  .fb-ico{font-size:18px;line-height:1.4}
+  .fb-item .ttl{font-weight:600}
+  .fb-item .meta{font-size:12.5px;color:var(--muted);margin-top:2px}
+
+  /* cards */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 17px;box-shadow:var(--shadow)}
+  .card.todo{border-left:3px solid var(--amber)}
+  .card.done{border-left:3px solid var(--green)}
+  .card h3{margin:0 0 8px;font-size:15.5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .card .row{font-size:13px;margin:6px 0;color:var(--ink)}
+  .card .row b{color:var(--muted);font-weight:600;display:inline-block;min-width:62px}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;
+    background:#0a0e14;border:1px solid var(--line);border-radius:5px;padding:1px 5px;color:#c9d6e3}
+  .deps{font-size:12px;color:var(--muted);margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+  .foot{margin-top:34px;padding:16px 18px;background:var(--panel);border:1px solid var(--line);border-radius:12px;font-size:13px;color:var(--muted)}
+  .foot b{color:var(--ink)}
+  .ok-dot{color:var(--green)} .no-dot{color:var(--amber)}
+  .legend{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 18px}
+  a{color:var(--blue)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Causality — 진행 현황 &amp; 로드맵</h1>
+  <p class="sub">자기개선 운영 루프(HITL)의 구현 상태. 기준 브랜치 <code>main</code> · 갱신 2026-06-20 · 출처 <code>docs/code-review-2026-06-13.md</code></p>
+
+  <div class="legend">
+    <span class="tag t-done">✅ 반영됨</span>
+    <span class="tag t-todo">🚧 남은 작업</span>
+    <span class="tag t-p0">P0 핵심</span>
+    <span class="tag t-p1">P1</span>
+    <span class="tag t-low">후순위</span>
+    <span class="tag t-pr">#PR</span>
+  </div>
+
+  <h2>한눈에: 5계층 파이프라인</h2>
+  <p class="sub" style="margin-bottom:10px">실행 순방향(아래 초록 박스)은 <b style="color:var(--green)">happy-path 배선 완료</b>. 진화 되먹임(피드백 3종)은 일부가 <b style="color:var(--amber)">read-path 미연결</b>.</p>
+  <div class="pipe">
+    <div class="node"><div class="l">L0</div><div class="n">Agenda</div><div class="d">의도 큐</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="l">L1</div><div class="n">Dispatch</div><div class="d">분류·라우팅</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="l">L2</div><div class="n">Contract</div><div class="d">bind·freeze</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="l">L3</div><div class="n">Loop+Review</div><div class="d">bounded·검증</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="l">L4</div><div class="n">Ledger</div><div class="d">해시체인 증거</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="l">L0</div><div class="n">Reflect</div><div class="d">typed memory</div></div>
+  </div>
+
+  <div class="fb">
+    <div class="fb-item">
+      <div class="fb-ico">⛔</div>
+      <div>
+        <div class="ttl">실행 게이트 되먹임 — <span class="tag t-p0">P0-A</span></div>
+        <div class="meta">L2 계약의 <code>evaluate_plan</code>/<code>can_execute_action</code>/<code>check_tool_allowed</code>/<code>check_non_goal</code>가 L3 실행에 강제되지 않음. 현재 <code>run_task</code>는 <code>work→review</code>만 호출.</div>
+      </div>
+    </div>
+    <div class="fb-item">
+      <div class="fb-ico">⛔</div>
+      <div>
+        <div class="ttl">실패 → 가드레일 되먹임 — <span class="tag t-p0">P0-B</span></div>
+        <div class="meta">Reflect가 <code>record_failure</code>로 <b>기록은</b> 하지만(✅), 다음 bind에서 유효 failure를 <code>non_goals</code>로 <b>주입은 안 함</b>. TTL 필터(<code>active_only</code>)도 이 경로에서 미사용.</div>
+      </div>
+    </div>
+    <div class="fb-item">
+      <div class="fb-ico">⛔</div>
+      <div>
+        <div class="ttl">획득 스킬 재사용 되먹임 — <span class="tag t-p1">P1</span></div>
+        <div class="meta">성공 시 <code>SkillStore.distill</code>로 후보 <b>생성은</b> 됨(✅). 그러나 <code>promoted()</code>를 dispatch/context에 <b>자동 주입은 안 함</b>.</div>
+      </div>
+    </div>
+  </div>
+
+  <h2>진행률</h2>
+  <div class="bars">
+    <div class="bar-row"><span class="lbl">기반 프리미티브(L0–L4)</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
+    <div class="bar-row"><span class="lbl">영속성·내구성(R2/R4)</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
+    <div class="bar-row"><span class="lbl">TTL 메커니즘</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
+    <div class="bar-row"><span class="lbl">실행-강제 루프(read-path)</span><div class="track"><div class="fill" style="width:15%;background:var(--amber)"></div></div><span class="pct">~15%</span></div>
+    <div class="bar-row"><span class="lbl">운영·프로세스 자동화</span><div class="track"><div class="fill" style="width:100%;background:var(--green)"></div></div><span class="pct">100%</span></div>
+  </div>
+  <p class="sub" style="margin-top:10px">요약: <b style="color:var(--green)">write-path(실행→증거→기록)는 닫힘</b>. 남은 핵심은 <b style="color:var(--amber)">증거가 다시 가드레일·스킬로 돌아오는 read-path</b>를 잇는 일.</p>
+
+  <h2>🚧 남은 작업</h2>
+  <div class="grid">
+
+    <div class="card todo">
+      <h3><span class="tag t-p0">P0-A</span> 집행 게이트 배선</h3>
+      <div class="row"><b>현재</b> <code>engine.run_task</code>의 step이 <code>work</code>→<code>run_review</code>만 실행. 실행 게이트 미강제.</div>
+      <div class="row"><b>다음</b> action 직전 <code>can_execute_action</code>·<code>check_tool_allowed</code>·<code>check_non_goal</code>를, 루프 진입 전 <code>evaluate_plan</code>을 통과시키는 <b>ExecutionAdapter</b>로 <code>work</code>를 감싼다. ESCALATE/STOP이면 중단.</div>
+      <div class="deps">의존: 없음(독립) · 예상: 중간 규모 · 가장 높은 우선순위</div>
+    </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-p0">P0-B</span> failures → non_goals 환류 + TTL 집행</h3>
+      <div class="row"><b>현재</b> Reflect가 scoped failure를 <code>record_failure</code>로 기록만. bind는 호출자 <code>non_goals</code>만 사용.</div>
+      <div class="row"><b>다음</b> bind 전에 <code>entries("failures", active_only=True)</code>로 <b>유효(TTL 미만료)·scope 일치</b> failure를 회수해 <code>non_goals</code>로 주입(HITL 확인). 이걸로 TTL 루프 집행도 완성.</div>
+      <div class="deps">의존: TTL 메커니즘 ✅(#15) · 예상: 소~중 규모</div>
+    </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-p1">P1</span> earned skill 재사용</h3>
+      <div class="row"><b>현재</b> <code>SkillStore.promoted()</code> 읽기만 가능. dispatch/context 자동 주입 없음.</div>
+      <div class="row"><b>다음</b> task type/objective로 promoted 스킬을 회수해 context에 주입. <b>authored &gt; earned</b> 우선순위.</div>
+      <div class="deps">의존: P0 게이트·환류 권장 선행 · 예상: 소~중 규모</div>
+    </div>
+
+    <div class="card todo">
+      <h3><span class="tag t-low">후순위</span> R4f 전체 read-path 인덱싱</h3>
+      <div class="row"><b>현재</b> R2 캐시로 append는 O(1). <code>events()</code> 조회는 매번 디스크 재파싱.</div>
+      <div class="row"><b>다음</b> 원장 규모가 커질 때만 오프셋(.idx) 인덱스 검토. 현 규모엔 과설계.</div>
+      <div class="deps">의존: 없음 · 트리거: 성능 필요 시</div>
+    </div>
+
+  </div>
+
+  <h2>✅ 반영됨 (이미 진행)</h2>
+  <div class="grid">
+
+    <div class="card done">
+      <h3>TTL 메커니즘 <span class="tag t-pr">#15</span></h3>
+      <div class="row"><code>is_expired</code> · <code>entries(active_only)</code> · <code>revoke</code> · <code>sweep</code> + scope·ttl 지원 <code>record_failure</code>.</div>
+      <div class="deps">가드레일이 영구 래칫이 되지 않게 — 만료/철회 가능. (루프 집행 연결은 P0-B)</div>
+    </div>
+
+    <div class="card done">
+      <h3>R2 ledger 인덱싱 <span class="tag t-pr">#11</span></h3>
+      <div class="row">size-guarded latest-hash 캐시로 append O(N²)→amortized O(1). <code>events_for_contract</code>/<code>latest_hash_for_contract</code> 접근자로 출처 오염 footgun 제거.</div>
+      <div class="deps">ADR 0011 §2.1</div>
+    </div>
+
+    <div class="card done">
+      <h3>R4 durable write <span class="tag t-pr">#13</span> <span class="tag t-pr">#14</span> <span class="tag t-pr">#17</span></h3>
+      <div class="row">공통 <code>durable.py</code> — rewrite=temp+fsync+<code>os.replace</code>(원자), append=fsync+torn tail 복구, <code>flock</code> writer 직렬화(체인 fork 방지).</div>
+      <div class="deps">ADR 0011 §2.2 · 손상복구·동시성 테스트 포함</div>
+    </div>
+
+    <div class="card done">
+      <h3>리뷰 자동반영 자동화 <span class="tag t-pr">#16</span> <span class="tag t-pr">#18</span></h3>
+      <div class="row">Codex 리뷰 autofix GitHub Action(#16) + PR 생성 시 <b>~5분 bounded watch</b> 규칙(#18, 훅+CLAUDE.md). fix-push마다 재무장, merge/close까지 감시.</div>
+      <div class="deps">webhook 누락에도 첫 리뷰를 잡는 세션-내성 레이어</div>
+    </div>
+
+    <div class="card done">
+      <h3>리뷰·문서 예산 거버넌스</h3>
+      <div class="row">ADR 0009 리뷰예산(PR당 ≤1000줄, concern 분리) · ADR 0010 문서예산(AI MD ≤2000자). CLI <code>review-plan</code>/<code>doc-budget</code>로 강제.</div>
+      <div class="deps">변경 크기·문서 비대화 통제</div>
+    </div>
+
+    <div class="card done">
+      <h3>정직-상태 문서화 <span class="tag t-pr">#7</span>–<span class="tag t-pr">#9</span></h3>
+      <div class="row">"전 구현 완료" 과장 제거 → "프리미티브+happy-path 배선" / "write-path 닫힘, read-path 미완"으로 표현 통일.</div>
+      <div class="deps">갭은 <code>docs/code-review-2026-06-13.md</code> 기준 관리</div>
+    </div>
+
+  </div>
+
+  <div class="foot">
+    <div><b>검증 상태</b> &nbsp; <span class="ok-dot">●</span> 전체 <b>157 tests</b> green &nbsp;·&nbsp; <span class="ok-dot">●</span> doc-budget 계획안 1669자 (≤2000 OK) &nbsp;·&nbsp; <span class="ok-dot">●</span> 열린 PR/이슈 0</div>
+    <div style="margin-top:8px"><b>다음 권장 순서</b> &nbsp; P0-A 게이트 배선 → P0-B failures→non_goals/TTL 집행 → P1 skill 재사용 → (후순위) R4f 인덱싱</div>
+    <div style="margin-top:8px"><b>출처</b> &nbsp; 코드 <code>src/causality/{engine,gates,memory,reflect,skills}.py</code> · 계획 <code>docs/code-review-2026-06-13.md</code> · ADR <code>docs/adr/0011</code></div>
+  </div>
+
+</div>
+</body>
+</html>
