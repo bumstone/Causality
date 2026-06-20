@@ -27,7 +27,7 @@ from .contracts import GateDecision, GoalContract, Risk, TaskContract
 from .execution import ActionBlocked, ApprovePlan, ExecutionAdapter
 from .gates import GateResult
 from .loop import LoopResult, StepOutcome, run_bounded_loop
-from .memory import TypedMemory
+from .memory import MemoryEntry, TypedMemory
 from .orchestrator import Causality
 from .reflect import Reflection, reflect_on_contract
 from .review import ReviewResult, Verifier, run_review
@@ -38,6 +38,14 @@ from .skills import SkillCandidate, SkillStore
 # three-arg ``work(contract, iteration, adapter)`` opts into per-action gating
 # by routing its side effects through the ExecutionAdapter (see _invoke_work).
 Work = Callable[..., Any]
+
+# HITL hook for the guardrail read-path: given the active (non-expired) failures
+# recalled for a run's failure_scope, return the non_goal clauses to inject. It
+# returns curated clauses (not raw failure summaries) so a human phrases the
+# boundary; returning nothing injects nothing, so a past failure becomes a
+# standing guardrail only by explicit confirmation (ADR 0005 §2.5: guardrails
+# must not auto-ratchet).
+GuardrailConfirm = Callable[[Sequence[MemoryEntry]], Sequence[str]]
 
 
 def _accepts_adapter(work: Work) -> bool:
@@ -131,6 +139,8 @@ class CausalityEngine:
         min_passes: int = 2,
         distill_skill: bool = True,
         approve_plan: ApprovePlan | None = None,
+        failure_scope: str | None = None,
+        confirm_guardrails: GuardrailConfirm | None = None,
     ) -> TaskRun:
         """Run one task end to end and return its :class:`TaskRun`.
 
@@ -154,13 +164,20 @@ class CausalityEngine:
             resolved_type = self.dispatcher.classify(objective)
         dispatch = self.dispatcher.route(resolved_type)
 
+        # L0 -> L2 guardrail read-path: before freezing the contract, recall the
+        # active (non-expired) failures recorded under this failure_scope and let
+        # a human confirm which become non_goals, so past failures feed forward
+        # as guardrails. active_only enforces the TTL loop (expired failures are
+        # never offered) and the confirm hook prevents auto-ratcheting.
+        guarded_non_goals = self._recall_guardrails(non_goals, failure_scope, confirm_guardrails)
+
         # L2 bind the immutable contract (the gateable GoalContract + frozen view).
         bound = self.harness.bind(
             objective=objective,
             summary=summary,
             verification=verification,
             stop_condition=stop_condition,
-            non_goals=non_goals,
+            non_goals=guarded_non_goals,
             allowed_tools=allowed_tools,
             risk=risk,
         )
@@ -180,7 +197,7 @@ class CausalityEngine:
                 self.runtime.approve(contract, "plan", approval.approver, approval.rationale)
         plan_gate = self.runtime.evaluate_plan(contract)
         if not plan_gate.allowed:
-            return self._gated_out(dispatch, bound.task, contract, plan_gate)
+            return self._gated_out(dispatch, bound.task, contract, plan_gate, failure_scope)
 
         # L3 bounded loop: each iteration does the work then a standardized review
         # so the completion gate sees the recorded verifier passes. The adapter
@@ -205,8 +222,11 @@ class CausalityEngine:
             # irreversibility breach). The refused action never executed.
             loop_result = LoopResult(blocked.result.decision, progress["iterations"], str(blocked))
 
-        # L0 reflect: distill the contract's trail into typed memory.
-        reflection = reflect_on_contract(self.runtime.ledger, self.memory, contract)
+        # L0 reflect: distill the contract's trail into typed memory. Recording
+        # failures under failure_scope lets the next run in that scope recall them.
+        reflection = reflect_on_contract(
+            self.runtime.ledger, self.memory, contract, failure_scope=failure_scope
+        )
 
         # Back half: on a clean pass, distill an earned-skill candidate.
         skill: SkillCandidate | None = None
@@ -222,12 +242,45 @@ class CausalityEngine:
             skill=skill,
         )
 
+    def _recall_guardrails(
+        self,
+        non_goals: Sequence[str],
+        failure_scope: str | None,
+        confirm_guardrails: GuardrailConfirm | None,
+    ) -> list[str]:
+        """Recall active scoped failures and append the confirmed guardrails.
+
+        Returns the caller's ``non_goals`` unchanged unless both a
+        ``failure_scope`` and a ``confirm_guardrails`` hook are supplied: only
+        then are the scope's active (non-expired) failures offered to the hook,
+        whose returned clauses are appended. Duplicates are dropped so a repeated
+        guardrail is not bound twice.
+        """
+        injected = list(non_goals)
+        if failure_scope is None or confirm_guardrails is None:
+            return injected
+        candidates = [
+            entry
+            for entry in self.memory.entries("failures", active_only=True)
+            if entry.metadata.get("scope") == failure_scope
+        ]
+        if candidates:
+            injected.extend(clause for clause in confirm_guardrails(candidates) if clause and clause.strip())
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for clause in injected:
+            if clause not in seen:
+                seen.add(clause)
+                deduped.append(clause)
+        return deduped
+
     def _gated_out(
         self,
         dispatch: Dispatch,
         task: TaskContract,
         contract: GoalContract,
         gate: GateResult,
+        failure_scope: str | None = None,
     ) -> TaskRun:
         """Build the TaskRun for a plan refused at the plan gate.
 
@@ -235,7 +288,9 @@ class CausalityEngine:
         contract's trail (the GOAL_CONTRACT plus the escalating GATE_DECISION) so
         the refusal lands in typed memory like any other terminal run.
         """
-        reflection = reflect_on_contract(self.runtime.ledger, self.memory, contract)
+        reflection = reflect_on_contract(
+            self.runtime.ledger, self.memory, contract, failure_scope=failure_scope
+        )
         reason = gate.reasons[0] if gate.reasons else "plan requires approval"
         return TaskRun(
             dispatch=dispatch,

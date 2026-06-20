@@ -52,6 +52,8 @@ def reflect_on_contract(
     ledger: EvidenceLedger,
     memory: TypedMemory,
     contract: GoalContract,
+    *,
+    failure_scope: str | None = None,
 ) -> Reflection:
     """Distill ``contract``'s ledger trail into typed long-term memory.
 
@@ -59,6 +61,13 @@ def reflect_on_contract(
     ``retrospectives`` summary of the run, and one ``failures`` entry per
     failure signal (critical-or-not verifier ``fail`` decisions and ``repair``
     gate decisions). Returns the :class:`Reflection` it wrote.
+
+    ``failure_scope`` is the scope stamped on the recorded ``failures``. It
+    defaults to ``contract:<goal_id>`` -- unique per run, so failures stay tied
+    to their own contract. A caller that wants failures to feed forward as
+    guardrails for *future* runs passes a stable scope (e.g. a task family), so
+    the next run in that scope can recall them (see ``CausalityEngine.run_task``
+    ``failure_scope``/``confirm_guardrails``).
     """
     events = ledger.events_for_contract(contract.goal_id)
 
@@ -98,7 +107,7 @@ def reflect_on_contract(
         provenance=provenance,
     )
 
-    scope = f"contract:{contract.goal_id}"
+    scope = failure_scope or f"contract:{contract.goal_id}"
     failures: list[MemoryEntry] = []
 
     for event in verifier_fails:

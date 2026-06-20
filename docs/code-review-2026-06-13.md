@@ -1,22 +1,27 @@
 # Code Review — 2026-06-13 (정직한 구현 상태)
 
-ADR 0001~0010 프리미티브 + `CausalityEngine` happy-path 배선은 머지됨(125 tests). 단
-**"완전 폐쇄 운영 루프"는 과장** — 실행 강제·진화 read-path가 미완. 상세 로컬본: `docs/_review/`.
+> 최종 갱신 2026-06-20: #11~#19 + P0-B 반영. 시각화: `docs/status/roadmap.html`.
 
-## 미반영 갭 (우선순위)
+ADR 0001~0011 프리미티브 + `CausalityEngine` 배선 머지됨(176 tests). **P0 실행-강제·환류 read-path 닫힘** — 남은 건 P1 skill 재사용과 R4f 인덱싱(후순위). 상세 로컬본: `docs/_review/`.
+
+## 남은 갭 (미반영)
 
 | P | 갭 | 현재 사실 | 다음 작업 |
 |---|---|---|---|
-| P0 | 집행 게이트 미배선 | `run_task`가 `work` 앞에 `evaluate_plan`/`can_execute_action`/`check_tool_allowed`/`check_non_goal` 미강제(should_stop·complete만 간접) | `work` 대신 ExecutionAdapter, action 전 gate 통과 |
-| P0 | failures→non_goals 환류 없음 | Reflect는 failures 기록만, ContractHarness가 안 읽음(write-only) | bind 전 scoped/TTL 유효 failure를 non_goals로 주입(HITL) |
-| P0 | TTL 루프 미집행 | **메커니즘 구현**: `MemoryEntry.is_expired`(created_at+ttl_days) + `entries(active_only)` 만료 필터 + `revoke(entry_id)`/`sweep`(durable rewrite). 단 run-loop·failures→non_goals가 active 필터를 아직 호출 안 함 | failures→non_goals 주입 시 `active_only` 사용해 루프 집행 완성 |
-| P1 | earned skill 재사용 없음 | `promoted()` 읽기 가능하나 dispatch/context 자동 주입 없음 | task type/objective로 promoted 회수, authored>earned 우선 |
-| ✅ | 락·fsync·원자 rename | **해결(ADR 0011 §2.2)**: 공통 `durable.py` — rewrite atomic(temp+fsync+os.replace), append fsync+torn 복구, `flock` writer 직렬화(ledger 체인 fork 방지). 손상복구·동시성 테스트 포함 | 전체 read-path 인덱싱만 후속 |
-| ✅ | ledger 인덱싱 | **해결(ADR 0011 §2.1)**: size-guarded latest-hash 캐시(append O(N²)→amortized O(1)) + `events_for_contract`/`latest_hash_for_contract` 접근자, reflect·skills가 사용 | 전체 read-path 인덱싱은 R4 |
+| P1 | earned skill 재사용 | `SkillStore.promoted()` 읽기만, dispatch/context 자동 주입 없음 | task type/objective로 promoted 회수, authored>earned 우선 |
+| R4f | 전체 read-path 인덱싱 | R2 캐시로 append O(1), `events()` 조회는 매번 재파싱 | 규모 필요시 오프셋 인덱스(후순위) |
+
+## ✅ 반영됨
+
+- **P0-A 집행 게이트(#19):** `run_task`가 루프 전 `evaluate_plan`(+`approve_plan` HITL 훅), action마다 `ExecutionAdapter`로 `check_non_goal`/`check_tool_allowed`/`can_execute_action` 강제. 차단 시 STOP/ESCALATE 종료.
+- **P0-B failures→non_goals + TTL 집행(이 PR):** bind 전 `entries("failures", active_only=True)`의 scoped 유효 failure를 `confirm_guardrails` HITL 승인분만 non_goals로 주입. `failure_scope`로 run 간 환류, 만료분은 미회수(TTL 루프 집행).
+- **TTL 메커니즘(#15):** `is_expired`/`entries(active_only)`/`revoke`/`sweep`.
+- **R2 인덱싱(#11) · R4 durable(#13/#14/#17):** latest-hash 캐시 + atomic·fsync·flock.
+- **프로세스:** Codex autofix Action(#16), PR ~5분 bounded watch(#18), 예산 ADR0009/0010.
 
 ## 순서
-P0(게이트 배선 → failures read-path → TTL) → P1(skill 재사용). ✅R2 인덱싱(§2.1)·✅R4 durable store(§2.2) 완료.
+✅P0(게이트 → failures→non_goals/TTL) 완료 → **P1(skill 재사용)** → R4f(후순위).
 
 ## 문서 표현
-- "전 구현 완료" 대신 **"프리미티브+happy-path 배선 구현됨"**.
-- "루프 닫힘" 대신 **"write-path 닫힘, guardrail 주입·skill 재사용 read-path 미완"**.
+- "전 구현 완료" 대신 **"프리미티브+배선 구현됨"**.
+- 이제 **"P0 실행-강제·환류 read-path 닫힘; P1 skill 재사용·R4f 인덱싱 잔여"**.
