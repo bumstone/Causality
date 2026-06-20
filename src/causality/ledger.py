@@ -135,7 +135,12 @@ class EvidenceLedger:
             # when it reflected the file right before this append; otherwise drop
             # it so _load_events() rebuilds under the size guard.
             if self._cached_events is not None and self._events_synced_size == pre_size:
-                self._cached_events.append(LedgerEvent(**entry))
+                # Cache an ISOLATED copy, not LedgerEvent(**entry): entry's
+                # payload is the caller's dict and is also returned below, so
+                # caching it raw would let a post-append mutation of the caller's
+                # payload or the returned event corrupt the cache (codex
+                # r3445774529).
+                self._cached_events.append(self._isolate(LedgerEvent(**entry)))
                 self._events_synced_size = new_size
             else:
                 self._cached_events = None
@@ -255,7 +260,10 @@ class EvidenceLedger:
                 "event_id": event.event_id,
                 "event_type": event.event_type,
                 "timestamp": event.timestamp,
-                "payload": event.payload,
+                # Deep-copy: this slices the shared cache, so handing back the
+                # cached payload dict raw would let a caller mutating a tail
+                # result corrupt the ledger cache (codex r3445774531).
+                "payload": copy.deepcopy(event.payload),
             }
             for event in events
         ]

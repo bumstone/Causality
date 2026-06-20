@@ -226,6 +226,39 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(fresh[0].artifacts[0]["path"], str(artifact))
             self.assertTrue(ledger.verify_chain())
 
+    def test_warm_append_does_not_alias_caller_payload(self) -> None:
+        # codex r3445774529: with the cache already warm, append() must cache an
+        # isolated event, not one sharing the caller's payload dict / the
+        # returned event -- else mutating either after append corrupts the cache.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            ledger.events()  # warm the (empty) cache so append takes the warm path
+            payload = {"k": "v"}
+            returned = ledger.append(AuditEventType.EVIDENCE, payload)
+
+            # Tamper via both handles the caller still holds after append.
+            payload["injected"] = "x"
+            returned.payload["injected2"] = "y"
+
+            fresh = ledger.events()
+            self.assertEqual(len(fresh), 1)
+            self.assertNotIn("injected", fresh[0].payload)
+            self.assertNotIn("injected2", fresh[0].payload)
+            self.assertTrue(ledger.verify_chain())
+
+    def test_tail_returns_isolated_payload(self) -> None:
+        # codex r3445774531: tail() slices the shared cache, so mutating a
+        # returned tail payload must not corrupt the ledger cache.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            ledger.append(AuditEventType.EVIDENCE, {"k": "v"})
+
+            ledger.tail(1)[0]["payload"]["injected"] = "x"
+
+            self.assertNotIn("injected", ledger.events()[0].payload)
+            self.assertNotIn("injected", ledger.tail(1)[0]["payload"])
+            self.assertTrue(ledger.verify_chain())
+
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
         with tempfile.TemporaryDirectory() as temp_dir:
