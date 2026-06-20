@@ -20,6 +20,7 @@ from typing import Callable, Optional, Protocol, TypeVar
 
 from .contracts import GoalContract
 from .gates import GateResult
+from .skills import SkillCandidate
 
 T = TypeVar("T")
 
@@ -82,10 +83,16 @@ class ActionBlocked(Exception):
 
 @dataclass(frozen=True)
 class ExecutionAdapter:
-    """Gate-enforcing executor handed to a task's ``work`` callback."""
+    """Gate-enforcing executor handed to a task's ``work`` callback.
+
+    Besides gating actions, it carries ``recalled_skills`` -- the authored/earned
+    skills the engine recalled for this objective (authored before earned) -- so
+    opted-in work can reuse a proven procedure instead of rediscovering it.
+    """
 
     runtime: _Gated
     contract: GoalContract
+    recalled_skills: tuple[SkillCandidate, ...] = ()
 
     def execute(
         self,

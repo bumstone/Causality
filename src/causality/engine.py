@@ -88,6 +88,7 @@ class TaskRun:
     review: ReviewResult | None
     reflection: Reflection
     skill: SkillCandidate | None
+    recalled_skills: tuple[SkillCandidate, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -105,6 +106,7 @@ class TaskRun:
             "review": self.review.to_dict() if self.review is not None else None,
             "reflection": self.reflection.to_dict(),
             "skill": self.skill.to_dict() if self.skill is not None else None,
+            "recalled_skills": [s.to_dict() for s in self.recalled_skills],
         }
 
 
@@ -142,6 +144,7 @@ class CausalityEngine:
         failure_scope: str | None = None,
         confirm_guardrails: GuardrailConfirm | None = None,
         failure_ttl_days: int | None = None,
+        authored_skills: Sequence[SkillCandidate] = (),
     ) -> TaskRun:
         """Run one task end to end and return its :class:`TaskRun`.
 
@@ -164,6 +167,12 @@ class CausalityEngine:
         else:
             resolved_type = self.dispatcher.classify(objective)
         dispatch = self.dispatcher.route(resolved_type)
+
+        # Back-half read-path: recall promoted earned skills (and any authored
+        # skills) relevant to this objective so they can be reused, authored
+        # before earned. Surfaced on the TaskRun and handed to the ExecutionAdapter
+        # so opted-in work can consult them.
+        recalled_skills = tuple(self.skills.recall(objective, authored=authored_skills))
 
         # L0 -> L2 guardrail read-path: before freezing the contract, recall the
         # active (non-expired) failures recorded under this failure_scope and let
@@ -199,14 +208,20 @@ class CausalityEngine:
         plan_gate = self.runtime.evaluate_plan(contract)
         if not plan_gate.allowed:
             return self._gated_out(
-                dispatch, bound.task, contract, plan_gate, failure_scope, failure_ttl_days
+                dispatch,
+                bound.task,
+                contract,
+                plan_gate,
+                failure_scope,
+                failure_ttl_days,
+                recalled_skills,
             )
 
         # L3 bounded loop: each iteration does the work then a standardized review
         # so the completion gate sees the recorded verifier passes. The adapter
         # enforces the contract's per-action gates for any work that opts in; a
         # refused action raises ActionBlocked and terminates the loop below.
-        adapter = ExecutionAdapter(self.runtime, contract)
+        adapter = ExecutionAdapter(self.runtime, contract, recalled_skills)
         last_review: dict[str, ReviewResult] = {}
         progress = {"iterations": 0}
 
@@ -247,6 +262,7 @@ class CausalityEngine:
             review=last_review.get("result"),
             reflection=reflection,
             skill=skill,
+            recalled_skills=recalled_skills,
         )
 
     def _recall_guardrails(
@@ -289,6 +305,7 @@ class CausalityEngine:
         gate: GateResult,
         failure_scope: str | None = None,
         failure_ttl_days: int | None = None,
+        recalled_skills: tuple[SkillCandidate, ...] = (),
     ) -> TaskRun:
         """Build the TaskRun for a plan refused at the plan gate.
 
@@ -311,6 +328,7 @@ class CausalityEngine:
             review=None,
             reflection=reflection,
             skill=None,
+            recalled_skills=recalled_skills,
         )
 
     def run_next(

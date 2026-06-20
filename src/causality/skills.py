@@ -18,14 +18,30 @@ state per ``skill_id`` (the file is rewritten on each outcome update).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from uuid import uuid4
 
 from .contracts import GoalContract
 from .durable import DurableJsonl
 from .ledger import EvidenceLedger
+
+
+# Tiny stop set so recall matches on contentful tokens, not glue words.
+_STOPWORDS = frozenset(
+    {"the", "and", "for", "with", "that", "this", "into", "from", "your", "our"}
+)
+
+
+def _tokens(text: str) -> frozenset[str]:
+    """Content tokens of ``text``: lowercased alphanumerics, length >= 3, no stopwords."""
+    return frozenset(
+        word
+        for word in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(word) >= 3 and word not in _STOPWORDS
+    )
 
 
 @dataclass(frozen=True)
@@ -176,11 +192,63 @@ class SkillStore:
         return list(self._latest_candidates().values())
 
     def promoted(self) -> list[SkillCandidate]:
-        return self._read(self._promoted_path())
+        """Promoted skills, the authoritative latest row per ``skill_id``.
+
+        ``promote`` is append-only, so re-promoting a skill appends another row;
+        collapse to the latest like :meth:`candidates` so a consumer (e.g.
+        :meth:`recall`) never sees or counts the same earned skill twice (codex
+        #21)."""
+        return list(self._latest_by_id(self._promoted_path()).values())
+
+    def recall(
+        self,
+        objective: str,
+        *,
+        authored: Sequence[SkillCandidate] = (),
+        limit: int = 3,
+    ) -> list[SkillCandidate]:
+        """Recall skills worth reusing for ``objective``, authored before earned.
+
+        Ranks both the caller-supplied ``authored`` skills (gstack/Superpowers
+        playbooks) and the promoted **earned** skills by how many content tokens
+        their objective shares with ``objective``; skills that share none are
+        dropped. Authored skills always sort ahead of earned ones (an authored
+        playbook is the trusted source; an earned skill is a distilled guess),
+        and earned skills tie-break on reproducibility (successes/attempts) so a
+        more-proven procedure wins. Returns at most ``limit`` skills.
+
+        This is the read side of the back-half loop: ``distill`` writes earned
+        candidates and ``promote`` gates them in; ``recall`` feeds the promoted
+        ones back into a run (``CausalityEngine.run_task`` attaches the result to
+        the TaskRun and the ExecutionAdapter) so they are actually reused.
+        """
+        query = _tokens(objective)
+        if not query:
+            return []
+
+        def overlap(skill: SkillCandidate) -> int:
+            return len(query & _tokens(skill.objective))
+
+        def reproducibility(skill: SkillCandidate) -> float:
+            return skill.successes / skill.attempts if skill.attempts else 0.0
+
+        authored_hits = sorted(
+            (s for s in authored if overlap(s) > 0),
+            key=lambda s: -overlap(s),
+        )
+        earned_hits = sorted(
+            (s for s in self.promoted() if overlap(s) > 0),
+            key=lambda s: (-overlap(s), -reproducibility(s)),
+        )
+        return (authored_hits + earned_hits)[:limit]
 
     def _latest_candidates(self) -> dict[str, SkillCandidate]:
+        return self._latest_by_id(self._candidates_path())
+
+    def _latest_by_id(self, path: Path) -> dict[str, SkillCandidate]:
+        """Latest row per ``skill_id`` from an append-only JSONL skill file."""
         latest: dict[str, SkillCandidate] = {}
-        for candidate in self._read(self._candidates_path()):
+        for candidate in self._read(path):
             latest[candidate.skill_id] = candidate
         return latest
 
