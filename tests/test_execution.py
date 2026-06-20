@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from causality.contracts import (
+    AuditEventType,
+    EvidenceKind,
+    GateDecision,
+    Risk,
+)
+from causality.engine import CausalityEngine, _accepts_adapter
+from causality.execution import ActionBlocked, ExecutionAdapter
+
+
+def _passing_verifiers():
+    from causality.contracts import VerifierDecision
+
+    return [
+        lambda c: VerifierDecision("correctness", "pass", "looks right"),
+        lambda c: VerifierDecision("evidence", "pass", "evidence present"),
+    ]
+
+
+class AdapterUnitTests(unittest.TestCase):
+    """ExecutionAdapter enforces the contract's per-action gates."""
+
+    def _bound(self, engine: CausalityEngine, **overrides):
+        params = dict(
+            objective="do the thing",
+            verification=["pytest"],
+            stop_condition={"max_iterations": 3},
+            non_goals=["delete production data"],
+            allowed_tools=["Bash", "Edit"],
+            risk=Risk.LOW,
+        )
+        params.update(overrides)
+        return engine.harness.bind(**params)
+
+    def test_in_scope_action_runs_and_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            adapter = ExecutionAdapter(engine.runtime, self._bound(engine).contract)
+            ran = []
+            out = adapter.execute(
+                tool="Bash",
+                action_kind="click",
+                description="run the unit tests",
+                run=lambda: ran.append("x") or "done",
+            )
+            self.assertEqual(out, "done")
+            self.assertEqual(ran, ["x"])
+
+    def test_non_goal_breach_blocks_with_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            adapter = ExecutionAdapter(engine.runtime, self._bound(engine).contract)
+            ran = []
+            with self.assertRaises(ActionBlocked) as ctx:
+                adapter.execute(
+                    tool="Bash",
+                    action_kind="click",
+                    description="delete production data now",
+                    run=lambda: ran.append("x"),
+                )
+            self.assertEqual(ctx.exception.result.decision, GateDecision.STOP)
+            self.assertEqual(ran, [])  # refused action never executed
+
+    def test_out_of_scope_tool_blocks_with_escalate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            adapter = ExecutionAdapter(engine.runtime, self._bound(engine).contract)
+            with self.assertRaises(ActionBlocked) as ctx:
+                adapter.execute(
+                    tool="Browser",
+                    action_kind="click",
+                    description="open the page",
+                    run=lambda: None,
+                )
+            self.assertEqual(ctx.exception.result.decision, GateDecision.ESCALATE)
+            self.assertEqual(ctx.exception.tool, "Browser")
+
+    def test_irreversible_action_without_approval_blocks_with_escalate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            adapter = ExecutionAdapter(engine.runtime, self._bound(engine).contract)
+            with self.assertRaises(ActionBlocked) as ctx:
+                adapter.execute(
+                    tool="Bash",
+                    action_kind="delete",
+                    description="remove the temp file",
+                    run=lambda: None,
+                )
+            self.assertEqual(ctx.exception.result.decision, GateDecision.ESCALATE)
+
+    def test_first_refusal_short_circuits_remaining_gates(self) -> None:
+        # A non-goal breach (the first gate) must not also record a tool PASS:
+        # exactly one GATE_DECISION (the STOP) should be appended.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            adapter = ExecutionAdapter(engine.runtime, self._bound(engine).contract)
+            before = len(engine.runtime.ledger.find(AuditEventType.GATE_DECISION))
+            with self.assertRaises(ActionBlocked):
+                adapter.execute(
+                    tool="Browser",  # also out-of-scope, but should never be checked
+                    action_kind="delete",
+                    description="delete production data",
+                    run=lambda: None,
+                )
+            after = engine.runtime.ledger.find(AuditEventType.GATE_DECISION)
+            self.assertEqual(len(after) - before, 1)
+            self.assertEqual(after[-1].payload.get("decision"), GateDecision.STOP.value)
+
+
+class EngineGatingTests(unittest.TestCase):
+    """run_task wires the plan gate and per-action gates into the loop."""
+
+    def _gated_work(self, engine: CausalityEngine, *, description: str, tool: str = "Bash", kind: str = "click"):
+        def work(contract, iteration, adapter):
+            adapter.execute(
+                tool=tool,
+                action_kind=kind,
+                description=description,
+                run=lambda: engine.runtime.record_evidence(
+                    contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+                ),
+            )
+
+        return work
+
+    def test_gated_work_in_scope_passes_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            run = engine.run_task(
+                objective="implement the parser",
+                work=self._gated_work(engine, description="run the unit tests"),
+                verifiers=_passing_verifiers(),
+                verification=["pytest"],
+                stop_condition={"max_iterations": 3},
+                allowed_tools=["Bash"],
+                non_goals=["delete production data"],
+            )
+            self.assertTrue(run.passed)
+            self.assertEqual(run.loop.decision, GateDecision.PASS)
+
+    def test_non_goal_action_stops_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            run = engine.run_task(
+                objective="implement the parser",
+                work=self._gated_work(engine, description="delete production data"),
+                verifiers=_passing_verifiers(),
+                verification=["pytest"],
+                stop_condition={"max_iterations": 3},
+                allowed_tools=["Bash"],
+                non_goals=["delete production data"],
+            )
+            self.assertFalse(run.passed)
+            self.assertEqual(run.loop.decision, GateDecision.STOP)
+            self.assertIsNone(run.skill)
+            # The blocked action ran no work, so no evidence was recorded and the
+            # review never ran.
+            evidence = [
+                e
+                for e in engine.runtime.ledger.find(AuditEventType.EVIDENCE)
+                if e.contract_id == run.task.goal_id
+            ]
+            self.assertEqual(evidence, [])
+            self.assertIsNone(run.review)
+
+    def test_out_of_scope_tool_escalates_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            run = engine.run_task(
+                objective="implement the parser",
+                work=self._gated_work(engine, description="open a page", tool="Browser"),
+                verifiers=_passing_verifiers(),
+                verification=["pytest"],
+                stop_condition={"max_iterations": 3},
+                allowed_tools=["Bash"],
+            )
+            self.assertFalse(run.passed)
+            self.assertEqual(run.loop.decision, GateDecision.ESCALATE)
+            self.assertIsNone(run.skill)
+
+    def test_high_risk_plan_gate_blocks_before_any_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            calls: list[int] = []
+
+            def work(contract, iteration, adapter):
+                calls.append(iteration)
+
+            run = engine.run_task(
+                objective="deploy the release to production",
+                work=work,
+                verifiers=_passing_verifiers(),
+                verification=["pytest"],
+                stop_condition={"max_iterations": 3},
+                risk=Risk.IRREVERSIBLE,
+            )
+            self.assertFalse(run.passed)
+            self.assertEqual(run.loop.decision, GateDecision.ESCALATE)
+            self.assertEqual(calls, [])  # work never ran
+            self.assertIsNone(run.review)
+            self.assertIsNone(run.skill)
+            # Reflect still captured the refused plan.
+            self.assertEqual(len(engine.memory.entries("retrospectives")), 1)
+
+    def test_two_arg_work_runs_ungated_backcompat(self) -> None:
+        # A legacy two-arg work that would breach a non-goal is NOT gated (it
+        # never opted into the adapter), so the run is not stopped by the gate.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+
+            def work(contract, iteration):
+                engine.runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
+
+            run = engine.run_task(
+                objective="implement the parser",
+                work=work,
+                verifiers=_passing_verifiers(),
+                verification=["pytest"],
+                stop_condition={"max_iterations": 3},
+                non_goals=["delete production data"],
+            )
+            self.assertTrue(run.passed)
+
+
+class AcceptsAdapterTests(unittest.TestCase):
+    def test_arity_detection(self) -> None:
+        self.assertFalse(_accepts_adapter(lambda c, i: None))
+        self.assertTrue(_accepts_adapter(lambda c, i, a: None))
+        self.assertTrue(_accepts_adapter(lambda *args: None))
+
+    def test_bound_method_drops_self(self) -> None:
+        class Worker:
+            def run(self, contract, iteration, adapter):
+                return None
+
+        self.assertTrue(_accepts_adapter(Worker().run))
+
+
+if __name__ == "__main__":
+    unittest.main()

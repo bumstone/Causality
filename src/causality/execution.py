@@ -1,0 +1,99 @@
+"""Per-action execution gate (ADR 0001 §2.3, ADR 0003).
+
+The Contract Harness freezes *what not to do* (``non_goals``), *which tools are
+in scope* (``allowed_tools``), and the risk class -- but binding those clauses is
+inert unless something enforces them at the moment an action runs. The engine
+previously drove ``work -> review`` and never asked ``check_non_goal`` /
+``check_tool_allowed`` / ``can_execute_action`` (code review 2026-06-13, P0).
+
+:class:`ExecutionAdapter` is that enforcement point. A task's ``work`` routes
+every side-effecting action through :meth:`ExecutionAdapter.execute`, which runs
+the contract's per-action gates before the action touches the world. A refused
+gate raises :class:`ActionBlocked` so the action never executes and the bounded
+loop terminates with the gate's decision instead of silently proceeding.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Protocol, TypeVar
+
+from .contracts import GoalContract
+from .gates import GateResult
+
+T = TypeVar("T")
+
+
+class _Gated(Protocol):
+    """The slice of the runtime an adapter enforces (orchestrator.Causality).
+
+    Declared structurally so the adapter does not import the orchestrator (which
+    imports the gates), avoiding an import cycle while staying type-checked.
+    """
+
+    def check_non_goal(self, contract: GoalContract, action_desc: str) -> GateResult: ...
+    def check_tool_allowed(self, contract: GoalContract, tool: str) -> GateResult: ...
+    def can_execute_action(self, contract: GoalContract, action_kind: str) -> GateResult: ...
+
+
+class ActionBlocked(Exception):
+    """Raised when a per-action gate refuses an action mid-work.
+
+    Carries the refusing :class:`GateResult` -- ``STOP`` for a non-goal breach,
+    ``ESCALATE`` for an out-of-scope tool or an unapproved irreversible action --
+    so the engine can terminate the run with that exact decision.
+    """
+
+    def __init__(
+        self,
+        result: GateResult,
+        *,
+        tool: str,
+        action_kind: str,
+        description: str,
+    ) -> None:
+        self.result = result
+        self.tool = tool
+        self.action_kind = action_kind
+        self.description = description
+        reason = result.reasons[0] if result.reasons else "action blocked by gate"
+        super().__init__(f"action blocked ({result.decision.value}): {reason}")
+
+
+@dataclass(frozen=True)
+class ExecutionAdapter:
+    """Gate-enforcing executor handed to a task's ``work`` callback."""
+
+    runtime: _Gated
+    contract: GoalContract
+
+    def execute(
+        self,
+        *,
+        tool: str,
+        action_kind: str,
+        description: str,
+        run: Callable[[], T],
+    ) -> T:
+        """Run ``run`` only if the contract's per-action gates all pass.
+
+        Gates are checked in order and short-circuit on the first refusal, so a
+        blocked action records only the gates up to (and including) the one that
+        stopped it -- not a spurious PASS for the gates after it. The order is
+        deliberate: ``check_non_goal`` is a hard boundary (STOP), so a breach
+        should not even reach the tool/irreversibility checks. A refusal raises
+        :class:`ActionBlocked`; otherwise ``run`` executes and its result is
+        returned.
+        """
+        checks = (
+            lambda: self.runtime.check_non_goal(self.contract, description),
+            lambda: self.runtime.check_tool_allowed(self.contract, tool),
+            lambda: self.runtime.can_execute_action(self.contract, action_kind),
+        )
+        for check in checks:
+            result = check()
+            if not result.allowed:
+                raise ActionBlocked(
+                    result, tool=tool, action_kind=action_kind, description=description
+                )
+        return run()
