@@ -52,6 +52,9 @@ def reflect_on_contract(
     ledger: EvidenceLedger,
     memory: TypedMemory,
     contract: GoalContract,
+    *,
+    failure_scope: str | None = None,
+    failure_ttl_days: int | None = None,
 ) -> Reflection:
     """Distill ``contract``'s ledger trail into typed long-term memory.
 
@@ -59,6 +62,17 @@ def reflect_on_contract(
     ``retrospectives`` summary of the run, and one ``failures`` entry per
     failure signal (critical-or-not verifier ``fail`` decisions and ``repair``
     gate decisions). Returns the :class:`Reflection` it wrote.
+
+    ``failure_scope`` is the scope stamped on the recorded ``failures``. It
+    defaults to ``contract:<goal_id>`` -- unique per run, so failures stay tied
+    to their own contract. A caller that wants failures to feed forward as
+    guardrails for *future* runs passes a stable scope (e.g. a task family), so
+    the next run in that scope can recall them (see ``CausalityEngine.run_task``
+    ``failure_scope``/``confirm_guardrails``).
+
+    ``failure_ttl_days`` stamps a TTL on the recorded failures so a fed-forward
+    guardrail expires from ``entries(active_only=True)`` instead of being offered
+    forever; ``None`` records no TTL (the failure persists until swept/revoked).
     """
     events = ledger.events_for_contract(contract.goal_id)
 
@@ -98,7 +112,7 @@ def reflect_on_contract(
         provenance=provenance,
     )
 
-    scope = f"contract:{contract.goal_id}"
+    scope = failure_scope or f"contract:{contract.goal_id}"
     failures: list[MemoryEntry] = []
 
     for event in verifier_fails:
@@ -112,6 +126,7 @@ def reflect_on_contract(
                 failure_summary,
                 scope=scope,
                 provenance=event.entry_hash,
+                ttl_days=failure_ttl_days,
             )
         )
 
@@ -125,6 +140,7 @@ def reflect_on_contract(
                 f"repair gate decision: {reason}",
                 scope=scope,
                 provenance=event.entry_hash,
+                ttl_days=failure_ttl_days,
             )
         )
 
