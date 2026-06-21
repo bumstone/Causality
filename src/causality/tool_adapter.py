@@ -25,9 +25,19 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .browser_adapter import CommandResult
-from .contracts import AuditEventType, EvidenceKind
-from .execution import ExecutionAdapter
+from .contracts import AuditEventType, EvidenceKind, GateDecision
+from .execution import ActionBlocked, ExecutionAdapter
+from .gates import GateResult
 from .ledger import EvidenceLedger
+
+
+def _is_within(path: Path, base: Path) -> bool:
+    """True if ``path`` is ``base`` or a descendant of it (both resolved)."""
+    try:
+        path.relative_to(base.resolve())
+        return True
+    except ValueError:
+        return False
 
 # Test seam: run a command (argv list) and return its result. The default runs a
 # real subprocess; tests inject a fake so the suite never spawns a process.
@@ -97,6 +107,10 @@ class ToolAdapter:
     ) -> Path:
         """Write ``content`` to ``path`` through the gates; record the artifact."""
         target = Path(path)
+        # Honor the contract's frozen file boundary BEFORE touching the disk: a
+        # write outside a declared write_scope is a STOP, like a non-goal breach
+        # (codex r3448136006). The generic gates do not cover write_scope.
+        self._enforce_write_scope(target)
 
         def _do() -> Path:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -140,6 +154,29 @@ class ToolAdapter:
             {"tool": tool, "path": str(target), "bytes": len(content.encode(encoding))},
         )
         return content
+
+    def _enforce_write_scope(self, target: Path) -> None:
+        """Block a write whose resolved path is outside the contract's write_scope.
+
+        An empty ``write_scope`` declares no file restriction (any path passes).
+        When a scope IS declared, a path outside every scoped directory records a
+        STOP gate decision for audit and raises :class:`ActionBlocked`, so the run
+        terminates with that decision instead of writing out of bounds.
+        """
+        scope = self.execution.contract.permissions.write_scope
+        if not scope:
+            return
+        resolved = target.resolve()
+        if any(_is_within(resolved, Path(entry)) for entry in scope):
+            return
+        result = GateResult(
+            GateDecision.STOP,
+            (f"path is outside the contract's write_scope: {target}",),
+        )
+        self._record(AuditEventType.GATE_DECISION, result.to_dict())
+        raise ActionBlocked(
+            result, tool="file.write", action_kind="write", description=f"write file {target}"
+        )
 
     def _record(
         self,

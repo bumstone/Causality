@@ -72,6 +72,29 @@ class ToolAdapterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tool.run([])
 
+    def test_write_blocked_outside_write_scope(self) -> None:
+        # codex r3448136006: write_text must honor the contract's frozen file
+        # boundary (write_scope), not just the generic tool/risk/non-goal gates.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            allowed = Path(temp_dir) / "workspace"
+            runtime, _, adapter = self._setup(
+                temp_dir, permissions=PermissionContract(write_scope=(str(allowed),))
+            )
+            tool = ToolAdapter(runtime.ledger, adapter)
+
+            # In-scope write succeeds.
+            written = tool.write_text(allowed / "src" / "ok.txt", "fine")
+            self.assertTrue(written.exists())
+
+            # Out-of-scope write is blocked, the file is never created, and a STOP
+            # gate decision is recorded for audit.
+            outside = Path(temp_dir) / "elsewhere" / "bad.txt"
+            with self.assertRaises(ActionBlocked):
+                tool.write_text(outside, "nope")
+            self.assertFalse(outside.exists())
+            gate_decisions = runtime.ledger.find(AuditEventType.GATE_DECISION)
+            self.assertTrue(any(g.payload.get("decision") == "stop" for g in gate_decisions))
+
     def test_write_then_read_text_with_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, _, adapter = self._setup(temp_dir)
