@@ -298,6 +298,21 @@ class SkillStoreTest(unittest.TestCase):
         self.assertEqual(SkillCandidate.from_dict(as_dict).steps[0],
                          SkillStep(action="evidence", outcome="test_output"))
 
+    def test_distill_redacts_private_key_field(self) -> None:
+        # codex r3448029550: a private_key field (one-line, no PEM header) must be
+        # masked by the key-name filter even without a recognizable token shape.
+        contract = GoalContract(title="ship", summary="private key")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"private_key": "MIIBVAIBADANBgkqOneLineNoPemHeader0123456789", "host": "db1"},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        args = dict(candidate.steps[-1].args)
+        self.assertEqual(args["private_key"], "<redacted>")
+        self.assertNotIn("MIIBVAIBADANBgkqOneLineNoPemHeader0123456789", json.dumps(candidate.to_dict()))
+
     def test_distill_truncates_long_value(self) -> None:
         contract = GoalContract(title="ship", summary="with long value")
         self.causality.create_contract(contract)

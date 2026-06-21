@@ -57,7 +57,8 @@ def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
 # this is defense-in-depth so a promoted/shared skill never copies a secret out
 # of the ledger.
 _SENSITIVE_KEY = re.compile(
-    r"secret|token|password|passwd|credential|api[_-]?key|auth|cookie|bearer|session",
+    r"secret|token|password|passwd|credential|auth|cookie|bearer|session|"
+    r"api[_-]?key|private[_-]?key|access[_-]?key|signing[_-]?key|ssh[_-]?key",
     re.IGNORECASE,
 )
 # Well-known secret *shapes* redacted even under a benign key, since key-name
