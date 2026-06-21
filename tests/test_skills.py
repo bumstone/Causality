@@ -270,6 +270,34 @@ class SkillStoreTest(unittest.TestCase):
         self.assertNotIn("sk-ABCDEFGHIJ1234567890", blob)    # nested secret-shaped scalar
         self.assertIn("db1", blob)                           # benign nested value preserved
 
+    def test_distill_redacts_dict_valued_tool_field(self) -> None:
+        # codex r3448021257: a dict-valued tool/outcome field must get the same
+        # recursive redaction as args, not be flattened to a str that escapes it.
+        contract = GoalContract(title="ship", summary="dict command")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"command": {"api_key": "internal-prod-key", "host": "db1"}},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        blob = json.dumps(candidate.to_dict())
+        self.assertNotIn("internal-prod-key", blob)
+        self.assertIn("db1", blob)
+
+    def test_to_dict_accepts_legacy_string_steps(self) -> None:
+        # codex r3448021259: a candidate built directly with legacy string steps
+        # must still serialize (to_dict) without AttributeError.
+        candidate = SkillCandidate(
+            skill_id="auth", objective="authored", steps=("evidence:test_output", "verifier:")
+        )
+        as_dict = candidate.to_dict()
+        self.assertEqual(as_dict["steps"][0], {"action": "evidence", "tool": "", "args": [],
+                                               "artifacts": [], "outcome": "test_output"})
+        # round-trips back through from_dict
+        self.assertEqual(SkillCandidate.from_dict(as_dict).steps[0],
+                         SkillStep(action="evidence", outcome="test_output"))
+
     def test_distill_truncates_long_value(self) -> None:
         contract = GoalContract(title="ship", summary="with long value")
         self.causality.create_contract(contract)

@@ -116,12 +116,17 @@ def _redact_value(key: str, value: Any) -> str:
     return text if len(text) <= _MAX_VALUE_LEN else text[: _MAX_VALUE_LEN - 3] + "..."
 
 
-def _first_present(payload: Mapping[str, Any], keys: Sequence[str]) -> tuple[str, str]:
-    """First ``(key, str(value))`` whose key is present and truthy in payload."""
+def _first_present(payload: Mapping[str, Any], keys: Sequence[str]) -> tuple[str, Any]:
+    """First ``(key, raw value)`` whose key is present and truthy in payload.
+
+    Returns the *raw* value (not stringified) so a dict/list tool/outcome field
+    goes through _redact_value's recursive redaction like any arg, instead of
+    being flattened to a str that escapes it (codex r3448021257)."""
     for key in keys:
-        if payload.get(key) not in (None, ""):
-            return key, str(payload[key])
-    return "", ""
+        value = payload.get(key)
+        if value not in (None, ""):
+            return key, value
+    return "", None
 
 
 def _artifact_id(record: Mapping[str, Any]) -> str:
@@ -198,10 +203,10 @@ def _distill_step(event: LedgerEvent) -> SkillStep:
     # command/tool/outcome field would bypass redaction (codex r3448006271).
     return SkillStep(
         action=event.event_type,
-        tool=_redact_value(tool_key, tool_raw) if tool_raw else "",
+        tool=_redact_value(tool_key, tool_raw) if tool_key else "",
         args=args,
         artifacts=artifacts,
-        outcome=_redact_value(outcome_key, outcome_raw) if outcome_raw else "",
+        outcome=_redact_value(outcome_key, outcome_raw) if outcome_key else "",
     )
 
 
@@ -218,7 +223,14 @@ class SkillCandidate:
         return {
             "skill_id": self.skill_id,
             "objective": self.objective,
-            "steps": [step.to_dict() for step in self.steps],
+            # Tolerate legacy tuple[str, ...] steps a caller may still construct
+            # directly (e.g. authored skills serialized via TaskRun.to_dict):
+            # coerce each through SkillStep so to_dict never AttributeErrors on a
+            # plain string (codex r3448021259).
+            "steps": [
+                (step if isinstance(step, SkillStep) else SkillStep.from_dict(step)).to_dict()
+                for step in self.steps
+            ],
             "provenance": self.provenance,
             "attempts": self.attempts,
             "successes": self.successes,
