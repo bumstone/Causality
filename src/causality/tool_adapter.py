@@ -63,7 +63,9 @@ class ToolAdapter:
     root: Path = field(default_factory=Path.cwd)
 
     def __post_init__(self) -> None:
-        self.root = Path(self.root)
+        # Resolve at construction so the root anchoring is independent of any
+        # later cwd change (codex r3448157732).
+        self.root = Path(self.root).resolve()
 
     def _resolved(self, path: str | Path) -> Path:
         """Absolute, symlink-resolved path; a relative one is anchored to root."""

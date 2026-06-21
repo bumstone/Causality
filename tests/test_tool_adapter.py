@@ -112,6 +112,26 @@ class ToolAdapterTests(unittest.TestCase):
                 tool.write_text("elsewhere/bad.txt", "nope")
             self.assertFalse((Path(temp_dir) / "elsewhere" / "bad.txt").exists())
 
+    def test_relative_root_resolved_at_construction_not_write_time(self) -> None:
+        # codex r3448157732: a relative root must be resolved when the adapter is
+        # built, so a later cwd change can't move the scope/target tree.
+        import os
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime, _, adapter = self._setup(temp_dir)
+            cwd = os.getcwd()
+            try:
+                (Path(temp_dir) / "repo").mkdir()
+                os.chdir(temp_dir)
+                tool = ToolAdapter(runtime.ledger, adapter, root=Path("repo"))  # relative
+                self.assertEqual(tool.root, (Path(temp_dir) / "repo").resolve())
+                os.chdir(cwd)  # moving cwd afterwards must not move the root
+                written = tool.write_text("note.txt", "x")
+                self.assertEqual(written, (Path(temp_dir) / "repo" / "note.txt").resolve())
+                self.assertTrue(written.exists())
+            finally:
+                os.chdir(cwd)
+
     def test_write_then_read_text_with_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, _, adapter = self._setup(temp_dir)
