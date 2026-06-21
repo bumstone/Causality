@@ -67,6 +67,17 @@ class RouteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.harness.route(42)  # type: ignore[arg-type]
 
+    def test_playbooks_resolve_bundle_labels(self) -> None:
+        dispatch = self.harness.route(TaskType.IMPLEMENTATION)
+        playbooks = self.harness.playbooks(dispatch)
+        self.assertEqual([p.name for p in playbooks], ["tdd", "debugging"])
+        # The resolved playbooks are structured, not dangling labels.
+        self.assertTrue(all(p.phases for p in playbooks))
+
+    def test_trivial_dispatch_resolves_to_no_playbooks(self) -> None:
+        dispatch = self.harness.route(TaskType.TRIVIAL)
+        self.assertEqual(self.harness.playbooks(dispatch), ())
+
 
 class ClassifyTests(unittest.TestCase):
     def setUp(self) -> None:
