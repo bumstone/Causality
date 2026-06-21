@@ -217,6 +217,27 @@ class VerifierDecision:
     def is_critical_failure(self) -> bool:
         return self.status == "fail" and self.severity == "critical"
 
+    @property
+    def is_substantive(self) -> bool:
+        """A verdict carries substance when it cites evidence or states a
+        rationale. One that does neither is a hollow rubber-stamp -- not a
+        verification -- so it must not count toward the independent-pass quorum
+        (the ledger's claims-vs-evidence rule, applied to the gate)."""
+        return bool(self.evidence_refs) or bool(self.rationale and self.rationale.strip())
+
+    def counts_as_pass(self, *, require_evidence: bool = False) -> bool:
+        """Whether this verdict counts toward the completion quorum.
+
+        A counted pass must be a pass AND substantive. With ``require_evidence``
+        the bar rises to citing at least one ``evidence_ref`` -- prose alone is a
+        claim, not evidence -- which a high-assurance completion can demand.
+        """
+        if not self.is_pass:
+            return False
+        if require_evidence:
+            return bool(self.evidence_refs)
+        return self.is_substantive
+
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["evidence_refs"] = list(self.evidence_refs)
