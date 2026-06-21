@@ -8,6 +8,66 @@ python -m venv .venv
 pip install -e .
 ```
 
+For a personal local checkout on Windows, the repository ships a one-command
+installer:
+
+```powershell
+git clone https://github.com/bumstone/Causality.git D:\dev\Causality
+cd D:\dev\Causality
+.\scripts\install.ps1
+```
+
+The script creates `.venv`, installs Causality in editable mode, installs the
+project-level Claude/Codex automation, and runs the local doctor checks.
+
+For WSL/Linux:
+
+```bash
+git clone https://github.com/bumstone/Causality.git ~/dev/Causality
+cd ~/dev/Causality
+bash scripts/install.sh
+```
+
+## Local update workflow
+
+Update the local checkout with a fast-forward pull, reinstall the editable
+package, refresh the project automation, and run the doctor checks:
+
+```powershell
+cd D:\dev\Causality
+.\scripts\update.ps1
+```
+
+Useful options:
+
+```powershell
+.\scripts\update.ps1 -RefreshAgent      # overwrite generated agent files
+.\scripts\update.ps1 -SkipTests         # update only, no doctor test run
+.\scripts\update.ps1 -UpdateCodexCli    # also run the Codex CLI updater
+```
+
+For WSL/Linux:
+
+```bash
+bash scripts/update.sh
+bash scripts/update.sh --refresh-agent
+```
+
+To register a weekly Windows scheduled task:
+
+```powershell
+.\scripts\register-update-task.ps1
+```
+
+By default it runs `scripts\update.ps1 -SkipTests` every Sunday at 09:00. Add
+`-UpdateCodexCli` if you also want that scheduled task to update the Codex CLI.
+
+Run the local health check directly with:
+
+```powershell
+.\scripts\doctor.ps1
+```
+
 For Q00/Ouroboros itself:
 
 ```powershell

@@ -376,6 +376,9 @@ npm install -D pa11y lighthouse
 
 ## Development and testing
 
+For a personal local checkout with install, update, doctor checks, and optional
+Windows scheduled updates, see [docs/installation.md](docs/installation.md).
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -438,6 +441,11 @@ the operating rule.
 ## Repository contents
 
 ```text
+.claude/commands/        # Claude project slash commands
+.codex/
+  causality-routing.md   # Codex routing context
+AGENTS.md                # Codex execution entry point
+checklists/              # on-demand verification checklists
 docs/
   agent_automation.md
   installation.md
@@ -459,8 +467,11 @@ docs/
     0008-repository-hygiene-shared-vs-ignored.md
 examples/
   goal_contract.json
+memory/                  # typed memory scaffolding
 plugins/
   causality-workflows/manifest.json
+scripts/                 # local install, update, doctor, scheduler helpers
+skills/                  # authored/earned skill entry point
 src/causality/
   agent_bootstrap.py
   browser_adapter.py
@@ -481,6 +492,7 @@ tests/
   test_ledger.py
   test_mcp_server.py
   test_workflows.py
+workflow/                # generated workflow views
 .github/workflows/ci.yml
 LICENSE
 THIRD_PARTY_NOTICES.md

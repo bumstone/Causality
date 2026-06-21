@@ -12,9 +12,9 @@ file move through here so durability lives in one place instead of four:
   torn trailing line (a half-written record from a crashed append) before
   writing, so records never merge; :meth:`DurableJsonl.read_lines`
   drops a torn trailing line on read.
-- **R4c** serializes writers: :func:`file_lock` takes an exclusive ``flock`` on a
-  ``<path>.lock`` sidecar. ``EvidenceLedger.append`` holds it across its
-  read-latest-hash + append so the hash chain cannot fork across processes.
+- **R4c** serializes writers: :func:`file_lock` takes an exclusive sidecar lock
+  (``flock`` on POSIX, ``msvcrt.locking`` on Windows). ``EvidenceLedger.append``
+  holds it across its read-latest-hash + append so the hash chain cannot fork.
 """
 
 from __future__ import annotations
@@ -22,14 +22,21 @@ from __future__ import annotations
 import errno
 import os
 import tempfile
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator
 
-try:  # POSIX only; elsewhere the lock degrades to a best-effort no-op.
+try:  # POSIX.
     import fcntl
 except ImportError:  # pragma: no cover - platform dependent
     fcntl = None  # type: ignore[assignment]
+
+try:  # Windows.
+    import msvcrt
+except ImportError:  # pragma: no cover - platform dependent
+    msvcrt = None  # type: ignore[assignment]
 
 
 # Directory fsync is unsupported on some platforms/filesystems (it raises one of
@@ -41,6 +48,18 @@ _DIR_FSYNC_UNSUPPORTED = {
     for name in ("EINVAL", "ENOTSUP", "EOPNOTSUPP")
     if hasattr(errno, name)
 }
+_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock_for(path: Path) -> threading.RLock:
+    key = str(path.resolve())
+    with _THREAD_LOCKS_GUARD:
+        lock = _THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _THREAD_LOCKS[key] = lock
+        return lock
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -68,16 +87,35 @@ def file_lock(path: str | Path) -> Iterator[None]:
     """
     lock_path = Path(str(path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if fcntl is None:  # pragma: no cover - non-POSIX
-        yield
-        return
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
+    thread_lock = _thread_lock_for(lock_path)
+    with thread_lock:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover - Windows path
+                if os.path.getsize(lock_path) == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                while True:
+                    try:
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in (errno.EACCES, errno.EDEADLK):
+                            raise
+                        time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:  # pragma: no cover - rare fallback
+                yield
         finally:
             os.close(fd)
 
