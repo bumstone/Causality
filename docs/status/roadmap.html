@@ -436,8 +436,8 @@
         </tr>
         <tr>
           <td>ledger 스케일</td>
-          <td>opt-in rotation/archival이 들어왔다 — <code>rotate()</code>/<code>maybe_rotate()</code>가 거대 ledger를 archive segment로 봉인하고 체인은 seam을 넘어 <code>verify_chain()</code>으로 검증된다. persistent offset index(<code>.idx</code>)만 규모 트리거까지 보류.</td>
-          <td><code>.idx</code> 도입 기준을 측정 기반으로 결정(현재는 read cache + rotation으로 충분).</td>
+          <td>opt-in rotation/archival + <code>.idx</code> 오프셋 인덱스까지 들어왔다 — <code>rotate()</code>가 segment로 봉인(체인은 seam 넘어 <code>verify_chain()</code> 검증)하고, <code>.idx</code> 사이드카로 <code>event_count()</code>/<code>events_page()</code>가 전체 파싱 없이 아카이브를 카운트·seek한다.</td>
+          <td>현 규모엔 read cache로 충분하므로 rotation/<code>.idx</code>는 대규모 운용 대비용. 정책(임계값)만 배포별로 조정.</td>
         </tr>
         <tr>
           <td>문서 소스 정합성</td>

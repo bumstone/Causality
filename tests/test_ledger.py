@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -463,6 +464,67 @@ class LedgerTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertIsNotNone(ledger.maybe_rotate(max_bytes=size))  # at/over -> rotates
             self.assertFalse(path.exists())
+
+    def _rotated_ledger(self, path: Path) -> "EvidenceLedger":
+        # 2 events -> .1, 3 events -> .2, 1 event in the current segment (6 total).
+        ledger = EvidenceLedger(path)
+        for n in (1, 2):
+            ledger.append(AuditEventType.EVIDENCE, {"n": n})
+        ledger.rotate()
+        for n in (3, 4, 5):
+            ledger.append(AuditEventType.EVIDENCE, {"n": n})
+        ledger.rotate()
+        ledger.append(AuditEventType.EVIDENCE, {"n": 6})
+        return ledger
+
+    def test_rotate_builds_offset_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            ledger.append(AuditEventType.EVIDENCE, {"n": 2})
+            ledger.rotate()
+            index_path = Path(str(path) + ".1.idx")
+            self.assertTrue(index_path.exists())
+            self.assertEqual(json.loads(index_path.read_text())["count"], 2)
+
+    def test_event_count_across_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = self._rotated_ledger(Path(temp_dir) / "ledger.jsonl")
+            self.assertEqual(ledger.event_count(), 6)              # archives + current
+            self.assertEqual(ledger.event_count(all_segments=False), 1)  # current only
+
+    def test_events_page_across_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = self._rotated_ledger(Path(temp_dir) / "ledger.jsonl")
+
+            def ns(start, limit):
+                return [e.payload["n"] for e in ledger.events_page(start, limit)]
+
+            self.assertEqual(ns(0, 4), [1, 2, 3, 4])   # spans .1 and .2
+            self.assertEqual(ns(4, 10), [5, 6])         # spans .2 and current
+            self.assertEqual(ns(2, 2), [3, 4])          # window inside .2
+            self.assertEqual(ns(10, 5), [])             # past the end
+            self.assertEqual(ledger.events_page(0, 0), [])
+
+    def test_events_page_falls_back_without_index(self) -> None:
+        # If a segment's .idx is missing, events_page still returns the right
+        # window by parsing the segment (the index is advisory).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = self._rotated_ledger(path)
+            Path(str(path) + ".1.idx").unlink()  # drop the first archive's index
+            self.assertEqual(
+                [e.payload["n"] for e in ledger.events_page(0, 6)], [1, 2, 3, 4, 5, 6]
+            )
+
+    def test_events_page_matches_full_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = self._rotated_ledger(Path(temp_dir) / "ledger.jsonl")
+            paged = [e.entry_hash for e in ledger.events_page(0, 100)]
+            full = [e.entry_hash for e in ledger.events(all_segments=True)]
+            self.assertEqual(paged, full)
+            self.assertTrue(ledger.verify_chain())
 
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
