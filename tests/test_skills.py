@@ -208,6 +208,18 @@ class SkillStoreTest(unittest.TestCase):
         # The secret value must not survive anywhere in the serialized skill.
         self.assertNotIn("sk-secret-123", json.dumps(candidate.to_dict()))
 
+    def test_distill_redacts_secret_shaped_value_under_benign_key(self) -> None:
+        # Security hardening: a secret in value position under a benign key must
+        # still be masked before it enters the shared skill library.
+        contract = GoalContract(title="ship", summary="benign key, secret value")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract, EvidenceKind.TOOL_OUTPUT, {"output": "auth=sk-ABCDEFGHIJ1234567890 ok"}
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        self.assertIn(("output", "<redacted>"), candidate.steps[-1].args)
+        self.assertNotIn("sk-ABCDEFGHIJ1234567890", json.dumps(candidate.to_dict()))
+
     def test_distill_truncates_long_value(self) -> None:
         contract = GoalContract(title="ship", summary="with long value")
         self.causality.create_contract(contract)

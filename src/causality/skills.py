@@ -60,6 +60,17 @@ _SENSITIVE_KEY = re.compile(
     r"secret|token|password|passwd|credential|api[_-]?key|auth|cookie|bearer|session",
     re.IGNORECASE,
 )
+# Well-known secret *shapes* redacted even under a benign key, since key-name
+# matching alone misses a secret in value position (e.g. {"output": "sk-..."}).
+_SECRET_VALUE = re.compile(
+    r"sk-[A-Za-z0-9]{16,}"
+    r"|gh[opsu]_[A-Za-z0-9]{20,}"
+    r"|AKIA[0-9A-Z]{12,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|AIza[0-9A-Za-z_-]{20,}"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+)
 # Bulky/non-procedural fields dropped so a step stays a compact recipe, not a dump.
 _SKIP_KEYS = frozenset(
     {"diff", "state_hash", "created_at", "evidence_refs", "rationale", "reasons", "summary"}
@@ -79,6 +90,10 @@ def _redact_value(key: str, value: Any) -> str:
         if isinstance(value, (dict, list))
         else str(value)
     )
+    # Mask a secret-shaped value even under a benign key (also catches a secret
+    # nested inside a dict/list value, which was serialized above).
+    if _SECRET_VALUE.search(text):
+        return "<redacted>"
     return text if len(text) <= _MAX_VALUE_LEN else text[: _MAX_VALUE_LEN - 3] + "..."
 
 
