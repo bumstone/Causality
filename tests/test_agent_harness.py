@@ -119,6 +119,18 @@ class ClassifyTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertEqual(self.harness.classify(phrase), TaskType.IMPLEMENTATION)
 
+    def test_sensitive_gerund_forms_are_governed(self) -> None:
+        # codex r3448006269: inflected risky verbs ("deleting", "revoking",
+        # "charging", "wiping") must still route to a governed type, not TRIVIAL.
+        for phrase in (
+            "deleting customer records",
+            "revoking her access",
+            "charging the saved card",
+            "wiping the cache",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.harness.classify(phrase), TaskType.IMPLEMENTATION)
+
     def test_benign_unmatched_stays_trivial(self) -> None:
         # Genuinely trivial, non-sensitive text is still answered directly.
         for phrase in ("say hello", "what is the weather", "summarize this note"):

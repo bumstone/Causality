@@ -79,11 +79,11 @@ _CLASSIFY_ORDER: tuple[TaskType, ...] = (
 # bypass -- and stems use a leading boundary so inflections match.
 _SENSITIVE_SIGNAL = re.compile(
     r"\b(?:"
-    r"delete|remov|wipe|eras|destroy|truncat|"
-    r"payment|billing|invoic|charge|refund|payout|"
-    r"credential|password|passwd|secret|token|api[_-]?key|"
-    r"deploy|migrat|database|production|rollback|"
-    r"permission|revoke|grant|chmod|chown|sudo|overwrit"
+    r"delet|remov|wipe|wiping|eras|destroy|truncat|"          # destructive (stemmed)
+    r"payment|billing|invoic|charg|refund|payout|"            # financial
+    r"credential|password|passwd|secret|token|api[_-]?key|"   # secrets
+    r"deploy|migrat|database|production|rollback|"            # infra/prod
+    r"permission|revok|grant|chmod|chown|sudo|overwrit"       # access/ops
     r")",
     re.IGNORECASE,
 )

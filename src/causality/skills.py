@@ -164,8 +164,8 @@ def _distill_step(event: LedgerEvent) -> SkillStep:
     outputs -- replacing the old ``event_type:kind`` trace.
     """
     payload: Mapping[str, Any] = event.payload or {}
-    tool_key, tool = _first_present(payload, _TOOL_KEYS)
-    outcome_key, outcome = _first_present(payload, _OUTCOME_KEYS)
+    tool_key, tool_raw = _first_present(payload, _TOOL_KEYS)
+    outcome_key, outcome_raw = _first_present(payload, _OUTCOME_KEYS)
     consumed = {tool_key, outcome_key} | _SKIP_KEYS
     args = tuple(
         (key, _redact_value(key, payload[key]))
@@ -177,8 +177,15 @@ def _distill_step(event: LedgerEvent) -> SkillStep:
         for record in (event.artifacts or ())
         if isinstance(record, Mapping) and record.get("path")
     )
+    # Redact/bound the extracted tool and outcome too: they are pulled straight
+    # from the payload and excluded from args, so without this a secret in a
+    # command/tool/outcome field would bypass redaction (codex r3448006271).
     return SkillStep(
-        action=event.event_type, tool=tool, args=args, artifacts=artifacts, outcome=outcome
+        action=event.event_type,
+        tool=_redact_value(tool_key, tool_raw) if tool_raw else "",
+        args=args,
+        artifacts=artifacts,
+        outcome=_redact_value(outcome_key, outcome_raw) if outcome_raw else "",
     )
 
 

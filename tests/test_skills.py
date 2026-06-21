@@ -237,6 +237,20 @@ class SkillStoreTest(unittest.TestCase):
         self.assertNotIn("sk-proj-AbCdEf0123456789ghIJ", json.dumps(candidate.to_dict()))
         self.assertEqual(args["module"], "task-management-system")  # not a false positive
 
+    def test_distill_redacts_secret_in_tool_field(self) -> None:
+        # codex r3448006271: a secret in a command/tool field is extracted into
+        # SkillStep.tool and excluded from args, so it must be redacted there too.
+        contract = GoalContract(title="ship", summary="secret in command")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"command": "curl -H 'Authorization: Bearer sk-ABCDEFGHIJ1234567890'"},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        self.assertEqual(candidate.steps[-1].tool, "<redacted>")
+        self.assertNotIn("sk-ABCDEFGHIJ1234567890", json.dumps(candidate.to_dict()))
+
     def test_distill_truncates_long_value(self) -> None:
         contract = GoalContract(title="ship", summary="with long value")
         self.causality.create_contract(contract)
