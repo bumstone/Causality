@@ -327,6 +327,19 @@ class SkillStoreTest(unittest.TestCase):
         self.assertEqual(candidate.steps[-1].tool, "<redacted>")
         self.assertNotIn("abcdefGHIJ0123456789xyz", json.dumps(candidate.to_dict()))
 
+    def test_distill_redacts_spaced_key_name(self) -> None:
+        # codex r3448043933: a spaced human-readable secret key name ("api key")
+        # must be redacted like its snake/kebab forms.
+        contract = GoalContract(title="ship", summary="spaced key name")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract, EvidenceKind.TOOL_OUTPUT, {"api key": "internal-prod-key", "host": "db1"}
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        args = dict(candidate.steps[-1].args)
+        self.assertEqual(args["api key"], "<redacted>")
+        self.assertNotIn("internal-prod-key", json.dumps(candidate.to_dict()))
+
     def test_distill_truncates_long_value(self) -> None:
         contract = GoalContract(title="ship", summary="with long value")
         self.causality.create_contract(contract)

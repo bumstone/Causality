@@ -58,7 +58,7 @@ def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
 # of the ledger.
 _SENSITIVE_KEY = re.compile(
     r"secret|token|password|passwd|credential|auth|cookie|bearer|session|"
-    r"api[_-]?key|private[_-]?key|access[_-]?key|signing[_-]?key|ssh[_-]?key",
+    r"api[\s_-]?key|private[\s_-]?key|access[\s_-]?key|signing[\s_-]?key|ssh[\s_-]?key",
     re.IGNORECASE,
 )
 # Well-known secret *shapes* redacted even under a benign key, since key-name
