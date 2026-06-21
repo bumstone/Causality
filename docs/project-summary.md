@@ -1,6 +1,6 @@
 # Causality Project Summary
 
-Baseline: `236` green (#29 `6c239e0` + opt-in ledger rotation).
+Baseline: `251` green (#32 `e78ec21` + vendored L1 playbooks).
 
 ## What It Is
 
@@ -12,6 +12,7 @@ and skills. The point is auditability: claims need evidence.
 
 | Area | Status |
 | --- | --- |
+| Dispatch | L1 routes each task type to one vendored playbook bundle; every routed label resolves to structured phases or raises. |
 | Contract | `GoalContract` freezes into `TaskContract`: objective, non-goals, tools, verification. |
 | Gates | `run_task`, `ExecutionAdapter`, and `ToolAdapter` enforce plan/action/tool/non-goal checks. |
 | Completion | Required evidence + substantive verifier passes; blank/hollow passes do not count. |
@@ -22,8 +23,8 @@ and skills. The point is auditability: claims need evidence.
 
 ## Still Not Proven
 
-- API/browser playbooks beyond the bundled file/subprocess adapter (the
-  `_ROUTING` bundles are labels, not yet vendored/executed).
+- API/browser execution beyond the file/subprocess `ToolAdapter`; the vendored
+  playbook phases are guidance the agent follows, not engine-auto-executed.
 
 ## Sources
 

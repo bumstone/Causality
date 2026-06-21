@@ -46,6 +46,11 @@ class EngineTests(unittest.TestCase):
             # L1 dispatch classified the objective -> implementation/superpowers.
             self.assertEqual(run.dispatch.task_type, TaskType.IMPLEMENTATION)
             self.assertEqual(run.dispatch.architecture, "superpowers")
+            # The dispatch's bundle labels resolve to vendored playbooks on the run.
+            self.assertEqual([p.name for p in run.playbooks], ["tdd", "debugging"])
+            self.assertEqual(
+                [p["name"] for p in run.to_dict()["playbooks"]], ["tdd", "debugging"]
+            )
             # L2 contract clauses are frozen on the run.
             self.assertEqual(run.task.non_goals, ("delete production data",))
             self.assertEqual(run.task.allowed_tools, ("Edit", "Bash"))

@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from .playbooks import Playbook, resolve_playbooks
+
 
 class TaskType(str, Enum):
     PLANNING = "planning"
@@ -123,6 +125,16 @@ class AgentHarness:
 
         architecture, playbook = _ROUTING[resolved]
         return Dispatch(task_type=resolved, architecture=architecture, playbook=playbook)
+
+    def playbooks(self, dispatch: Dispatch) -> tuple[Playbook, ...]:
+        """Resolve a dispatch's bundle labels to the vendored playbooks.
+
+        Every label in :data:`_ROUTING` resolves to a structured
+        :class:`~causality.playbooks.Playbook`; an unknown label raises so the
+        routing table can never point at a non-existent playbook. TRIVIAL routes
+        to no bundle, so this returns ``()``.
+        """
+        return resolve_playbooks(dispatch.playbook)
 
     def classify(self, text: str, *, default: TaskType = TaskType.TRIVIAL) -> TaskType:
         """Map free text to a :class:`TaskType` via the keyword heuristic.

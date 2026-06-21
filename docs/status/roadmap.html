@@ -257,12 +257,12 @@
 
   <section class="verdict" aria-label="요약 판단">
     <div class="statement">
-      <p><strong>정직한 결론:</strong> Causality의 코어 제어 루프는 배선만 된 상태를 넘어, PR #29까지 반영되며 스킬 절차 깊이, verifier 실질성, 민감 intent fail-safe, secret redaction, 파일/서브프로세스 실행 어댑터가 보강됐다.</p>
+      <p><strong>정직한 결론:</strong> Causality의 코어 제어 루프는 배선만 된 상태를 넘어, 스킬 절차 깊이, verifier 실질성, 민감 intent fail-safe, secret redaction, 파일/서브프로세스 실행 어댑터, ledger rotation/offset index, L1 playbook vendoring까지 반영됐다.</p>
       <div class="tags">
         <span class="tag done">코어 루프 닫힘</span>
         <span class="tag done">P2 efficacy 반영</span>
         <span class="tag done">CI green</span>
-        <span class="tag commit">6c239e0</span>
+        <span class="tag commit">e78ec21</span>
       </div>
     </div>
     <div class="caveat">
@@ -386,6 +386,10 @@
         <p>PR #29로 <code>ToolAdapter</code>가 <code>run</code>, <code>write_text</code>, <code>read_text</code>를 제공한다. allowed tool, non-goal, risk, write scope를 통과한 호출만 실행하고 tool/evidence 이벤트를 남긴다.</p>
       </article>
       <article class="card done-card">
+        <h3><span class="tag done">완료</span> L1 playbook vendoring</h3>
+        <p>L1 <code>_ROUTING</code>의 번들 라벨이 더 이상 빈 문자열이 아니라 <code>causality.playbooks</code>의 구조화된 <code>Playbook</code>(순서 있는 phase·step)으로 vendoring됐다. 라우팅된 모든 라벨이 실재 playbook으로 resolve되거나 raise하며, <code>TaskRun.playbooks</code>로 run에 노출된다.</p>
+      </article>
+      <article class="card done-card">
         <h3><span class="tag done">완료</span> 보안 redaction</h3>
         <p>secret key 이름, nested dict/list, hyphenated <code>sk-</code>, opaque bearer/basic token을 skill distill 경로에서 방어한다.</p>
       </article>
@@ -426,8 +430,8 @@
         </tr>
         <tr>
           <td>실행 playbook</td>
-          <td>파일/서브프로세스 어댑터는 PR #29로 들어왔지만, API/browser 같은 실사용 playbook은 아직 별도 설계가 필요하다.</td>
-          <td>작업 유형별 playbook 인터페이스와 실패 복구 규칙을 문서와 테스트로 고정.</td>
+          <td>번들 라벨은 구조화된 playbook으로 vendoring됐고(phase·step), 파일/서브프로세스 어댑터도 들어왔다. 다만 phase는 에이전트가 따르는 지침이며 엔진이 자동 실행하지 않고, API/browser 실사용 어댑터는 아직 없다.</td>
+          <td>API/browser 실행 어댑터와, playbook phase를 실제 실행/검증으로 연결하는 경로를 테스트로 고정.</td>
         </tr>
         <tr>
           <td>운영 자동화 설정</td>

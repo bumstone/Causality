@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .agenda import Agenda, AgendaItem
 from .agent_harness import AgentHarness, Dispatch, TaskType
+from .playbooks import Playbook
 from .contract_harness import ContractHarness
 from .contracts import GateDecision, GoalContract, Risk, TaskContract
 from .execution import ActionBlocked, ApprovePlan, ExecutionAdapter
@@ -89,6 +90,7 @@ class TaskRun:
     reflection: Reflection
     skill: SkillCandidate | None
     recalled_skills: tuple[SkillCandidate, ...] = ()
+    playbooks: tuple[Playbook, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -107,6 +109,7 @@ class TaskRun:
             "reflection": self.reflection.to_dict(),
             "skill": self.skill.to_dict() if self.skill is not None else None,
             "recalled_skills": [s.to_dict() for s in self.recalled_skills],
+            "playbooks": [p.to_dict() for p in self.playbooks],
         }
 
 
@@ -167,6 +170,9 @@ class CausalityEngine:
         else:
             resolved_type = self.dispatcher.classify(objective)
         dispatch = self.dispatcher.route(resolved_type)
+        # Resolve the bundle labels to vendored playbooks so the run carries its
+        # structured phases (surfaced on the TaskRun) instead of bare label strings.
+        playbooks = self.dispatcher.playbooks(dispatch)
 
         # Back-half read-path: recall promoted earned skills (and any authored
         # skills) relevant to this objective so they can be reused, authored
@@ -215,6 +221,7 @@ class CausalityEngine:
                 failure_scope,
                 failure_ttl_days,
                 recalled_skills,
+                playbooks,
             )
 
         # L3 bounded loop: each iteration does the work then a standardized review
@@ -263,6 +270,7 @@ class CausalityEngine:
             reflection=reflection,
             skill=skill,
             recalled_skills=recalled_skills,
+            playbooks=playbooks,
         )
 
     def _recall_guardrails(
@@ -306,6 +314,7 @@ class CausalityEngine:
         failure_scope: str | None = None,
         failure_ttl_days: int | None = None,
         recalled_skills: tuple[SkillCandidate, ...] = (),
+        playbooks: tuple[Playbook, ...] = (),
     ) -> TaskRun:
         """Build the TaskRun for a plan refused at the plan gate.
 
@@ -329,6 +338,7 @@ class CausalityEngine:
             reflection=reflection,
             skill=None,
             recalled_skills=recalled_skills,
+            playbooks=playbooks,
         )
 
     def run_next(
