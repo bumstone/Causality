@@ -1,0 +1,156 @@
+"""Bundled, gate-enforcing tool executors (ADR 0001 §2.3, ADR 0003).
+
+A task's ``work`` callback previously had to hand-roll every side effect and
+route each one through the :class:`ExecutionAdapter`; only the browser had a
+ready adapter (:mod:`browser_adapter`). This bundles the other common ones --
+run a subprocess, write a file, read a file -- so each call:
+
+1. passes the contract's per-action gates (non_goals / allowed_tools / risk)
+   before it touches the world (a refusal raises ``ActionBlocked`` and the run
+   terminates with that decision), and
+2. lands a ``TOOL_CALL`` / ``EVIDENCE`` record in the ledger afterwards, so reuse
+   stays auditable.
+
+Subprocesses run from a **list of args with no shell**, so a value can never be
+interpolated into a shell command. The ledger keeps the raw argv as audit
+evidence; the skill distiller redacts secrets when copying any of it into the
+shared skill library (see :mod:`skills`).
+"""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Sequence
+
+from .browser_adapter import CommandResult
+from .contracts import AuditEventType, EvidenceKind
+from .execution import ExecutionAdapter
+from .ledger import EvidenceLedger
+
+# Test seam: run a command (argv list) and return its result. The default runs a
+# real subprocess; tests inject a fake so the suite never spawns a process.
+CommandRunner = Callable[[Sequence[str]], CommandResult]
+
+
+@dataclass
+class ToolAdapter:
+    """Gate-enforcing executors handed to (or built by) a task's ``work``.
+
+    Wraps the per-run :class:`ExecutionAdapter` (gating) and the ledger
+    (auditing). Construct it inside ``work`` as ``ToolAdapter(runtime.ledger,
+    adapter)`` and call :meth:`run` / :meth:`write_text` / :meth:`read_text`
+    instead of touching the world directly.
+    """
+
+    ledger: EvidenceLedger
+    execution: ExecutionAdapter
+    runner: CommandRunner | None = None
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        tool: str = "shell",
+        action_kind: str = "tool_call",
+        description: str | None = None,
+        timeout: float = 30.0,
+    ) -> CommandResult:
+        """Run ``args`` (a non-empty command list) through the gates, no shell."""
+        argv = [str(arg) for arg in args]
+        if not argv:
+            raise ValueError("run() requires a non-empty command")
+        desc = description if description is not None else " ".join(argv)
+
+        def _do() -> CommandResult:
+            if self.runner is not None:
+                return self.runner(argv)
+            completed = subprocess.run(  # noqa: S603 - argv list, never shell=True
+                argv, text=True, capture_output=True, check=False, timeout=timeout
+            )
+            return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+        result = self.execution.execute(
+            tool=tool, action_kind=action_kind, description=desc, run=_do
+        )
+        self._record(
+            AuditEventType.TOOL_CALL,
+            {
+                "tool": tool,
+                "argv": argv,
+                "exit_code": result.exit_code,
+                "stdout_bytes": len(result.stdout),
+                "stderr_bytes": len(result.stderr),
+            },
+        )
+        return result
+
+    def write_text(
+        self,
+        path: str | Path,
+        content: str,
+        *,
+        tool: str = "file.write",
+        action_kind: str = "write",
+        encoding: str = "utf-8",
+    ) -> Path:
+        """Write ``content`` to ``path`` through the gates; record the artifact."""
+        target = Path(path)
+
+        def _do() -> Path:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding=encoding)
+            return target
+
+        self.execution.execute(
+            tool=tool, action_kind=action_kind, description=f"write file {target}", run=_do
+        )
+        self._record(
+            AuditEventType.EVIDENCE,
+            {
+                "kind": EvidenceKind.ARTIFACT_HASH.value,
+                "tool": tool,
+                "path": str(target),
+                "bytes": len(content.encode(encoding)),
+            },
+            artifact_paths=[target],
+        )
+        return target
+
+    def read_text(
+        self,
+        path: str | Path,
+        *,
+        tool: str = "file.read",
+        action_kind: str = "tool_call",
+        encoding: str = "utf-8",
+    ) -> str:
+        """Read ``path`` through the gates; record a TOOL_CALL."""
+        target = Path(path)
+
+        def _do() -> str:
+            return target.read_text(encoding=encoding)
+
+        content = self.execution.execute(
+            tool=tool, action_kind=action_kind, description=f"read file {target}", run=_do
+        )
+        self._record(
+            AuditEventType.TOOL_CALL,
+            {"tool": tool, "path": str(target), "bytes": len(content.encode(encoding))},
+        )
+        return content
+
+    def _record(
+        self,
+        event_type: AuditEventType,
+        payload: dict,
+        *,
+        artifact_paths: Sequence[str | Path] = (),
+    ) -> None:
+        self.ledger.append(
+            event_type,
+            payload,
+            contract_id=self.execution.contract.goal_id,
+            artifact_paths=artifact_paths,
+        )
