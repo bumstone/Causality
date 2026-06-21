@@ -10,7 +10,9 @@ name: Codex review autofix
 #      (or run `/install-github-app` from Claude Code).
 #   2. Add a repo secret ANTHROPIC_API_KEY (Settings -> Secrets and variables ->
 #      Actions -> New repository secret) using a key from console.anthropic.com.
-# Until both are done this workflow is inert (the step needs the secret).
+# Until both are done this workflow is inert: the first step detects the missing
+# secret and the apply step is SKIPPED, so the job reports success (green) rather
+# than a misleading red failure on every Codex-reviewed PR.
 
 on:
   pull_request_review:
@@ -42,13 +44,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # Gate the run on the secret existing. Secrets cannot be referenced in a
+      # job-level `if`, so detect it in a step and skip the rest when absent --
+      # the job then succeeds (green) instead of the action failing red while the
+      # workflow is intentionally inert (no API key configured yet).
+      - name: Check for the Claude API key
+        id: secret
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ANTHROPIC_API_KEY not set; autofix is inert (see workflow header). Skipping apply."
+          fi
+
       - name: Checkout the PR head branch
+        if: steps.secret.outputs.present == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
       - name: Apply Codex review feedback
+        if: steps.secret.outputs.present == 'true'
         uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
