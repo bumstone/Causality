@@ -22,8 +22,6 @@ and skills. The point is auditability: claims need evidence.
 
 ## Still Not Proven
 
-- End-to-end coverage of the tool adapter inside a full run (the back-half loop
-  is proven in `tests/test_e2e.py`).
 - API/browser playbooks beyond the bundled file/subprocess adapter.
 - `.idx` offset index for very large archives (rotation/archive exist and stay
   chain-verifiable; the index is scale-gated).
