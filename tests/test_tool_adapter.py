@@ -95,6 +95,23 @@ class ToolAdapterTests(unittest.TestCase):
             gate_decisions = runtime.ledger.find(AuditEventType.GATE_DECISION)
             self.assertTrue(any(g.payload.get("decision") == "stop" for g in gate_decisions))
 
+    def test_relative_write_scope_resolves_against_root(self) -> None:
+        # codex r3448146018: a relative write_scope ("workspace") and relative
+        # targets must resolve against the adapter's root, not the process cwd.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime, _, adapter = self._setup(
+                temp_dir, permissions=PermissionContract(write_scope=("workspace",))
+            )
+            tool = ToolAdapter(runtime.ledger, adapter, root=Path(temp_dir))
+
+            written = tool.write_text("workspace/ok.txt", "fine")  # in-scope, root-anchored
+            self.assertEqual(written, (Path(temp_dir) / "workspace" / "ok.txt").resolve())
+            self.assertTrue(written.exists())
+
+            with self.assertRaises(ActionBlocked):
+                tool.write_text("elsewhere/bad.txt", "nope")
+            self.assertFalse((Path(temp_dir) / "elsewhere" / "bad.txt").exists())
+
     def test_write_then_read_text_with_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, _, adapter = self._setup(temp_dir)
@@ -102,11 +119,11 @@ class ToolAdapterTests(unittest.TestCase):
             target = Path(temp_dir) / "out" / "note.txt"
 
             written = tool.write_text(target, "hello world")
-            self.assertEqual(written, target)
-            self.assertEqual(target.read_text(encoding="utf-8"), "hello world")
+            self.assertTrue(written.exists())
+            self.assertEqual(written.read_text(encoding="utf-8"), "hello world")
             evidence = runtime.ledger.find(AuditEventType.EVIDENCE)
             self.assertEqual(len(evidence), 1)
-            self.assertEqual(evidence[0].payload["path"], str(target))
+            self.assertEqual(evidence[0].payload["path"], str(written))
             self.assertTrue(evidence[0].artifacts and evidence[0].artifacts[0]["sha256"])
 
             content = tool.read_text(target)

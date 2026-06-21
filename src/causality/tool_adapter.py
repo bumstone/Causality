@@ -20,7 +20,7 @@ shared skill library (see :mod:`skills`).
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -32,9 +32,9 @@ from .ledger import EvidenceLedger
 
 
 def _is_within(path: Path, base: Path) -> bool:
-    """True if ``path`` is ``base`` or a descendant of it (both resolved)."""
+    """True if ``path`` is ``base`` or a descendant of it (both already resolved)."""
     try:
-        path.relative_to(base.resolve())
+        path.relative_to(base)
         return True
     except ValueError:
         return False
@@ -57,6 +57,20 @@ class ToolAdapter:
     ledger: EvidenceLedger
     execution: ExecutionAdapter
     runner: CommandRunner | None = None
+    # Workspace root that relative file paths AND relative write_scope entries
+    # resolve against, so a contract scope like ".causality/" matches
+    # <root>/.causality regardless of the process cwd (codex r3448146018).
+    root: Path = field(default_factory=Path.cwd)
+
+    def __post_init__(self) -> None:
+        self.root = Path(self.root)
+
+    def _resolved(self, path: str | Path) -> Path:
+        """Absolute, symlink-resolved path; a relative one is anchored to root."""
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self.root / candidate
+        return candidate.resolve()
 
     def run(
         self,
@@ -106,7 +120,7 @@ class ToolAdapter:
         encoding: str = "utf-8",
     ) -> Path:
         """Write ``content`` to ``path`` through the gates; record the artifact."""
-        target = Path(path)
+        target = self._resolved(path)
         # Honor the contract's frozen file boundary BEFORE touching the disk: a
         # write outside a declared write_scope is a STOP, like a non-goal breach
         # (codex r3448136006). The generic gates do not cover write_scope.
@@ -141,7 +155,7 @@ class ToolAdapter:
         encoding: str = "utf-8",
     ) -> str:
         """Read ``path`` through the gates; record a TOOL_CALL."""
-        target = Path(path)
+        target = self._resolved(path)
 
         def _do() -> str:
             return target.read_text(encoding=encoding)
@@ -166,8 +180,9 @@ class ToolAdapter:
         scope = self.execution.contract.permissions.write_scope
         if not scope:
             return
-        resolved = target.resolve()
-        if any(_is_within(resolved, Path(entry)) for entry in scope):
+        # ``target`` is already resolved; resolve relative scope entries against
+        # the same workspace root so the comparison is consistent (r3448146018).
+        if any(_is_within(target, self._resolved(entry)) for entry in scope):
             return
         result = GateResult(
             GateDecision.STOP,
