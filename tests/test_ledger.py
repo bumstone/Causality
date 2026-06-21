@@ -411,6 +411,26 @@ class LedgerTests(unittest.TestCase):
             self.assertTrue(fresh.verify_chain())
             self.assertEqual(len(fresh.events(all_segments=True)), 3)
 
+    def test_rotate_twice_chains_across_all_segments(self) -> None:
+        # Two rotations produce <path>.1 and <path>.2; the chain stays continuous
+        # across BOTH seams and the full history is ordered.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            ledger.append(AuditEventType.EVIDENCE, {"n": 2})
+            first = ledger.rotate()
+            ledger.append(AuditEventType.EVIDENCE, {"n": 3})
+            ledger.append(AuditEventType.EVIDENCE, {"n": 4})
+            second = ledger.rotate()
+            ledger.append(AuditEventType.EVIDENCE, {"n": 5})
+
+            self.assertEqual(first, Path(str(path) + ".1"))
+            self.assertEqual(second, Path(str(path) + ".2"))
+            self.assertTrue(ledger.verify_chain())  # continuous across both seams
+            ordered = [event.payload["n"] for event in ledger.events(all_segments=True)]
+            self.assertEqual(ordered, [1, 2, 3, 4, 5])
+
     def test_rotate_empty_ledger_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
