@@ -15,16 +15,15 @@ and skills. The point is auditability: claims need evidence.
 | Contract | `GoalContract` freezes into `TaskContract`: objective, non-goals, tools, verification. |
 | Gates | `run_task`, `ExecutionAdapter`, and `ToolAdapter` enforce plan/action/tool/non-goal checks. |
 | Completion | Required evidence + substantive verifier passes; blank/hollow passes do not count. |
-| Ledger | Hash-chained JSONL, durable writes, locks, torn-tail repair, read cache, opt-in chain-verifiable rotation. |
+| Ledger | Hash-chained JSONL, durable writes, locks, torn-tail repair, read cache, opt-in chain-verifiable rotation with offset-indexed paging. |
 | Feedback | Approved failures can become later non-goals; TTL prevents permanent ratchets. |
 | Skills | Earned skills can be distilled, promoted, deduped, recalled, and injected into execution. |
 | Redaction | Distilled skills mask sensitive keys, nested structures, token shapes, and auth headers. |
 
 ## Still Not Proven
 
-- API/browser playbooks beyond the bundled file/subprocess adapter.
-- `.idx` offset index for very large archives (rotation/archive exist and stay
-  chain-verifiable; the index is scale-gated).
+- API/browser playbooks beyond the bundled file/subprocess adapter (the
+  `_ROUTING` bundles are labels, not yet vendored/executed).
 
 ## Sources
 

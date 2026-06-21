@@ -350,6 +350,9 @@ class EvidenceLedger:
             sequence = len(self._archive_segments()) + 1
             archive = self.path.parent / f"{self.path.name}.{sequence}"
             os.replace(self.path, archive)
+            # Build the offset index for the sealed segment so event_count() and
+            # events_page() can count/seek it without re-parsing the whole file.
+            self._build_index(archive)
             # Persist the carry-over BEFORE returning so a crash right after the
             # rename cannot lose the chain anchor (the next append would otherwise
             # start a new genesis and fork the chain).
@@ -362,6 +365,88 @@ class EvidenceLedger:
         if max_bytes > 0 and self._current_size() >= max_bytes:
             return self.rotate()
         return None
+
+    # --- Offset index (ADR 0011 §3 `.idx`): a per-segment sidecar of byte
+    # offsets so event_count()/events_page() can count and seek across archives
+    # without parsing every line. The index is advisory -- if it is missing or
+    # stale the methods fall back to a full parse, so correctness never depends
+    # on it (only speed).
+
+    def _index_path(self, segment: Path) -> Path:
+        return Path(str(segment) + ".idx")
+
+    def _build_index(self, segment: Path) -> dict[str, Any]:
+        """Write ``<segment>.idx``: byte offset of each complete, non-blank line."""
+        offsets: list[int] = []
+        position = 0
+        with segment.open("rb") as handle:
+            for raw in handle:
+                if raw.endswith(b"\n") and raw.strip():
+                    offsets.append(position)
+                position += len(raw)
+        index = {"count": len(offsets), "offsets": offsets}
+        write_text_durably(self._index_path(segment), json.dumps(index), lock=False)
+        return index
+
+    def _read_index(self, segment: Path) -> dict[str, Any] | None:
+        try:
+            return json.loads(self._index_path(segment).read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+    def _segment_count(self, segment: Path) -> int:
+        index = self._read_index(segment)
+        if index is not None:
+            return int(index["count"])
+        return len(DurableJsonl(segment).read_lines())
+
+    def _segment_lines(self, segment: Path, start: int, limit: int) -> list[str]:
+        """Lines ``[start:start+limit]`` of a segment, via the index when present."""
+        index = self._read_index(segment)
+        if index is None:
+            return DurableJsonl(segment).read_lines()[start : start + limit]
+        offsets = index["offsets"]
+        end = min(start + limit, len(offsets))
+        lines: list[str] = []
+        with segment.open("rb") as handle:
+            for i in range(start, end):
+                handle.seek(offsets[i])
+                line = handle.readline().decode("utf-8").strip()
+                if line:
+                    lines.append(line)
+        return lines
+
+    def _segments(self, *, all_segments: bool) -> list[Path]:
+        return (self._archive_segments() if all_segments else []) + [self.path]
+
+    def event_count(self, *, all_segments: bool = True) -> int:
+        """Number of events across segments -- O(segments) via the index."""
+        return sum(self._segment_count(seg) for seg in self._segments(all_segments=all_segments))
+
+    def events_page(
+        self, start: int, limit: int, *, all_segments: bool = True
+    ) -> list[LedgerEvent]:
+        """A window of events ``[start:start+limit]`` in chain order.
+
+        Skips whole segments before ``start`` using their indexed counts and
+        seeks into the target segment via the offset index, so a page does not
+        parse the full (possibly rotated) history.
+        """
+        if limit <= 0 or start < 0:
+            return []
+        to_skip, remaining, page = start, limit, []
+        for segment in self._segments(all_segments=all_segments):
+            if remaining <= 0:
+                break
+            count = self._segment_count(segment)
+            if to_skip >= count:
+                to_skip -= count
+                continue
+            lines = self._segment_lines(segment, to_skip, remaining)
+            page.extend(LedgerEvent(**json.loads(line)) for line in lines)
+            remaining -= len(lines)
+            to_skip = 0
+        return [self._isolate(event) for event in page]
 
     def tail(self, limit: int = 5) -> list[dict[str, Any]]:
         # [-0:] would return the whole list, dumping the full ledger when a
