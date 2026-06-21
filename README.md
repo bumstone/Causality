@@ -3,10 +3,10 @@
 # Causality
 
 Causality is a local-first, dependency-light agent workflow kit for Claude,
-Codex, and agent-driven projects. It blends three lineages into one
-human-in-the-loop control surface:
+Codex, and agent-driven projects. It blends Causality-native contracts,
+workflow discipline, and browser QA into one human-in-the-loop control surface:
 
-- **Ouroboros** — goal contracts, an append-only evidence ledger, state
+- **Causality contracts** — goal contracts, an append-only evidence ledger, state
   transitions, plugin contracts, and HITL gates.
 - **Superpowers** — planning, test-driven development, root-cause debugging,
   verification-before-completion, and slash-command ergonomics.
@@ -504,8 +504,7 @@ pyproject.toml
 ## License and attribution
 
 This repository is an original implementation under the [MIT LICENSE](LICENSE).
-It does not vendor upstream source. The referenced projects (Ouroboros,
-Ouroboros Plugins, Superpowers, gstack) are MIT-licensed and credited in
+It does not vendor upstream source. Referenced upstream projects are credited in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Keep `LICENSE` and
 `THIRD_PARTY_NOTICES.md` in any private or public copy. If you later copy
 substantial upstream source into this project, add that upstream copyright

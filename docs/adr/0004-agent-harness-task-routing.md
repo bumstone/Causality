@@ -6,7 +6,7 @@
 
 ## 1. 동기 (Context)
 
-이 킷은 세 상류 아키텍처(Ouroboros / Superpowers / gstack)를 결합한다
+이 킷은 Causality 계약, Superpowers 워크플로, gstack 브라우저 규율을 결합한다
 (`README.md:4-8`). 이들을 **한 번에 섞어 직접 충돌**시키면(예: 모든 작업에 gstack
 23 스페셜리스트 + Superpowers TDD + Causality 루프를 동시에 적용) 비용·지연이
 폭증하고 책임이 모호해진다.

@@ -117,7 +117,7 @@ L4(ledger) → **증류** → L0(typed memory + rewarded trajectory). 그 결과
 
 ## 6. 자기개선 루프 실현 가능성 (Run → Review → Fix, Reflect → Skill update)
 
-우로보로스 HITL의 *현재 프리미티브* 기준으로 각 단계가 실현 가능한지 검증한다.
+Causality HITL의 *현재 프리미티브* 기준으로 각 단계가 실현 가능한지 검증한다.
 범례: ✔ 구현 · ◐ 부분 구현 · ✖ 미구현.
 
 | 단계 | 매핑 프리미티브 | 판정 | 비고 |

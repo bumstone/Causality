@@ -6,7 +6,7 @@
 
 ## 1. 동기 (Context)
 
-우로보로스 루프 앞단에 "작업 계약 생성 단계"를 별도 stage로 배치하자는 제안이
+Causality 루프 앞단에 "작업 계약 생성 단계"를 별도 stage로 배치하자는 제안이
 있었다. 목표는 작업이 지켜야 할 규칙(Objective / Non-goals / Allowed tools /
 Stop condition / Verification / Escalation)을 계약서처럼 명시하는 것이다.
 

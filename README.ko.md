@@ -2,11 +2,11 @@
 
 # Causality
 
-Causality은 Claude, Codex, 그리고 에이전트 기반 프로젝트를 위한 로컬 우선·의존성
-경량 에이전트 워크플로 키트입니다. 세 갈래의 설계를 하나의 휴먼-인-더-루프(HITL)
-제어면으로 결합합니다.
+Causality는 Claude, Codex, 그리고 에이전트 기반 프로젝트를 위한 로컬 우선·의존성
+경량 에이전트 워크플로 키트입니다. Causality 고유 계약, 워크플로 규율, 브라우저
+QA를 하나의 휴먼-인-더-루프(HITL) 제어면으로 결합합니다.
 
-- **Ouroboros** — 목표 계약(goal contract), append-only 증거 원장(ledger), 상태
+- **Causality 계약** — 목표 계약(goal contract), append-only 증거 원장(ledger), 상태
   전이, 플러그인 계약, HITL 게이트.
 - **Superpowers** — 계획 수립, 테스트 주도 개발(TDD), 근본원인 디버깅, 완료 전
   검증, 슬래시 커맨드 사용성.
@@ -478,8 +478,7 @@ pyproject.toml
 ## 라이선스 및 출처 표기
 
 이 저장소는 [MIT LICENSE](LICENSE) 하의 원본 구현이며, 상위 소스를 벤더링하지
-않습니다. 참조한 프로젝트(Ouroboros, Ouroboros Plugins, Superpowers, gstack)는
-MIT 라이선스이고 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 명시되어
-있습니다. 비공개·공개 사본 어디서든 `LICENSE`와 `THIRD_PARTY_NOTICES.md`를
+않습니다. 참조한 상위 프로젝트는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에
+명시되어 있습니다. 비공개·공개 사본 어디서든 `LICENSE`와 `THIRD_PARTY_NOTICES.md`를
 유지하세요. 추후 상당량의 상위 소스를 복사해 넣는다면 해당 상위 저작권 고지도
 추가하세요. 이것은 엔지니어링 라이선스 노트이며 법률 자문이 아닙니다.

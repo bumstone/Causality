@@ -12,6 +12,10 @@ license = { file = "LICENSE" }
 authors = [{ name = "Codex" }]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/bumstone/Causality"
+Repository = "https://github.com/bumstone/Causality.git"
+
 [project.scripts]
 causality = "causality.cli:main"
 

@@ -68,12 +68,6 @@ Run the local health check directly with:
 .\scripts\doctor.ps1
 ```
 
-For Q00/Ouroboros itself:
-
-```powershell
-pip install ouroboros-ai
-```
-
 ## Project-level agent automation
 
 In a new project:
