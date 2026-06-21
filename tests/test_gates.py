@@ -44,6 +44,63 @@ class GateTests(unittest.TestCase):
 
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 
+    def test_hollow_verifier_pass_does_not_count(self) -> None:
+        # P2: a "pass" with neither rationale nor evidence is a hollow
+        # rubber-stamp; two of them must not satisfy the independent-pass quorum.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(GoalContract("Hollow", "no evidence required"))
+            runtime.record_verifier(contract, VerifierDecision("v1", "pass", ""))
+            runtime.record_verifier(contract, VerifierDecision("v2", "pass", "   "))
+            result = runtime.complete(contract)
+            self.assertEqual(result.decision, GateDecision.REPAIR)
+            self.assertTrue(any("unsubstantiated" in reason for reason in result.reasons))
+            # A rationale-backed pass and an evidence-cited pass complete it.
+            runtime.record_verifier(
+                contract, VerifierDecision("v1", "pass", "ran the suite, all green")
+            )
+            runtime.record_verifier(
+                contract, VerifierDecision("v2", "pass", "", evidence_refs=("ev-1",))
+            )
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
+
+    def test_blank_evidence_ref_is_not_substantive(self) -> None:
+        # codex r3447999380: a placeholder evidence_refs=("",) with no rationale
+        # is not a real citation -- it must not count, even under require_evidence.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(GoalContract("Blank", "blank refs"))
+            runtime.record_verifier(contract, VerifierDecision("v1", "pass", "", evidence_refs=("",)))
+            runtime.record_verifier(contract, VerifierDecision("v2", "pass", "", evidence_refs=("  ",)))
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
+            self.assertEqual(
+                runtime.gate.complete(contract, require_evidence=True).decision,
+                GateDecision.REPAIR,
+            )
+
+    def test_require_evidence_rejects_rationale_only_passes(self) -> None:
+        # P2: the strict bar demands an evidence_ref -- prose alone no longer counts.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(GoalContract("Strict", "high assurance"))
+            runtime.record_verifier(contract, VerifierDecision("v1", "pass", "looks right"))
+            runtime.record_verifier(contract, VerifierDecision("v2", "pass", "also fine"))
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
+            self.assertEqual(
+                runtime.gate.complete(contract, require_evidence=True).decision,
+                GateDecision.REPAIR,
+            )
+            runtime.record_verifier(
+                contract, VerifierDecision("v1", "pass", "ran suite", evidence_refs=("ev-1",))
+            )
+            runtime.record_verifier(
+                contract, VerifierDecision("v2", "pass", "diffed", evidence_refs=("ev-2",))
+            )
+            self.assertEqual(
+                runtime.gate.complete(contract, require_evidence=True).decision,
+                GateDecision.PASS,
+            )
+
     def test_high_risk_plan_and_final_require_human_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime = Causality(Path(temp_dir) / "ledger.jsonl")

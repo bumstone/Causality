@@ -58,6 +58,7 @@ def run_review(
     verifiers: Sequence[Verifier],
     *,
     min_passes: int = 2,
+    require_evidence: bool = False,
 ) -> ReviewResult:
     """Run each verifier against ``contract`` and aggregate the verdict.
 
@@ -68,12 +69,14 @@ def run_review(
 
     Aggregation:
 
-    - ``passes`` counts **distinct** verifiers whose latest verdict in this pass
-      is a pass. Counting per-verifier (not per-decision) matches
+    - ``passes`` counts **distinct** verifiers whose latest verdict is a
+      *substantive* pass (cites evidence or a rationale; ``require_evidence``
+      demands an evidence_ref). Counting per-verifier (not per-decision) matches
       ``HITLGate.complete`` so two callbacks sharing a ``verifier`` name cannot
       fake two independent passes -- which otherwise keeps ``approved``/progress
       true forever and can hang a no-progress-bounded loop (codex review
-      r3407165600).
+      r3407165600) -- and the substance bar stops a hollow rubber-stamp from
+      counting at all.
     - ``has_critical_failure`` is true if any verifier's latest verdict is a
       critical failure.
     - ``approved`` is ``distinct passes >= min_passes`` and not
@@ -92,7 +95,12 @@ def run_review(
         latest[decision.verifier] = decision
     verdicts = list(latest.values())
 
-    passes = sum(1 for decision in verdicts if decision.is_pass)
+    # Count only substantive passes, the same bar HITLGate.complete uses, so a
+    # hollow rubber-stamp verifier cannot fake an independent pass (require_evidence
+    # raises the bar to an explicit evidence_ref).
+    passes = sum(
+        1 for decision in verdicts if decision.counts_as_pass(require_evidence=require_evidence)
+    )
     has_critical_failure = any(decision.is_critical_failure for decision in verdicts)
     approved = passes >= min_passes and not has_critical_failure
 

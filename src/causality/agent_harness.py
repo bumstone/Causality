@@ -70,6 +70,29 @@ _CLASSIFY_ORDER: tuple[TaskType, ...] = (
 )
 
 
+# High-confidence "this is risky" signals (destructive / financial / secret /
+# infra / access-changing). When the task-type keywords miss but one of these is
+# present, the request is NOT trivial: classifying it TRIVIAL would answer such
+# work directly and bypass the Contract Harness and its gates. classify() fails
+# safe to a governed type instead. Matching is intentionally liberal -- a false
+# positive only over-governs a benign task (safe), while a miss reopens the
+# bypass -- and stems use a leading boundary so inflections match.
+_SENSITIVE_SIGNAL = re.compile(
+    r"\b(?:"
+    r"delet|remov|wipe|wiping|eras|destroy|truncat|"          # destructive (stemmed)
+    r"payment|billing|invoic|charg|refund|payout|"            # financial
+    r"credential|password|passwd|secret|token|api[\s_-]?key|"  # secrets (incl. "api key")
+    r"deploy|migrat|database|production|rollback|"            # infra/prod
+    r"permission|revok|grant|chmod|chown|sudo|overwrit"       # access/ops
+    r")",
+    re.IGNORECASE,
+)
+
+# Where sensitive-but-unclassified work is routed: a governed type (its bundle
+# plus the bound contract's gates), never TRIVIAL.
+_SENSITIVE_FALLBACK = TaskType.IMPLEMENTATION
+
+
 @dataclass(frozen=True)
 class Dispatch:
     task_type: TaskType
@@ -101,7 +124,7 @@ class AgentHarness:
         architecture, playbook = _ROUTING[resolved]
         return Dispatch(task_type=resolved, architecture=architecture, playbook=playbook)
 
-    def classify(self, text: str) -> TaskType:
+    def classify(self, text: str, *, default: TaskType = TaskType.TRIVIAL) -> TaskType:
         """Map free text to a :class:`TaskType` via the keyword heuristic.
 
         Case-insensitive, matched on a *leading word boundary* against
@@ -109,12 +132,21 @@ class AgentHarness:
         boundary stops a keyword from matching inside an unrelated word (e.g.
         "test" must not match "latest" / "contest" / "protest"; codex review
         r3382219473) while still allowing inflections ("tests", "deploying",
-        "planning"). Falls back to ``TRIVIAL`` when nothing matches (ADR 0004
-        §2: trivial work is answered directly).
+        "planning").
+
+        Fail-safe fallback (ADR 0004 §2): when nothing matches, text carrying a
+        sensitive/irreversible signal (:data:`_SENSITIVE_SIGNAL` -- delete,
+        deploy, payment, production, credentials, ...) is routed to a *governed*
+        type rather than ``TRIVIAL``, so destructive or sensitive work cannot be
+        answered directly and bypass the contract gates. Only genuinely
+        keyword-free, non-sensitive text falls to ``default`` (``TRIVIAL``); pass
+        ``default=`` to govern all unmatched text.
         """
         haystack = (text or "").lower()
         for task_type in _CLASSIFY_ORDER:
             for keyword in CLASSIFY_KEYWORDS[task_type]:
                 if re.search(r"\b" + re.escape(keyword), haystack):
                     return task_type
-        return TaskType.TRIVIAL
+        if _SENSITIVE_SIGNAL.search(haystack):
+            return _SENSITIVE_FALLBACK
+        return default

@@ -20,12 +20,54 @@ def _fail(name: str, severity: str = "normal") -> Verifier:
     return lambda contract: VerifierDecision(name, "fail", "nope", severity=severity)
 
 
+def _hollow(name: str) -> Verifier:
+    # A "pass" with neither rationale nor evidence -- a hollow rubber-stamp.
+    return lambda contract: VerifierDecision(name, "pass", "")
+
+
+def _pass_with_evidence(name: str) -> Verifier:
+    return lambda contract: VerifierDecision(
+        name, "pass", "verified", evidence_refs=(f"ev-{name}",)
+    )
+
+
 class ReviewTests(unittest.TestCase):
     def _runtime(self, temp_dir: str) -> Causality:
         return Causality(Path(temp_dir) / "ledger.jsonl")
 
     def _contract(self, runtime: Causality) -> GoalContract:
         return runtime.create_contract(GoalContract("Review", "review pass"))
+
+    def test_hollow_passes_do_not_approve(self) -> None:
+        # P2: two hollow rubber-stamp passes (no rationale, no evidence) must not
+        # fake a quorum -- a verifier has to carry substance to count.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = self._runtime(temp_dir)
+            contract = self._contract(runtime)
+            result = run_review(runtime, contract, [_hollow("a"), _hollow("b")])
+            self.assertFalse(result.approved)
+            self.assertEqual(result.passes, 0)
+
+    def test_require_evidence_needs_evidence_refs(self) -> None:
+        # P2: rationale-only passes approve by default but not under the strict
+        # require_evidence bar, which demands an evidence_ref (prose is a claim).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = self._runtime(temp_dir)
+            contract = self._contract(runtime)
+            self.assertTrue(run_review(runtime, contract, [_pass("a"), _pass("b")]).approved)
+            self.assertFalse(
+                run_review(
+                    runtime, contract, [_pass("a"), _pass("b")], require_evidence=True
+                ).approved
+            )
+            self.assertTrue(
+                run_review(
+                    runtime,
+                    contract,
+                    [_pass_with_evidence("a"), _pass_with_evidence("b")],
+                    require_evidence=True,
+                ).approved
+            )
 
     def test_two_passes_are_approved_and_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -65,6 +65,7 @@ class HITLGate:
         verifier_decisions: Iterable[VerifierDecision] | None = None,
         *,
         min_passes: int = 2,
+        require_evidence: bool = False,
     ) -> GateResult:
         records = (
             list(verifier_decisions)
@@ -88,13 +89,26 @@ class HITLGate:
                 "critical verifier failure remains unresolved",
             )
 
-        pass_count = sum(1 for item in verdicts if item.is_pass)
+        # A pass counts only if it is substantive (cites evidence or a rationale)
+        # -- a hollow rubber-stamp must not satisfy the quorum (code review
+        # 2026-06-13: verifier substance unchecked). ``require_evidence`` raises
+        # the bar to an explicit evidence_ref for high-assurance completion.
+        pass_count = sum(
+            1 for item in verdicts if item.counts_as_pass(require_evidence=require_evidence)
+        )
         if pass_count < min_passes:
-            return self._record(
-                contract,
-                GateDecision.REPAIR,
-                f"completion requires at least {min_passes} independent verifier passes",
+            hollow = sorted(
+                item.verifier
+                for item in verdicts
+                if item.is_pass and not item.counts_as_pass(require_evidence=require_evidence)
             )
+            reason = (
+                f"completion requires at least {min_passes} substantive independent "
+                f"verifier passes"
+            )
+            if hollow:
+                reason += "; unsubstantiated passes ignored: " + ", ".join(hollow)
+            return self._record(contract, GateDecision.REPAIR, reason)
 
         missing = self._missing_required_evidence(contract)
         if missing:

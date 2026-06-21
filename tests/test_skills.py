@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from causality.contracts import EvidenceKind, GoalContract, VerifierDecision
 from causality.orchestrator import Causality
-from causality.skills import SkillCandidate, SkillPromotionError, SkillStore
+from causality.skills import SkillCandidate, SkillPromotionError, SkillStep, SkillStore
 
 
 class SkillStoreTest(unittest.TestCase):
@@ -35,11 +36,15 @@ class SkillStoreTest(unittest.TestCase):
         contract = self._make_contract()
         candidate = self.store.distill(self.causality.ledger, contract)
 
-        # steps are non-empty, ordered, and reflect the ledger trajectory.
+        # steps are non-empty, ordered, structured procedures -- not "type:kind".
         self.assertTrue(candidate.steps)
-        self.assertEqual(candidate.steps[0], "goal_contract:")
-        self.assertEqual(candidate.steps[1], "evidence:test_output")
-        self.assertEqual(candidate.steps[2], "verifier_decision:")
+        self.assertEqual(candidate.steps[0].action, "goal_contract")
+        self.assertEqual(candidate.steps[1].action, "evidence")
+        self.assertEqual(candidate.steps[1].outcome, "test_output")
+        self.assertIn(("passed", "True"), candidate.steps[1].args)
+        self.assertEqual(candidate.steps[2].action, "verifier_decision")
+        self.assertEqual(candidate.steps[2].tool, "v1")  # binds the verifier
+        self.assertEqual(candidate.steps[2].outcome, "pass")
         self.assertEqual(candidate.objective, "Ship the login fix")
 
         # provenance defaults to the last matching event's entry_hash.
@@ -154,12 +159,206 @@ class SkillStoreTest(unittest.TestCase):
         candidate = SkillCandidate(
             skill_id="abc",
             objective="do the thing",
-            steps=("a:1", "b:2"),
+            steps=(
+                SkillStep(action="evidence", outcome="test_output", args=(("passed", "True"),)),
+                SkillStep(action="verifier_decision", tool="v1", outcome="pass"),
+            ),
             provenance="hash",
             attempts=3,
             successes=2,
         )
         self.assertEqual(SkillCandidate.from_dict(candidate.to_dict()), candidate)
+
+    def test_legacy_string_steps_load(self) -> None:
+        # Skills distilled before structured steps stored "event_type:outcome"
+        # strings; from_dict must still load them as SkillStep (back-compat).
+        legacy = {
+            "skill_id": "old",
+            "objective": "legacy",
+            "steps": ["evidence:test_output", "verifier_decision:"],
+        }
+        candidate = SkillCandidate.from_dict(legacy)
+        self.assertEqual(candidate.steps[0], SkillStep(action="evidence", outcome="test_output"))
+        self.assertEqual(candidate.steps[1], SkillStep(action="verifier_decision"))
+
+    def test_distill_binds_artifacts(self) -> None:
+        contract = GoalContract(title="ship", summary="with artifact")
+        self.causality.create_contract(contract)
+        report = self.root / "report.txt"
+        report.write_text("ok", encoding="utf-8")
+        self.causality.record_evidence(
+            contract, EvidenceKind.ARTIFACT_HASH, {"note": "build"}, artifact_paths=[report]
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        step = candidate.steps[-1]
+        self.assertEqual(step.action, "evidence")
+        self.assertEqual(len(step.artifacts), 1)
+        self.assertTrue(step.artifacts[0].startswith(str(report)))
+        self.assertIn("@", step.artifacts[0])  # path@sha256[:12]
+
+    def test_distill_redacts_sensitive_payload(self) -> None:
+        contract = GoalContract(title="ship", summary="with secret")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract, EvidenceKind.TOOL_OUTPUT, {"api_key": "sk-secret-123", "passed": True}
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        step = candidate.steps[-1]
+        self.assertIn(("api_key", "<redacted>"), step.args)
+        # The secret value must not survive anywhere in the serialized skill.
+        self.assertNotIn("sk-secret-123", json.dumps(candidate.to_dict()))
+
+    def test_distill_redacts_secret_shaped_value_under_benign_key(self) -> None:
+        # Security hardening: a secret in value position under a benign key must
+        # still be masked before it enters the shared skill library.
+        contract = GoalContract(title="ship", summary="benign key, secret value")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract, EvidenceKind.TOOL_OUTPUT, {"output": "auth=sk-ABCDEFGHIJ1234567890 ok"}
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        self.assertIn(("output", "<redacted>"), candidate.steps[-1].args)
+        self.assertNotIn("sk-ABCDEFGHIJ1234567890", json.dumps(candidate.to_dict()))
+
+    def test_distill_redacts_hyphenated_sk_token_and_not_plain_words(self) -> None:
+        # codex r3447999379: current sk- variants (sk-proj-/sk-svcacct-) carry
+        # hyphens; they must redact, while an ordinary word containing "sk-"
+        # ("task-management-system") must NOT be treated as a secret.
+        contract = GoalContract(title="ship", summary="hyphenated token")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"output": "key=sk-proj-AbCdEf0123456789ghIJ done", "module": "task-management-system"},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        args = dict(candidate.steps[-1].args)
+        self.assertEqual(args["output"], "<redacted>")
+        self.assertNotIn("sk-proj-AbCdEf0123456789ghIJ", json.dumps(candidate.to_dict()))
+        self.assertEqual(args["module"], "task-management-system")  # not a false positive
+
+    def test_distill_redacts_secret_in_tool_field(self) -> None:
+        # codex r3448006271: a secret in a command/tool field is extracted into
+        # SkillStep.tool and excluded from args, so it must be redacted there too.
+        contract = GoalContract(title="ship", summary="secret in command")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"command": "curl -H 'Authorization: Bearer sk-ABCDEFGHIJ1234567890'"},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        self.assertEqual(candidate.steps[-1].tool, "<redacted>")
+        self.assertNotIn("sk-ABCDEFGHIJ1234567890", json.dumps(candidate.to_dict()))
+
+    def test_distill_redacts_nested_sensitive_fields(self) -> None:
+        # codex r3448014259: a secret under a benign top-level key but a sensitive
+        # NESTED key, or a secret-shaped nested scalar, must be redacted too.
+        contract = GoalContract(title="ship", summary="nested secret")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {
+                "config": {"api_key": "internal-prod-key", "host": "db1"},
+                "blobs": ["sk-ABCDEFGHIJ1234567890", "fine"],
+            },
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        blob = json.dumps(candidate.to_dict())
+        self.assertNotIn("internal-prod-key", blob)          # nested sensitive key
+        self.assertNotIn("sk-ABCDEFGHIJ1234567890", blob)    # nested secret-shaped scalar
+        self.assertIn("db1", blob)                           # benign nested value preserved
+
+    def test_distill_redacts_dict_valued_tool_field(self) -> None:
+        # codex r3448021257: a dict-valued tool/outcome field must get the same
+        # recursive redaction as args, not be flattened to a str that escapes it.
+        contract = GoalContract(title="ship", summary="dict command")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"command": {"api_key": "internal-prod-key", "host": "db1"}},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        blob = json.dumps(candidate.to_dict())
+        self.assertNotIn("internal-prod-key", blob)
+        self.assertIn("db1", blob)
+
+    def test_to_dict_accepts_legacy_string_steps(self) -> None:
+        # codex r3448021259: a candidate built directly with legacy string steps
+        # must still serialize (to_dict) without AttributeError.
+        candidate = SkillCandidate(
+            skill_id="auth", objective="authored", steps=("evidence:test_output", "verifier:")
+        )
+        as_dict = candidate.to_dict()
+        self.assertEqual(as_dict["steps"][0], {"action": "evidence", "tool": "", "args": [],
+                                               "artifacts": [], "outcome": "test_output"})
+        # round-trips back through from_dict
+        self.assertEqual(SkillCandidate.from_dict(as_dict).steps[0],
+                         SkillStep(action="evidence", outcome="test_output"))
+
+    def test_distill_redacts_private_key_field(self) -> None:
+        # codex r3448029550: a private_key field (one-line, no PEM header) must be
+        # masked by the key-name filter even without a recognizable token shape.
+        contract = GoalContract(title="ship", summary="private key")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"private_key": "MIIBVAIBADANBgkqOneLineNoPemHeader0123456789", "host": "db1"},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        args = dict(candidate.steps[-1].args)
+        self.assertEqual(args["private_key"], "<redacted>")
+        self.assertNotIn("MIIBVAIBADANBgkqOneLineNoPemHeader0123456789", json.dumps(candidate.to_dict()))
+
+    def test_distill_redacts_opaque_bearer_token(self) -> None:
+        # codex r3448037072: an opaque Authorization bearer token (no sk-/ghp-
+        # shape) in a command value must be masked too.
+        contract = GoalContract(title="ship", summary="bearer token")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"command": "curl -H 'Authorization: Bearer abcdefGHIJ0123456789xyz'"},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        self.assertEqual(candidate.steps[-1].tool, "<redacted>")
+        self.assertNotIn("abcdefGHIJ0123456789xyz", json.dumps(candidate.to_dict()))
+
+    def test_distill_redacts_spaced_key_name(self) -> None:
+        # codex r3448043933: a spaced human-readable secret key name ("api key")
+        # must be redacted like its snake/kebab forms.
+        contract = GoalContract(title="ship", summary="spaced key name")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract, EvidenceKind.TOOL_OUTPUT, {"api key": "internal-prod-key", "host": "db1"}
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        args = dict(candidate.steps[-1].args)
+        self.assertEqual(args["api key"], "<redacted>")
+        self.assertNotIn("internal-prod-key", json.dumps(candidate.to_dict()))
+
+    def test_distill_truncates_long_value(self) -> None:
+        contract = GoalContract(title="ship", summary="with long value")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract, EvidenceKind.TOOL_OUTPUT, {"blob": "x" * 500}
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        blob = dict(candidate.steps[-1].args)["blob"]
+        self.assertLessEqual(len(blob), 80)
+        self.assertTrue(blob.endswith("..."))
+
+    def test_promote_rejects_near_duplicate_authored(self) -> None:
+        candidate = self._ready_candidate()  # objective "Ship the login fix"
+        with self.assertRaises(SkillPromotionError):
+            self.store.promote(
+                candidate.skill_id,
+                approved_by="alice",
+                authored_names=("ship login fix",),  # reworded near-duplicate
+            )
 
     def test_promoted_empty_when_absent(self) -> None:
         self.assertEqual(self.store.promoted(), [])
