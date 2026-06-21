@@ -107,6 +107,31 @@ class ClassifyTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertEqual(self.harness.classify(phrase), TaskType.TRIVIAL)
 
+    def test_sensitive_unmatched_is_governed_not_trivial(self) -> None:
+        # P2: risky work with no task keyword must not fall to TRIVIAL (which
+        # bypasses the contract gates); it routes to a governed type instead.
+        for phrase in (
+            "clean up the payment module",
+            "wipe the production database",
+            "rotate the access token",
+            "revoke her access",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.harness.classify(phrase), TaskType.IMPLEMENTATION)
+
+    def test_benign_unmatched_stays_trivial(self) -> None:
+        # Genuinely trivial, non-sensitive text is still answered directly.
+        for phrase in ("say hello", "what is the weather", "summarize this note"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.harness.classify(phrase), TaskType.TRIVIAL)
+
+    def test_default_can_govern_all_unmatched(self) -> None:
+        # A strict caller can govern even benign unmatched text via default=.
+        self.assertEqual(
+            self.harness.classify("say hello", default=TaskType.IMPLEMENTATION),
+            TaskType.IMPLEMENTATION,
+        )
+
     def test_keyword_inside_unrelated_word_does_not_misroute(self) -> None:
         # codex review r3382219473: a keyword must not match inside an unrelated
         # word ("test" inside "latest"/"contest"/"protest").
