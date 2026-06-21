@@ -115,6 +115,9 @@ class ClassifyTests(unittest.TestCase):
             "wipe the production database",
             "rotate the access token",
             "rotate the API key",  # spaced form must match too
+            "rotate the ssh key",  # non-API key-rotation forms must match too
+            "replace the private key",
+            "change the access key",
             "revoke her access",
         ):
             with self.subTest(phrase=phrase):
