@@ -367,6 +367,83 @@ class LedgerTests(unittest.TestCase):
 
             self.assertFalse(ledger.verify_chain())
 
+    def test_rotate_seals_and_preserves_chain_across_seam(self) -> None:
+        # Rotation seals the current segment into <path>.1 and starts a fresh one;
+        # the hash chain continues across the seam (ADR 0011 §3).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            ledger.append(AuditEventType.EVIDENCE, {"n": 2})
+            sealed_tail = ledger.append(AuditEventType.VERIFIER_DECISION, {"n": 3})
+
+            archive = ledger.rotate()
+            self.assertEqual(archive, Path(str(path) + ".1"))
+            self.assertTrue(archive.exists())
+            self.assertFalse(path.exists())  # current segment sealed away
+
+            self.assertEqual(ledger.events(), [])  # current segment is empty
+            self.assertEqual(len(ledger.events(all_segments=True)), 3)
+            self.assertEqual(ledger.latest_hash(), sealed_tail.entry_hash)  # carry-over
+
+            # New appends chain across the seam onto the sealed tail.
+            e4 = ledger.append(AuditEventType.EVIDENCE, {"n": 4})
+            self.assertEqual(e4.previous_hash, sealed_tail.entry_hash)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 5})
+            self.assertEqual(len(ledger.events()), 2)                    # current only
+            self.assertEqual(len(ledger.events(all_segments=True)), 5)   # whole chain
+            self.assertTrue(ledger.verify_chain())                       # verifies the seam
+
+    def test_rotate_chain_survives_fresh_instance(self) -> None:
+        # The carry-over is persisted, so a brand-new instance on the same path
+        # continues the chain rather than forking a new genesis.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            last = ledger.append(AuditEventType.EVIDENCE, {"n": 2})
+            ledger.rotate()
+
+            fresh = EvidenceLedger(path)
+            self.assertEqual(fresh.latest_hash(), last.entry_hash)
+            third = fresh.append(AuditEventType.EVIDENCE, {"n": 3})
+            self.assertEqual(third.previous_hash, last.entry_hash)
+            self.assertTrue(fresh.verify_chain())
+            self.assertEqual(len(fresh.events(all_segments=True)), 3)
+
+    def test_rotate_empty_ledger_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            self.assertIsNone(ledger.rotate())
+
+    def test_verify_chain_detects_tampered_archive(self) -> None:
+        # A same-length in-place edit to a SEALED archive must fail the full
+        # chain verification (the seam + archive content are checked).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"k": "zzzzz"})
+            ledger.append(AuditEventType.EVIDENCE, {"k": "yyyyy"})
+            archive = ledger.rotate()
+            ledger.append(AuditEventType.EVIDENCE, {"k": "after"})
+            self.assertTrue(ledger.verify_chain())
+
+            raw = archive.read_text(encoding="utf-8")
+            self.assertIn("zzzzz", raw)
+            archive.write_text(raw.replace("zzzzz", "wwwww"), encoding="utf-8")
+            self.assertFalse(ledger.verify_chain())
+
+    def test_maybe_rotate_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            size = path.stat().st_size
+            self.assertIsNone(ledger.maybe_rotate(max_bytes=size + 1000))  # below -> no-op
+            self.assertTrue(path.exists())
+            self.assertIsNotNone(ledger.maybe_rotate(max_bytes=size))  # at/over -> rotates
+            self.assertFalse(path.exists())
+
     def test_tail_zero_returns_empty(self) -> None:
         # Regression H5: tail(0) used to be events()[-0:] == the whole ledger.
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -436,8 +436,8 @@
         </tr>
         <tr>
           <td>ledger 스케일</td>
-          <td>현재 규모에서는 read cache로 충분하다. rotation, archival, persistent offset index는 아직 과설계일 수 있다.</td>
-          <td>ledger 크기 임계값, rotation 정책, `.idx` 도입 기준을 측정 기반으로 결정.</td>
+          <td>opt-in rotation/archival이 들어왔다 — <code>rotate()</code>/<code>maybe_rotate()</code>가 거대 ledger를 archive segment로 봉인하고 체인은 seam을 넘어 <code>verify_chain()</code>으로 검증된다. persistent offset index(<code>.idx</code>)만 규모 트리거까지 보류.</td>
+          <td><code>.idx</code> 도입 기준을 측정 기반으로 결정(현재는 read cache + rotation으로 충분).</td>
         </tr>
         <tr>
           <td>문서 소스 정합성</td>

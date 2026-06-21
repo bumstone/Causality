@@ -3,13 +3,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from uuid import uuid4
 
 from .contracts import AuditEventType, utc_now
-from .durable import DurableJsonl, file_lock
+from .durable import DurableJsonl, file_lock, write_text_durably
 
 
 def _stable_json(value: Any) -> str:
@@ -176,7 +177,17 @@ class EvidenceLedger:
             artifacts=copy.deepcopy(event.artifacts),
         )
 
-    def events(self) -> list[LedgerEvent]:
+    def events(self, *, all_segments: bool = False) -> list[LedgerEvent]:
+        """Current segment's events; ``all_segments`` prepends sealed archives.
+
+        After :meth:`rotate`, the recent history lives in the current segment and
+        older history in ``<path>.1``, ``<path>.2``, ... ``all_segments=True``
+        returns the full chain in order across them.
+        """
+        if all_segments:
+            archived = self._archived_events()
+            if archived:
+                return [self._isolate(event) for event in archived + self._load_events()]
         return [self._isolate(event) for event in self._load_events()]
 
     def find(
@@ -214,9 +225,13 @@ class EvidenceLedger:
             # either -- otherwise a same-length repair+append could serve a stale
             # anchor and fork the chain (codex r3445819560).
             lines, torn = self._store.read_lines_with_torn()
-            self._cached_latest_hash = (
-                json.loads(lines[-1]).get("entry_hash") if lines else None
-            )
+            if lines:
+                self._cached_latest_hash = json.loads(lines[-1]).get("entry_hash")
+            else:
+                # Empty current segment: chain onto the carry-over tail from a
+                # prior rotation (if any), so the chain continues across the seam
+                # instead of forking a new genesis (ADR 0011 R4f rotation).
+                self._cached_latest_hash = self._carry_over_head()
             self._synced_size = -1 if torn else size
         return self._cached_latest_hash
 
@@ -252,25 +267,101 @@ class EvidenceLedger:
         # A same-length in-place edit (e.g. flipping a payload byte without
         # fixing entry_hash) leaves the file size unchanged, so a cached scan
         # would still pass; re-parsing the persisted bytes catches it (codex
-        # r3445873874).
+        # r3445873874). Across rotation, verify the WHOLE chain (sealed archive
+        # segments + the current one) -- the only correct integrity check, since
+        # the current segment alone is not a standalone chain after a rotation:
+        # its first entry's previous_hash points at the sealed tail. So the seam
+        # is checked, and a tampered archive fails verification too.
         previous_hash = None
-        for line in self._store.read_lines():
-            event = LedgerEvent(**json.loads(line))
-            entry = {
-                "event_id": event.event_id,
-                "timestamp": event.timestamp,
-                "event_type": event.event_type,
-                "contract_id": event.contract_id,
-                "payload": event.payload,
-                "artifacts": event.artifacts,
-                "previous_hash": event.previous_hash,
-            }
-            if event.previous_hash != previous_hash:
-                return False
-            if sha256_text(_stable_json(entry)) != event.entry_hash:
-                return False
-            previous_hash = event.entry_hash
+        for segment in self._archive_segments() + [self.path]:
+            for line in DurableJsonl(segment).read_lines():
+                event = LedgerEvent(**json.loads(line))
+                entry = {
+                    "event_id": event.event_id,
+                    "timestamp": event.timestamp,
+                    "event_type": event.event_type,
+                    "contract_id": event.contract_id,
+                    "payload": event.payload,
+                    "artifacts": event.artifacts,
+                    "previous_hash": event.previous_hash,
+                }
+                if event.previous_hash != previous_hash:
+                    return False
+                if sha256_text(_stable_json(entry)) != event.entry_hash:
+                    return False
+                previous_hash = event.entry_hash
         return True
+
+    # --- Rotation (ADR 0011 §3): seal a large ledger into archive segments while
+    # keeping the hash chain verifiable across the seam. The mechanism is opt-in
+    # (callers decide the policy via rotate()/maybe_rotate()); append() is
+    # unchanged, so a non-rotating deployment pays nothing.
+
+    def _head_path(self) -> Path:
+        return Path(str(self.path) + ".head")
+
+    def _carry_over_head(self) -> str | None:
+        """The sealed tail hash a fresh current segment must chain onto."""
+        try:
+            text = self._head_path().read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None
+        return text or None
+
+    def _archive_segments(self) -> list[Path]:
+        """Sealed archives ``<path>.1``, ``<path>.2``, ... in chain order."""
+        segments: list[Path] = []
+        sequence = 1
+        while True:
+            segment = self.path.parent / f"{self.path.name}.{sequence}"
+            if not segment.exists():
+                break
+            segments.append(segment)
+            sequence += 1
+        return segments
+
+    def _archived_events(self) -> list[LedgerEvent]:
+        events: list[LedgerEvent] = []
+        for segment in self._archive_segments():
+            events.extend(
+                LedgerEvent(**json.loads(line)) for line in DurableJsonl(segment).read_lines()
+            )
+        return events
+
+    def _reset_caches(self) -> None:
+        self._cached_latest_hash = None
+        self._synced_size = -1
+        self._cached_events = None
+        self._events_synced_size = -1
+
+    def rotate(self) -> Path | None:
+        """Seal the current ledger into an archive segment and start a fresh one.
+
+        The chain continues across the seam: the current tail hash is persisted to
+        a ``<path>.head`` sidecar so the next append (even from a fresh instance)
+        chains onto the sealed segment's last entry, and
+        ``verify_chain(all_segments=True)`` checks the whole chain. Returns the
+        archive path, or ``None`` if the ledger is empty (nothing to seal).
+        """
+        with file_lock(self.path):
+            tail = self.latest_hash()
+            if tail is None:
+                return None
+            sequence = len(self._archive_segments()) + 1
+            archive = self.path.parent / f"{self.path.name}.{sequence}"
+            os.replace(self.path, archive)
+            # Persist the carry-over BEFORE returning so a crash right after the
+            # rename cannot lose the chain anchor (the next append would otherwise
+            # start a new genesis and fork the chain).
+            write_text_durably(self._head_path(), tail + "\n", lock=False)
+            self._reset_caches()
+        return archive
+
+    def maybe_rotate(self, *, max_bytes: int) -> Path | None:
+        """Rotate when the current segment is at/over ``max_bytes``; else no-op."""
+        if max_bytes > 0 and self._current_size() >= max_bytes:
+            return self.rotate()
+        return None
 
     def tail(self, limit: int = 5) -> list[dict[str, Any]]:
         # [-0:] would return the whole list, dumping the full ledger when a
