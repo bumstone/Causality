@@ -64,6 +64,20 @@ class GateTests(unittest.TestCase):
             )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 
+    def test_blank_evidence_ref_is_not_substantive(self) -> None:
+        # codex r3447999380: a placeholder evidence_refs=("",) with no rationale
+        # is not a real citation -- it must not count, even under require_evidence.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(GoalContract("Blank", "blank refs"))
+            runtime.record_verifier(contract, VerifierDecision("v1", "pass", "", evidence_refs=("",)))
+            runtime.record_verifier(contract, VerifierDecision("v2", "pass", "", evidence_refs=("  ",)))
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
+            self.assertEqual(
+                runtime.gate.complete(contract, require_evidence=True).decision,
+                GateDecision.REPAIR,
+            )
+
     def test_require_evidence_rejects_rationale_only_passes(self) -> None:
         # P2: the strict bar demands an evidence_ref -- prose alone no longer counts.
         with tempfile.TemporaryDirectory() as temp_dir:

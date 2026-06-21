@@ -220,6 +220,23 @@ class SkillStoreTest(unittest.TestCase):
         self.assertIn(("output", "<redacted>"), candidate.steps[-1].args)
         self.assertNotIn("sk-ABCDEFGHIJ1234567890", json.dumps(candidate.to_dict()))
 
+    def test_distill_redacts_hyphenated_sk_token_and_not_plain_words(self) -> None:
+        # codex r3447999379: current sk- variants (sk-proj-/sk-svcacct-) carry
+        # hyphens; they must redact, while an ordinary word containing "sk-"
+        # ("task-management-system") must NOT be treated as a secret.
+        contract = GoalContract(title="ship", summary="hyphenated token")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"output": "key=sk-proj-AbCdEf0123456789ghIJ done", "module": "task-management-system"},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        args = dict(candidate.steps[-1].args)
+        self.assertEqual(args["output"], "<redacted>")
+        self.assertNotIn("sk-proj-AbCdEf0123456789ghIJ", json.dumps(candidate.to_dict()))
+        self.assertEqual(args["module"], "task-management-system")  # not a false positive
+
     def test_distill_truncates_long_value(self) -> None:
         contract = GoalContract(title="ship", summary="with long value")
         self.causality.create_contract(contract)

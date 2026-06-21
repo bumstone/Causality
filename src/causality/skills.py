@@ -62,13 +62,16 @@ _SENSITIVE_KEY = re.compile(
 )
 # Well-known secret *shapes* redacted even under a benign key, since key-name
 # matching alone misses a secret in value position (e.g. {"output": "sk-..."}).
+# Token bodies allow ``-``/``_`` so current variants (sk-proj-..., sk-svcacct-...)
+# are caught; each token alternative carries its own \b so an embedded prefix in
+# an ordinary word (e.g. "task-management-system") does not false-positive.
 _SECRET_VALUE = re.compile(
-    r"sk-[A-Za-z0-9]{16,}"
-    r"|gh[opsu]_[A-Za-z0-9]{20,}"
-    r"|AKIA[0-9A-Z]{12,}"
-    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
-    r"|AIza[0-9A-Za-z_-]{20,}"
-    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r"\bsk-[A-Za-z0-9_-]{16,}"
+    r"|\bgh[opsu]_[A-Za-z0-9]{20,}"
+    r"|\bAKIA[0-9A-Z]{12,}"
+    r"|\bxox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|\bAIza[0-9A-Za-z_-]{20,}"
+    r"|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
 )
 # Bulky/non-procedural fields dropped so a step stays a compact recipe, not a dump.
