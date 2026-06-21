@@ -1,511 +1,142 @@
-**English** | [한국어](README.ko.md)
+**English** | [Korean](README.ko.md)
 
 # Causality
 
-Causality is a local-first, dependency-light agent workflow kit for Claude,
-Codex, and agent-driven projects. It blends Causality-native contracts,
-workflow discipline, and browser QA into one human-in-the-loop control surface:
+Causality is a local-first control harness for agent-driven work. It binds an
+agent run to a goal contract, enforces gates before risky work, records evidence
+in an append-only ledger, and feeds verified outcomes back into memory and skill
+reuse.
 
-- **Causality contracts** — goal contracts, an append-only evidence ledger, state
-  transitions, plugin contracts, and HITL gates.
-- **Superpowers** — planning, test-driven development, root-cause debugging,
-  verification-before-completion, and slash-command ergonomics.
-- **gstack** — browser discipline: compact accessibility (A11y) snapshots,
-  stable refs, action diffs, and evidence-first QA.
+The short version: Causality is not a chat prompt pack. It is a small Python
+runtime for making agent work auditable.
 
-The implementation is standalone. It does not vendor upstream project source;
-the upstream projects are MIT-licensed and credited in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). It targets **Python >= 3.11**
-and uses the **standard library only** (no runtime dependencies).
+## Current Status
 
----
+As of `2026-06-21`, `main` includes PR #29 (`6c239e0`) and the suite is `231`
+tests green.
+
+- Core control loop: implemented.
+- Plan/action/tool/non-goal gates: enforced through `run_task`,
+  `ExecutionAdapter`, and the file/subprocess `ToolAdapter`.
+- Failure feedback: scoped failures can be approved into later `non_goals` and
+  expire by TTL.
+- Skill reuse: promoted earned skills are recalled by objective relevance and
+  surfaced to execution.
+- Verifier quality: hollow passes and blank evidence refs no longer satisfy the
+  completion quorum.
+- Secret safety: skill distillation redacts sensitive keys, nested structures,
+  common token shapes, and bearer/basic authorization values.
+
+Do not read this as “the product is finished.” Remaining work is operational:
+broader end-to-end scenario evidence, API/browser playbooks, repository
+automation setup, and scale policy for ledger rotation/indexing.
+
+Canonical references:
+
+- [Project Summary](docs/project-summary.md) — compact architecture and status.
+- [Status Dashboard](docs/status/roadmap.html) — visual state board.
+- [ADR Index](docs/adr/README.md) — design decision history.
 
 ## Architecture
 
-The design corpus (see [docs/adr/](docs/adr/)) converges on a **five-layer
-blended architecture** ([ADR 0006](docs/adr/0006-final-blended-architecture.md)).
-Each layer has a single responsibility and talks only to its neighbours. Top to
-bottom is the **control flow**; bottom to top is the **evolution (distill)
-feedback loop**.
+Causality separates the run into five layers:
 
-> **At a glance:** `Agenda → Dispatch → Contract → Execute (gates) → Ledger → distill ↩`
+1. **L0 Identity and Memory** — agenda, scoped memory, authored and earned
+   skills.
+2. **L1 Dispatch** — task-type routing with fail-safe handling for sensitive
+   unmatched requests.
+3. **L2 Contract** — frozen task contract: objective, non-goals, tools,
+   verification, stop condition, escalation.
+4. **L3 Execution Control** — plan/action/completion gates, bounded loop,
+   review and verifier decisions.
+5. **L4 Evidence Ledger** — hash-chained JSONL evidence with durable writes and
+   size-guarded read caches.
 
-![Causality five-layer architecture: control flows down L0→L4, the distill feedback loop flows back up](docs/assets/architecture.svg)
+Control flows L0 → L4. Reflection flows back from ledger evidence into memory
+and skills.
 
-<details>
-<summary>Diagram source (Mermaid — renders on github.com web; shown as code elsewhere)</summary>
+## What It Installs
 
-```mermaid
-flowchart TD
-    subgraph L0["L0 - Identity and Memory Substrate"]
-        ID["Agent Identity<br/>role-scoped permissions and memory view"]
-        MEM["Typed Memory + Agenda + Skill Library"]
-    end
-    subgraph L1["L1 - Dispatch / Agent Harness"]
-        DISP["Task-type router<br/>picks ONE playbook"]
-    end
-    subgraph L2["L2 - Contract Harness"]
-        CH["Freeze Task Contract<br/>objective, non-goals, tools,<br/>verification, stop, escalation"]
-    end
-    subgraph L3["L3 - Execution Control"]
-        SD["Stage Designer"] --> PL["Planner"] --> EX["Executor"]
-    end
-    subgraph L4["L4 - Evidence Ledger"]
-        LED["Append-only JSONL<br/>hash-chained, artifact hashes"]
-    end
+`causality install-agent` installs thin project-level agent files:
 
-    L0 -->|"select next task, inject scoped memory/skill"| L1
-    L1 -->|"chosen playbook + identity"| L2
-    L2 -->|"frozen contract"| L3
-    L3 -->|"all events"| L4
+- `AGENTS.md` for Codex routing.
+- `CLAUDE.md` and `.claude/commands/*` for Claude command ergonomics.
+- `.causality/agent-rules.md`, workflow manifest, MCP config, and a local
+  ledger.
+- `workflow/`, `checklists/`, `skills/`, and `memory/` README stubs for
+  on-demand context.
 
-    PL -. "plan gate" .-> EX
-    EX -. "action gate / completion gate" .-> LED
+Generated workflow files are views of `src/causality/workflows.py`. Avoid
+hand-editing generated views unless you are intentionally customizing a local
+project install.
 
-    L4 -.->|"distill: failures to guardrails, success to skills"| L0
-```
+## Install
 
-</details>
-
-**Gate placement (L3):** the `Planner` output is checked by the **plan gate**
-(`evaluate_plan`); each side-effecting step is checked by the **action gate**
-(`can_execute_action`); and a claim of "done" is checked by the **completion
-gate** (`complete`). High-risk and irreversible work escalates to a human.
-
-> The control flow (L0 to L4) and the bottom-up **distill** write-path are
-> implemented as a `CausalityEngine` happy path. The fully enforced service loop
-> is still partial: plan/action/tool/non-goal gates are not forced before the
-> `work` callback, failures are not yet injected into later `non_goals`, TTL
-> expiry filtering exists in memory but the run loop does not yet apply it, and
-> earned skills are not automatically reused at dispatch. See [Self-improvement loop](#self-improvement-loop),
-> [Status](#status-adrs), and the [2026-06-13 code review](docs/code-review-2026-06-13.md).
-
----
-
-## Operating-rule workflow
-
-When a task arrives, the Agent Harness (L1) selects exactly **one** playbook by
-task type, the Contract Harness (L2) freezes a Task Contract, execution runs
-through the three-layer control stack with HITL gates (L3), and every event is
-appended to the ledger (L4).
-
-![Operating-rule workflow: task type routes to one playbook, the contract is frozen, execution runs through HITL gates, evidence lands in the ledger](docs/assets/workflow.svg)
-
-<details>
-<summary>Diagram source (Mermaid)</summary>
-
-```mermaid
-flowchart TD
-    T["Task arrives"] --> R{"Task type?"}
-    R -->|planning| P1["gstack office-hours + ceo-review"]
-    R -->|implementation| P2["Superpowers TDD + debug"]
-    R -->|long-running| P3["Contract Harness + limited Causality loop"]
-    R -->|release| P4["gstack ship + QA"]
-
-    P1 --> BIND["Contract Harness binds Task Contract"]
-    P2 --> BIND
-    P3 --> BIND
-    P4 --> BIND
-
-    BIND --> EXEC["3-layer execution with HITL gates"]
-    EXEC --> G{"Gate decision"}
-    G -->|pass| LEDGER["Append evidence to ledger"]
-    G -->|repair| EXEC
-    G -->|escalate / stop| HUMAN["Human review"]
-    HUMAN --> LEDGER
-    LEDGER --> DONE["Completion gate"]
-```
-
-</details>
-
-### Context Economy
-
-Keep **always-loaded** context minimal
-([ADR 0007](docs/adr/0007-context-economy-progressive-disclosure.md)). Long
-workflows, checklists, role descriptions, and templates are stored as files and
-read **on demand**:
-
-- **Always load only:** the thin rules + routing file, the active Task Contract,
-  and the ledger tail.
-- After the task type is fixed: read only `workflow/<type>.md`.
-- Load a skill only when matched: `skills/<name>.md` (authored takes precedence
-  over earned).
-- At verification: read only `checklists/<type>.md`.
-- Retrieve only scoped memory for the current task — never the whole `memory/`.
-- On completion: append only a typed summary to `memory/<type>/`.
-
----
-
-## Self-improvement loop
-
-The loop has two halves: **Run to Review to Fix**, and **Reflect to Skill
-update** ([ADR 0006 §6](docs/adr/0006-final-blended-architecture.md)). The
-primitives and happy-path wiring exist, but several enforcement/read-path pieces
-remain partial.
-
-![Self-improvement loop: Run → Review → Fix (solid) and Reflect → Skill update (dashed), with partial enforcement/read-path gaps](docs/assets/loop.svg)
-
-<details>
-<summary>Diagram source (Mermaid)</summary>
-
-```mermaid
-flowchart LR
-    RUN["Run<br/>(partial enforcement)"] --> REVIEW["Review<br/>(implemented)"]
-    REVIEW --> FIX["Fix<br/>(implemented)"]
-    FIX --> RUN
-    RUN -.-> REFLECT["Reflect<br/>(implemented)"]
-    REFLECT -.-> SKILL["Skill update<br/>(partial reuse)"]
-    SKILL -.-> RUN
-```
-
-</details>
-
-| Step | Status | Notes |
-|---|---|---|
-| Run | Partial | Ledger append and `work` callback execution exist, but plan/action/tool/non-goal gates are not yet forced before `work`. |
-| Review | Implemented | `run_review` calls N independent verifiers, records each, and aggregates the ≥2-pass / no-critical-failure rule. |
-| Fix | Implemented | `run_bounded_loop` consumes `GateDecision.REPAIR` and replans, bounded by `should_stop`. |
-| Reflect | Implemented | `reflect_on_contract` distills the ledger trail into typed `retrospectives` + `failures` (contract-scoped provenance). |
-| Skill update | Partial | `SkillStore`: distill → n-of-m reproducibility → authored dedup → HITL promotion exists; automatic *reuse* at dispatch is not yet implemented. |
-
----
-
-## Task Contract
-
-A `TaskContract` is an **immutable, derived view** of a `GoalContract` — not a
-new goal specification ([ADR 0001](docs/adr/0001-task-contract-as-binding-rules.md)).
-It is `frozen` and produced once by the Contract Harness. The single net-new
-data field is `non_goals`, which **narrows** scope (a hard boundary) rather than
-widening the binding obligation.
-
-The six clauses:
-
-| Clause | Source | Meaning |
-|---|---|---|
-| **Objective** | `title` + `summary` | The single goal. No expansion. |
-| **Non-goals** | `non_goals` | Explicit out-of-scope boundary; a match stops the action. |
-| **Allowed tools** | `permissions.allowed_tools` | A declared tool list; a tool outside it escalates. |
-| **Verification** | required `evidence_required` | Evidence that must prove the work. |
-| **Stop condition** | `stopping_policy` | When to stop: iterations, no-progress, failed hypotheses. |
-| **Escalation** | derived view of gate behaviour | High-risk / irreversible triggers that route to a human. |
-
-The Contract Harness (`ContractHarness.bind`) runs a five-step pre-run ritual
-(objective, non-goals, allowed tools, verification, stop condition), records the
-contract exactly once as a single `GOAL_CONTRACT` ledger event, and returns the
-frozen `TaskContract`.
-
----
-
-## Memory governance
-
-Long-term memory is split into **six typed stores**
-([ADR 0005](docs/adr/0005-identity-memory-skill-substrate.md)):
-
-| Store | Holds |
-|---|---|
-| `decisions` | Confirmed decisions (only after the promotion gate). |
-| `assumptions` | Tentative assumptions, subject to TTL; not planning premises. |
-| `failures` | Failure cases; guardrail candidates that expire (no ratchet). |
-| `playbooks` | Reusable procedures; earned-skill candidates. |
-| `snippets` | Code/command snippets, each with a source ref. |
-| `retrospectives` | Retrospectives; label assumptions vs decisions explicitly. |
-
-`assumptions` are kept **separate** from `decisions` to prevent memory
-pollution: an unverified guess must never masquerade as confirmed knowledge.
-An assumption only becomes a decision through a **promotion gate** backed by
-confirming evidence.
-
-![Memory governance: an assumption becomes a decision only through the evidence-backed promotion gate; six typed stores](docs/assets/memory.svg)
-
-<details>
-<summary>Diagram source (Mermaid)</summary>
-
-```mermaid
-flowchart LR
-    A["assumption"] -->|"promotion gate (evidence)"| D["decision"]
-```
-
-</details>
-
----
-
-## Status (ADRs)
-
-Pulled from [docs/adr/README.md](docs/adr/README.md).
-
-| ADR | Title | Status |
-|---|---|---|
-| [0001](docs/adr/0001-task-contract-as-binding-rules.md) | Task Contract as binding rules | **Accepted / Implemented** |
-| [0002](docs/adr/0002-three-layer-control-stack.md) | Three-layer control stack | **Accepted / Partial** |
-| [0003](docs/adr/0003-contract-harness.md) | Contract Harness | **Accepted / Implemented** |
-| [0004](docs/adr/0004-agent-harness-task-routing.md) | Agent Harness task routing | **Accepted / Implemented** |
-| [0005](docs/adr/0005-identity-memory-skill-substrate.md) | Identity / memory / skill substrate | **Accepted / Implemented** |
-| [0006](docs/adr/0006-final-blended-architecture.md) | Final blended (5-layer) architecture | **Accepted / Partial** |
-| [0007](docs/adr/0007-context-economy-progressive-disclosure.md) | Context Economy / progressive disclosure | **Accepted / Partial** |
-| [0008](docs/adr/0008-repository-hygiene-shared-vs-ignored.md) | Repository hygiene: shared vs ignored | **Accepted / Implemented** |
-| [0009](docs/adr/0009-review-change-budget.md) | Reviewable change budget (≤1000-line review) | **Accepted / Implemented** |
-| [0010](docs/adr/0010-caveman-doc-budget.md) | Caveman doc budget (≤2000 chars) | **Accepted / Implemented** |
-
-The core ADR 0001–0008 implementation slices are merged, and `CausalityEngine`
-wires the happy path from Agenda → Dispatch → Harness → Loop → Review → Reflect
-→ Skill candidate into `run_task` / `run_next`. Be precise, though: the service
-is not yet a fully enforced closed loop. `run_task` indirectly consumes
-`should_stop` and `complete`, but it does not yet force the plan/action/tool/
-non-goal gates before the `work` callback. Reflect writes failures, but later
-contracts do not yet read them back into `non_goals`; TTL expiry filtering
-(`entries(active_only)`/`sweep`/`revoke`) is implemented in memory but the run
-loop does not yet apply it; promoted earned skills are not automatically reused at
-dispatch; ledger/memory/skills/agenda writes are not yet lock/fsync/atomic-rename
-durable; and the ledger has no contract/event index. See
-[2026-06-13 code review](docs/code-review-2026-06-13.md) for the priority order.
-
----
-
-## What gets installed into a new project
-
-Install the package, then run the installer once in a target project:
-
-```bash
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -e .
+python -m unittest discover -s tests
+```
+
+Windows one-command local checkout:
+
+```powershell
+git clone https://github.com/bumstone/Causality.git D:\dev\Causality
+cd D:\dev\Causality
+.\scripts\install.ps1
+```
+
+Linux/WSL:
+
+```bash
+git clone https://github.com/bumstone/Causality.git ~/dev/Causality
+cd ~/dev/Causality
+bash scripts/install.sh
+```
+
+## CLI
+
+```powershell
+causality init
+causality context --pretty
+causality manifest --pretty
 causality install-agent
+causality review-plan
+causality doc-budget --enforce docs/project-summary.md
 ```
 
-It writes:
+For MCP-style clients:
 
-```text
-AGENTS.md                                  # Codex execution entry point
-CLAUDE.md                                  # Claude instructions
-.codex/causality-routing.md                # Codex routing context
-.claude/commands/causality-plan.md
-.claude/commands/causality-verify.md
-.claude/commands/causality-root-cause.md
-.claude/commands/causality-a11y-observe.md
-.claude/commands/causality-complete.md
-.causality/agent-rules.md                  # thin rules + routing
-.causality/causality-workflows.json        # workflow manifest
-.causality/mcp.json                        # MCP server config
-.causality/ledger.jsonl                    # append-only evidence ledger
-workflow/README.md + workflow/<type>.md    # generated views of workflows.py
-checklists/README.md + verification-before-completion.md
-skills/README.md                           # authored + earned skills
-memory/README.md
-memory/{decisions,assumptions,failures,playbooks,snippets,retrospectives}/README.md
-```
-
-Existing files are skipped by default. Use `--force` only when you intend to
-replace existing project instructions.
-
----
-
-## CLI usage
-
-```bash
-causality init            # create a ledger and workflow manifest
-causality manifest        # print the workflow manifest (add --pretty)
-causality context         # print ledger tail + workflow names (--pretty, --limit N)
-causality install-agent   # install project-level agent automation (--project, --force)
-```
-
-### Claude and Codex usage
-
-Claude can use the installed project slash commands:
-
-```text
-/causality-plan
-/causality-verify
-/causality-root-cause
-/causality-a11y-observe
-/causality-complete
-```
-
-Codex uses `AGENTS.md`, `.codex/causality-routing.md`, and
-`.causality/agent-rules.md` as automatic routing context:
-
-- planning / spec request -> `causality-plan`
-- implementation or verification request -> `causality-verify`
-- bug / regression request -> `causality-root-cause`
-- browser / UI flow request -> `causality-a11y-observe`
-- "done" / "ship" / final handoff -> `causality-complete`
-
----
-
-## MCP-style tool server
-
-For clients that support project MCP configuration, register the stdio server:
-
-```bash
+```powershell
 python -m causality.mcp_server --project .
 ```
 
-The generated `.causality/mcp.json` contains the same command. Exposed tools:
-
-- `causality_init` — install project-level agent automation files
-- `causality_context` — return ledger tail and workflow names
-- `causality_append_evidence` — append evidence to `.causality/ledger.jsonl`
-- `causality_workflows` — return the workflow manifest
-
----
-
-## Browser / A11y setup
-
-The browser adapter is driver-agnostic. Point it at any CLI that supports
-snapshot/action-style commands via an environment variable:
-
-```bash
-export CAUSALITY_BROWSER_BIN="/path/to/browser-driver"
-```
-
-Page text and snapshots are treated as **untrusted external content** and must
-not be used as an instruction source. Observations use compact A11y snapshots,
-stable refs, and state diffs to keep browser state out of the prompt.
-
-For Playwright accessibility checks in downstream projects:
-
-```bash
-npm install -D @playwright/test @axe-core/playwright
-npx playwright install
-```
-
-Optional CI tools:
-
-```bash
-npm install -D pa11y lighthouse
-```
-
----
-
-## Development and testing
-
-For a personal local checkout with install, update, doctor checks, and optional
-Windows scheduled updates, see [docs/installation.md](docs/installation.md).
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-Run the tests (standard library `unittest`, no extra dependencies):
-
-```bash
-PYTHONPATH=src python -m unittest discover -s tests
-```
-
-Inspect the current project context:
-
-```bash
-causality context --pretty
-```
-
-**CI:** GitHub Actions runs a matrix of Python **3.11 / 3.12 / 3.13** — it
-byte-compiles `src` and `tests`, runs the unit tests, and performs an editable
-install smoke test (see [.github/workflows/ci.yml](.github/workflows/ci.yml)).
-
----
-
-## Core runtime concepts
+## Repository Map
 
 ```text
-GoalContract -> Plan -> HITL plan gate -> Execute (action gate) -> EvidenceLedger
-             -> Verifier pool -> Completion gate -> Repair / Escalate / Stop / Complete
+src/causality/        runtime package
+tests/                regression suite
+docs/project-summary.md
+docs/status/          current status board
+docs/adr/             decision history
+workflow/             generated workflow views
+scripts/              install/update/doctor helpers
 ```
 
-Main modules (under `src/causality/`):
+## Development Rules
 
-- `contracts.py` — `GoalContract`, `TaskContract`, risk classes, permissions,
-  evidence requirements, `non_goals`, and the gate-decision / event enums.
-- `contract_harness.py` — `ContractHarness.bind`, the pre-run binding ritual.
-- `gates.py` — `HITLGate`: `evaluate_plan` / `can_execute_action` / `complete`
-  plus the enforcing `check_tool_allowed` / `check_non_goal` / `should_stop`.
-- `orchestrator.py` — `Causality` facade over the ledger and gates.
-- `ledger.py` — append-only JSONL ledger with hash chaining and artifact hashing.
-- `workflows.py` — workflow templates and the manifest (single source).
-- `browser_adapter.py` — generic A11y snapshot / ref-action / diff adapter.
-- `agent_bootstrap.py` — Claude/Codex project automation installer.
-- `mcp_server.py` — minimal local stdio tool server.
+- Keep runtime behavior covered by tests. Passing tests are regression assets,
+  not disposable scaffolding.
+- Keep current status in one place: `docs/project-summary.md` plus
+  `docs/status/roadmap.html`.
+- Keep ADRs as decision history; do not use ADR index pages as live status
+  dashboards.
+- Generated install artifacts should point to canonical rules instead of
+  duplicating long explanations.
 
----
-
-## Design decisions (ADRs)
-
-Architecture decisions are recorded under [docs/adr/](docs/adr/), each with
-Context, Decision, Alternatives, and Consequences, and cited against the code by
-`file:line`. Start with [0001](docs/adr/0001-task-contract-as-binding-rules.md)
-and [0003](docs/adr/0003-contract-harness.md) for the binding envelope, then
-read [0006](docs/adr/0006-final-blended-architecture.md) for the full five-layer
-picture and [0007](docs/adr/0007-context-economy-progressive-disclosure.md) for
-the operating rule.
-
----
-
-## Repository contents
-
-```text
-.claude/commands/        # Claude project slash commands
-.codex/
-  causality-routing.md   # Codex routing context
-AGENTS.md                # Codex execution entry point
-checklists/              # on-demand verification checklists
-docs/
-  agent_automation.md
-  installation.md
-  causality_integration.md
-  assets/                  # pre-rendered SVG diagrams used by this README
-    architecture.svg
-    workflow.svg
-    loop.svg
-    memory.svg
-  adr/
-    README.md
-    0001-task-contract-as-binding-rules.md
-    0002-three-layer-control-stack.md
-    0003-contract-harness.md
-    0004-agent-harness-task-routing.md
-    0005-identity-memory-skill-substrate.md
-    0006-final-blended-architecture.md
-    0007-context-economy-progressive-disclosure.md
-    0008-repository-hygiene-shared-vs-ignored.md
-examples/
-  goal_contract.json
-memory/                  # typed memory scaffolding
-plugins/
-  causality-workflows/manifest.json
-scripts/                 # local install, update, doctor, scheduler helpers
-skills/                  # authored/earned skill entry point
-src/causality/
-  agent_bootstrap.py
-  browser_adapter.py
-  cli.py
-  contract_harness.py
-  contracts.py
-  gates.py
-  ledger.py
-  mcp_server.py
-  orchestrator.py
-  workflows.py
-tests/
-  test_agent_bootstrap.py
-  test_browser_adapter.py
-  test_contract_harness.py
-  test_contracts.py
-  test_gates.py
-  test_ledger.py
-  test_mcp_server.py
-  test_workflows.py
-workflow/                # generated workflow views
-.github/workflows/ci.yml
-LICENSE
-THIRD_PARTY_NOTICES.md
-pyproject.toml
-```
-
----
-
-## License and attribution
+## License and Attribution
 
 This repository is an original implementation under the [MIT LICENSE](LICENSE).
 It does not vendor upstream source. Referenced upstream projects are credited in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Keep `LICENSE` and
-`THIRD_PARTY_NOTICES.md` in any private or public copy. If you later copy
-substantial upstream source into this project, add that upstream copyright
-notice too. This is an engineering license note, not legal advice.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

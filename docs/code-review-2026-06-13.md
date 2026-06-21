@@ -1,25 +1,26 @@
-# Code Review — 2026-06-13 (정직한 구현 상태)
+# Historical Code Review Snapshot — 2026-06-13
 
-> 최종 갱신 2026-06-20: #11~#22 + R4f 반영. 시각화: `docs/status/roadmap.html`.
+This file is historical context, not the current project status source.
 
-ADR 0001~0011 프리미티브 + `CausalityEngine` 배선 머지됨(196 tests). **P0 실행-강제·환류 + P1 skill 재사용 + R4f read-path 캐시까지 닫힘** — 코어 갭 없음. 상세 로컬본: `docs/_review/`.
+Current status lives in:
 
-## 남은 갭
+- `docs/project-summary.md`
+- `docs/status/roadmap.html`
 
-코어 read-path 갭 없음. 영속 오프셋 인덱스(.idx)는 현 규모 과설계로 보류(ADR 0011 §3).
+## Original Review Role
 
-## ✅ 반영됨
+The 2026-06-13 review tracked the closure of the core loop:
 
-- **P1 earned skill 재사용(이 PR):** `SkillStore.recall(objective, authored=…)`가 objective 관련도로 promoted(earned) 회수, **authored>earned 우선**·재현성 tiebreak. `run_task`가 dispatch 시 회수해 `TaskRun.recalled_skills`로 표면화 + `ExecutionAdapter.recalled_skills`로 work에 주입.
-- **P0-A 집행 게이트(#19):** `run_task`가 루프 전 `evaluate_plan`(+`approve_plan` HITL 훅), action마다 `ExecutionAdapter`로 `check_non_goal`/`check_tool_allowed`/`can_execute_action` 강제.
-- **P0-B failures→non_goals + TTL 집행(#20):** bind 전 `entries("failures", active_only=True)` scoped 유효 failure를 `confirm_guardrails` 승인분만 non_goals로 주입, `failure_scope`/`failure_ttl_days`로 환류·만료.
-- **R4f read-path 캐시(이 PR):** size-guarded parsed-events 캐시로 `events()`/`find()` 재읽기·재파싱 제거(크기 불변 시), `_isolate()` 사본으로 가변 공유 방지. `verify_chain()`은 무결성 검사라 디스크 재파싱 유지.
-- **TTL(#15) · R2 인덱싱(#11) · R4 durable(#13/#14/#17).**
-- **프로세스:** Codex autofix Action(#16), PR ~5분 bounded watch(#18), 예산 ADR0009/0010.
+- execution gates,
+- failure feedback into non-goals,
+- earned-skill reuse,
+- ledger durability and read-path caching,
+- review/doc-budget process rules.
 
-## 순서
-✅P0(게이트 → failures→non_goals/TTL) → ✅P1(skill 재사용) → ✅R4f(read-path 캐시) 완료.
+Those items are now reflected on `main` through PR #29 (`6c239e0`) with `231`
+tests green as of 2026-06-21.
 
-## 문서 표현
-- "전 구현 완료" 대신 **"프리미티브+배선 구현됨"**.
-- 이제 **"P0 실행-강제·환류 + P1 skill 재사용 + R4f read-path 캐시 닫힘; 코어 갭 없음"**.
+## Remaining Meaning
+
+Use this snapshot only to understand how the roadmap evolved. Do not quote its
+old PR ranges, test counts, or partial-status claims as current truth.
