@@ -21,12 +21,12 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from .contracts import GoalContract
 from .durable import DurableJsonl
-from .ledger import EvidenceLedger
+from .ledger import EvidenceLedger, LedgerEvent
 
 
 # Tiny stop set so recall matches on contentful tokens, not glue words.
@@ -44,11 +44,131 @@ def _tokens(text: str) -> frozenset[str]:
     )
 
 
+def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
+    """Token-set Jaccard overlap; 0 when either side is empty."""
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+# A distilled step is shared and persisted, so payload values are redacted and
+# bounded before they enter a reusable skill: a key that looks like a secret is
+# masked and every value is truncated. The ledger still holds the raw payload --
+# this is defense-in-depth so a promoted/shared skill never copies a secret out
+# of the ledger.
+_SENSITIVE_KEY = re.compile(
+    r"secret|token|password|passwd|credential|api[_-]?key|auth|cookie|bearer|session",
+    re.IGNORECASE,
+)
+# Bulky/non-procedural fields dropped so a step stays a compact recipe, not a dump.
+_SKIP_KEYS = frozenset(
+    {"diff", "state_hash", "created_at", "evidence_refs", "rationale", "reasons", "summary"}
+)
+_MAX_VALUE_LEN = 80
+_MAX_ARGS = 6
+_TOOL_KEYS = ("tool", "verifier", "command", "type", "action")
+_OUTCOME_KEYS = ("kind", "status", "decision", "state", "stage")
+
+
+def _redact_value(key: str, value: Any) -> str:
+    """A bounded, secret-safe string for one payload value."""
+    if _SENSITIVE_KEY.search(key):
+        return "<redacted>"
+    text = (
+        json.dumps(value, ensure_ascii=True, sort_keys=True)
+        if isinstance(value, (dict, list))
+        else str(value)
+    )
+    return text if len(text) <= _MAX_VALUE_LEN else text[: _MAX_VALUE_LEN - 3] + "..."
+
+
+def _first_present(payload: Mapping[str, Any], keys: Sequence[str]) -> tuple[str, str]:
+    """First ``(key, str(value))`` whose key is present and truthy in payload."""
+    for key in keys:
+        if payload.get(key) not in (None, ""):
+            return key, str(payload[key])
+    return "", ""
+
+
+def _artifact_id(record: Mapping[str, Any]) -> str:
+    """Stable artifact identity ``path@sha256[:12]`` (or ``path`` if unhashed)."""
+    path = str(record.get("path", ""))
+    digest = record.get("sha256")
+    return f"{path}@{str(digest)[:12]}" if digest else path
+
+
+@dataclass(frozen=True)
+class SkillStep:
+    """One reproducible step of a distilled procedure.
+
+    Richer than the old ``"event_type:kind"`` string: it binds the *tool/command*
+    the step used, its salient *args*, any *artifacts* it produced, and the
+    *outcome* -- so a recalled skill is an actionable recipe, not just a shape.
+    """
+
+    action: str
+    tool: str = ""
+    args: tuple[tuple[str, str], ...] = ()
+    artifacts: tuple[str, ...] = ()
+    outcome: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action,
+            "tool": self.tool,
+            "args": [list(pair) for pair in self.args],
+            "artifacts": list(self.artifacts),
+            "outcome": self.outcome,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "SkillStep":
+        # Back-compat: steps distilled before this change were "event_type:outcome"
+        # strings -- wrap them so existing skill files still load.
+        if isinstance(value, str):
+            action, _, outcome = value.partition(":")
+            return cls(action=action, outcome=outcome)
+        return cls(
+            action=str(value.get("action", "")),
+            tool=str(value.get("tool", "")),
+            args=tuple((str(k), str(v)) for k, v in value.get("args", ())),
+            artifacts=tuple(str(item) for item in value.get("artifacts", ())),
+            outcome=str(value.get("outcome", "")),
+        )
+
+
+def _distill_step(event: LedgerEvent) -> SkillStep:
+    """Build one reproducible :class:`SkillStep` from a ledger event.
+
+    Names the step's tool/command and outcome from the first matching payload
+    key, binds the remaining salient args (redacted + bounded), and records the
+    artifacts the event produced (``path@hash``) so reuse can check the same
+    outputs -- replacing the old ``event_type:kind`` trace.
+    """
+    payload: Mapping[str, Any] = event.payload or {}
+    tool_key, tool = _first_present(payload, _TOOL_KEYS)
+    outcome_key, outcome = _first_present(payload, _OUTCOME_KEYS)
+    consumed = {tool_key, outcome_key} | _SKIP_KEYS
+    args = tuple(
+        (key, _redact_value(key, payload[key]))
+        for key in sorted(payload)
+        if key and key not in consumed and payload[key] is not None
+    )[:_MAX_ARGS]
+    artifacts = tuple(
+        _artifact_id(record)
+        for record in (event.artifacts or ())
+        if isinstance(record, Mapping) and record.get("path")
+    )
+    return SkillStep(
+        action=event.event_type, tool=tool, args=args, artifacts=artifacts, outcome=outcome
+    )
+
+
 @dataclass(frozen=True)
 class SkillCandidate:
     skill_id: str
     objective: str
-    steps: tuple[str, ...]
+    steps: tuple[SkillStep, ...]
     provenance: str | None = None
     attempts: int = 0
     successes: int = 0
@@ -57,7 +177,7 @@ class SkillCandidate:
         return {
             "skill_id": self.skill_id,
             "objective": self.objective,
-            "steps": list(self.steps),
+            "steps": [step.to_dict() for step in self.steps],
             "provenance": self.provenance,
             "attempts": self.attempts,
             "successes": self.successes,
@@ -68,7 +188,7 @@ class SkillCandidate:
         return cls(
             skill_id=value["skill_id"],
             objective=value["objective"],
-            steps=tuple(value.get("steps", ())),
+            steps=tuple(SkillStep.from_dict(step) for step in value.get("steps", ())),
             provenance=value.get("provenance"),
             attempts=int(value.get("attempts", 0)),
             successes=int(value.get("successes", 0)),
@@ -112,11 +232,7 @@ class SkillStore:
             raise SkillPromotionError(
                 f"no ledger events for contract {contract.goal_id!r} to distill"
             )
-        steps = tuple(
-            f"{event.event_type}:"
-            f"{event.payload.get('kind') or event.payload.get('decision') or ''}"
-            for event in matches
-        )
+        steps = tuple(_distill_step(event) for event in matches)
         resolved_provenance = provenance if provenance is not None else matches[-1].entry_hash
         candidate = SkillCandidate(
             skill_id=uuid4().hex,
@@ -159,6 +275,7 @@ class SkillStore:
         authored_names=(),
         min_successes: int = 2,
         min_attempts: int = 3,
+        dedup_threshold: float = 0.6,
     ) -> SkillCandidate:
         """The HITL promotion gate (ADR 0005 §2.4).
 
@@ -180,13 +297,38 @@ class SkillStore:
             raise SkillPromotionError(
                 f"reproducibility not met: {candidate.attempts} attempts < {min_attempts}"
             )
-        authored_lower = {str(name).strip().lower() for name in authored_names}
-        if candidate.objective.strip().lower() in authored_lower or candidate.skill_id.lower() in authored_lower:
-            raise SkillPromotionError(
-                f"candidate duplicates an authored skill: {candidate.objective!r}"
-            )
+        self._reject_if_duplicates_authored(candidate, authored_names, dedup_threshold)
         self._append(self._promoted_path(), candidate)
         return candidate
+
+    @staticmethod
+    def _reject_if_duplicates_authored(
+        candidate: SkillCandidate,
+        authored_names: Sequence[str],
+        dedup_threshold: float,
+    ) -> None:
+        """Reject promotion if the candidate duplicates an authored skill.
+
+        Beyond the exact (case-insensitive) objective/skill_id match, a token
+        Jaccard overlap >= ``dedup_threshold`` rejects a *near* duplicate, so a
+        reworded authored playbook ("ship login fix" vs "Ship the login fix") is
+        not re-earned -- the prior exact-string check missed those.
+        """
+        objective_norm = candidate.objective.strip().lower()
+        objective_tokens = _tokens(candidate.objective)
+        for name in authored_names:
+            name_norm = str(name).strip().lower()
+            if not name_norm:
+                continue
+            if objective_norm == name_norm or candidate.skill_id.lower() == name_norm:
+                raise SkillPromotionError(
+                    f"candidate duplicates an authored skill: {candidate.objective!r}"
+                )
+            if _jaccard(objective_tokens, _tokens(str(name))) >= dedup_threshold:
+                raise SkillPromotionError(
+                    f"candidate near-duplicates an authored skill: "
+                    f"{candidate.objective!r} ~ {name!r}"
+                )
 
     def candidates(self) -> list[SkillCandidate]:
         return list(self._latest_candidates().values())
