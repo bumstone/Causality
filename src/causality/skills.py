@@ -84,17 +84,33 @@ _TOOL_KEYS = ("tool", "verifier", "command", "type", "action")
 _OUTCOME_KEYS = ("kind", "status", "decision", "state", "stage")
 
 
+def _redact_structure(value: Any) -> Any:
+    """Recursively mask sensitive-named keys and secret-shaped scalars in a
+    nested payload value, so a nested secret cannot ride into a skill under a
+    benign top-level key (codex r3448014259)."""
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>" if _SENSITIVE_KEY.search(str(key)) else _redact_structure(val)
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_structure(item) for item in value]
+    if isinstance(value, str) and _SECRET_VALUE.search(value):
+        return "<redacted>"
+    return value
+
+
 def _redact_value(key: str, value: Any) -> str:
     """A bounded, secret-safe string for one payload value."""
     if _SENSITIVE_KEY.search(key):
         return "<redacted>"
-    text = (
-        json.dumps(value, ensure_ascii=True, sort_keys=True)
-        if isinstance(value, (dict, list))
-        else str(value)
-    )
-    # Mask a secret-shaped value even under a benign key (also catches a secret
-    # nested inside a dict/list value, which was serialized above).
+    if isinstance(value, (dict, list)):
+        # Redact nested sensitive keys / secret scalars BEFORE serializing, so a
+        # benign top-level key cannot smuggle a nested secret into the skill.
+        text = json.dumps(_redact_structure(value), ensure_ascii=True, sort_keys=True)
+    else:
+        text = str(value)
+    # Mask a secret-shaped scalar value even under a benign key.
     if _SECRET_VALUE.search(text):
         return "<redacted>"
     return text if len(text) <= _MAX_VALUE_LEN else text[: _MAX_VALUE_LEN - 3] + "..."

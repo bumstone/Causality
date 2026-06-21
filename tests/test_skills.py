@@ -251,6 +251,25 @@ class SkillStoreTest(unittest.TestCase):
         self.assertEqual(candidate.steps[-1].tool, "<redacted>")
         self.assertNotIn("sk-ABCDEFGHIJ1234567890", json.dumps(candidate.to_dict()))
 
+    def test_distill_redacts_nested_sensitive_fields(self) -> None:
+        # codex r3448014259: a secret under a benign top-level key but a sensitive
+        # NESTED key, or a secret-shaped nested scalar, must be redacted too.
+        contract = GoalContract(title="ship", summary="nested secret")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {
+                "config": {"api_key": "internal-prod-key", "host": "db1"},
+                "blobs": ["sk-ABCDEFGHIJ1234567890", "fine"],
+            },
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        blob = json.dumps(candidate.to_dict())
+        self.assertNotIn("internal-prod-key", blob)          # nested sensitive key
+        self.assertNotIn("sk-ABCDEFGHIJ1234567890", blob)    # nested secret-shaped scalar
+        self.assertIn("db1", blob)                           # benign nested value preserved
+
     def test_distill_truncates_long_value(self) -> None:
         contract = GoalContract(title="ship", summary="with long value")
         self.causality.create_contract(contract)
