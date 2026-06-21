@@ -82,18 +82,23 @@ class ToolAdapter:
         action_kind: str = "tool_call",
         description: str | None = None,
         timeout: float = 30.0,
+        cwd: str | Path | None = None,
     ) -> CommandResult:
         """Run ``args`` (a non-empty command list) through the gates, no shell."""
         argv = [str(arg) for arg in args]
         if not argv:
             raise ValueError("run() requires a non-empty command")
         desc = description if description is not None else " ".join(argv)
+        # Subprocesses run from the adapter root (or an explicit cwd resolved
+        # against it), so a relative command operates on the same tree as file
+        # ops and write_scope, not the ambient process cwd (codex r3448164499).
+        workdir = self._resolved(cwd) if cwd is not None else self.root
 
         def _do() -> CommandResult:
             if self.runner is not None:
                 return self.runner(argv)
             completed = subprocess.run(  # noqa: S603 - argv list, never shell=True
-                argv, text=True, capture_output=True, check=False, timeout=timeout
+                argv, text=True, capture_output=True, check=False, timeout=timeout, cwd=str(workdir)
             )
             return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 

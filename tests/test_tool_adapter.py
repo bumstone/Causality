@@ -65,6 +65,17 @@ class ToolAdapterTests(unittest.TestCase):
             with self.assertRaises(ActionBlocked):
                 tool.run(["echo", "hi"], tool="shell")  # "shell" not allowed
 
+    def test_run_executes_in_adapter_root(self) -> None:
+        # codex r3448164499: a real subprocess runs with cwd=root, so a relative
+        # command operates on the same tree as file ops, not the ambient cwd.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            workspace.mkdir()
+            runtime, _, adapter = self._setup(temp_dir)
+            tool = ToolAdapter(runtime.ledger, adapter, root=workspace)  # real subprocess
+            result = tool.run([sys.executable, "-c", "import os; print(os.getcwd())"])
+            self.assertEqual(Path(result.stdout.strip()), workspace.resolve())
+
     def test_run_rejects_empty_command(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, _, adapter = self._setup(temp_dir)
