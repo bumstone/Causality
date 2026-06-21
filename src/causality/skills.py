@@ -74,6 +74,9 @@ _SECRET_VALUE = re.compile(
     r"|\bAIza[0-9A-Za-z_-]{20,}"
     r"|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    # An Authorization scheme + opaque token (mask regardless of token shape).
+    r"|\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}",
+    re.IGNORECASE,
 )
 # Bulky/non-procedural fields dropped so a step stays a compact recipe, not a dump.
 _SKIP_KEYS = frozenset(

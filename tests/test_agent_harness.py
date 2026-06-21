@@ -114,6 +114,7 @@ class ClassifyTests(unittest.TestCase):
             "clean up the payment module",
             "wipe the production database",
             "rotate the access token",
+            "rotate the API key",  # spaced form must match too
             "revoke her access",
         ):
             with self.subTest(phrase=phrase):

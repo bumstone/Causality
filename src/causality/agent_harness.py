@@ -81,7 +81,7 @@ _SENSITIVE_SIGNAL = re.compile(
     r"\b(?:"
     r"delet|remov|wipe|wiping|eras|destroy|truncat|"          # destructive (stemmed)
     r"payment|billing|invoic|charg|refund|payout|"            # financial
-    r"credential|password|passwd|secret|token|api[_-]?key|"   # secrets
+    r"credential|password|passwd|secret|token|api[\s_-]?key|"  # secrets (incl. "api key")
     r"deploy|migrat|database|production|rollback|"            # infra/prod
     r"permission|revok|grant|chmod|chown|sudo|overwrit"       # access/ops
     r")",

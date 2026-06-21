@@ -313,6 +313,20 @@ class SkillStoreTest(unittest.TestCase):
         self.assertEqual(args["private_key"], "<redacted>")
         self.assertNotIn("MIIBVAIBADANBgkqOneLineNoPemHeader0123456789", json.dumps(candidate.to_dict()))
 
+    def test_distill_redacts_opaque_bearer_token(self) -> None:
+        # codex r3448037072: an opaque Authorization bearer token (no sk-/ghp-
+        # shape) in a command value must be masked too.
+        contract = GoalContract(title="ship", summary="bearer token")
+        self.causality.create_contract(contract)
+        self.causality.record_evidence(
+            contract,
+            EvidenceKind.TOOL_OUTPUT,
+            {"command": "curl -H 'Authorization: Bearer abcdefGHIJ0123456789xyz'"},
+        )
+        candidate = self.store.distill(self.causality.ledger, contract)
+        self.assertEqual(candidate.steps[-1].tool, "<redacted>")
+        self.assertNotIn("abcdefGHIJ0123456789xyz", json.dumps(candidate.to_dict()))
+
     def test_distill_truncates_long_value(self) -> None:
         contract = GoalContract(title="ship", summary="with long value")
         self.causality.create_contract(contract)
