@@ -15,6 +15,11 @@ node_modules/
 # already live under .causality/ (above).
 state.json
 *.state.json
+# Durable write sidecars for local JSON/JSONL runtime stores.
+*.json.lock
+*.jsonl.lock
+.*.json.*.tmp
+.*.jsonl.*.tmp
 # Machine-written typed-memory logs (decisions/assumptions/failures/...).
 # Note: *.md under memory/ is intentionally NOT ignored, so a curated,
 # shareable memory note can be committed without un-ignoring anything.
