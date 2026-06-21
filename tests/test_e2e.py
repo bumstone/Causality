@@ -21,8 +21,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from causality.contracts import EvidenceKind, GateDecision, GoalContract, VerifierDecision
+from causality.contracts import AuditEventType, EvidenceKind, GateDecision, GoalContract, VerifierDecision
 from causality.engine import CausalityEngine
+from causality.tool_adapter import ToolAdapter
 
 
 def _passing_verifiers():
@@ -40,6 +41,59 @@ class E2ELoopTests(unittest.TestCase):
         def work(contract: GoalContract, iteration: int) -> None:
             engine.runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
         return work
+
+    def test_tool_adapter_inside_a_full_run(self) -> None:
+        # The bundled ToolAdapter works through a real run: its gated file write
+        # actually happens and is recorded, and the run still completes (closes
+        # the "tool adapter inside a full run" E2E gap).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            root = Path(temp_dir)
+
+            def work(contract: GoalContract, iteration: int, adapter) -> None:
+                tools = ToolAdapter(engine.runtime.ledger, adapter, root=root)
+                tools.write_text("out/result.txt", "done")  # gated, recorded
+                engine.runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
+
+            run = engine.run_task(
+                objective="implement the report writer",
+                work=work,
+                verifiers=_passing_verifiers(),
+                verification=["python -m unittest"],
+                stop_condition={"max_iterations": 3},
+                allowed_tools=["file.write"],  # the tool the adapter routes through
+            )
+
+            self.assertTrue(run.passed)
+            self.assertEqual(run.loop.decision, GateDecision.PASS)
+            self.assertTrue((root / "out" / "result.txt").exists())
+            evidence = engine.runtime.ledger.find(AuditEventType.EVIDENCE)
+            self.assertTrue(any(e.payload.get("tool") == "file.write" for e in evidence))
+
+    def test_tool_adapter_blocked_action_terminates_run(self) -> None:
+        # A gated tool call that breaches the contract (tool not allowed) raises
+        # ActionBlocked inside work, and the engine terminates the run with the
+        # gate's decision rather than completing.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            root = Path(temp_dir)
+
+            def work(contract: GoalContract, iteration: int, adapter) -> None:
+                tools = ToolAdapter(engine.runtime.ledger, adapter, root=root)
+                tools.write_text("out/x.txt", "data", tool="file.write")  # not allowed below
+
+            run = engine.run_task(
+                objective="implement the writer",
+                work=work,
+                verifiers=_passing_verifiers(),
+                verification=["python -m unittest"],
+                stop_condition={"max_iterations": 3},
+                allowed_tools=["Edit"],  # "file.write" is outside scope -> ESCALATE
+            )
+
+            self.assertFalse(run.passed)
+            self.assertEqual(run.loop.decision, GateDecision.ESCALATE)
+            self.assertFalse((root / "out" / "x.txt").exists())
 
     def test_back_half_loop_distill_promote_recall_reuse(self) -> None:
         # The full earned-skill read-path across runs: distill -> reproduce ->
