@@ -31,3 +31,8 @@ agenda.json
 *.agenda.json
 # Local evaluation/review artifacts (generated HTML reviews) — not shared.
 _review/
+
+# OS / editor cruft — machine-local, never shared.
+.DS_Store
+.idea/
+.vscode/
