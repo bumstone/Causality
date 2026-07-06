@@ -8,6 +8,7 @@ agent plugin installed.
 ```text
 AGENTS.md
 CLAUDE.md
+.claude/commands/onboard.md
 .claude/commands/causality-plan.md
 .claude/commands/causality-verify.md
 .claude/commands/causality-root-cause.md
@@ -18,6 +19,7 @@ CLAUDE.md
 .causality/ledger.jsonl
 .causality/causality-workflows.json
 .causality/mcp.json
+skills/onboard-project.md
 ```
 
 `AGENTS.md` and `CLAUDE.md` point the agent to `.causality/agent-rules.md`.
@@ -31,6 +33,7 @@ Goal contract -> gate -> evidence ledger -> verifier passes -> completion gate
 
 Claude project slash commands:
 
+- `/onboard`
 - `/causality-plan`
 - `/causality-verify`
 - `/causality-root-cause`
@@ -38,9 +41,9 @@ Claude project slash commands:
 - `/causality-complete`
 
 Codex uses `AGENTS.md` and `.codex/causality-routing.md` as routing context.
-When the user asks for planning, debugging, browser/UI testing, implementation
-verification, or completion, the agent should choose the matching workflow
-without requiring the user to name it.
+For onboarding, read `skills/onboard-project.md`; for planning, debugging,
+browser/UI testing, implementation verification, or completion, choose the
+matching workflow without requiring the user to name it.
 
 ## MCP-style server
 

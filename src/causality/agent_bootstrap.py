@@ -23,6 +23,7 @@ not need to name the workflow.
 - Code or product work that needs evidence before completion: `causality-verify`
 - Bugs, regressions, broken behavior: `causality-root-cause`
 - Browser/UI workflows: `causality-a11y-observe`
+- Session start or project onboarding: `onboard`
 - Final handoff or "done" claims: `causality-complete`
 
 If the task is trivial, answer directly. If risk is high, state the HITL gate
@@ -102,6 +103,9 @@ Once the task type is fixed, read only the matching workflow document:
 
 - Planning request: `workflow/writing-plans.md` (the `causality-plan` flow).
 - Implementation request: plan gate, evidence ledger, and verifier checks.
+- Onboarding request: `workflow/session-bootstrap.md`, then
+  `workflow/subagent-driven-development.md` if subagents are available, and
+  `skills/onboard-project.md`.
 - Debugging request: `workflow/root-cause-protocol.md`.
 - Browser/UI request: the `causality-a11y-observe` flow when a driver is configured.
 - Completion request: `workflow/verification-before-completion.md` before claiming done.
@@ -122,6 +126,7 @@ instructions.
 
 Project slash commands are installed under `.claude/commands/`:
 
+- `/onboard`
 - `/causality-plan`
 - `/causality-verify`
 - `/causality-root-cause`
@@ -131,6 +136,20 @@ Project slash commands are installed under `.claude/commands/`:
 
 
 SLASH_COMMANDS: dict[str, str] = {
+    "onboard.md": """---
+description: Gather project context, current work, priorities, and next actions with managed subagents.
+---
+
+Use `.causality/agent-rules.md` and `skills/onboard-project.md`.
+
+Focus: $ARGUMENTS
+
+Run the session-bootstrap flow, spawn bounded read-only subagents for repo map,
+current work, plan priorities, and verification/risk when available, synthesize
+the reports in the main agent, and close every subagent before responding. Do
+not edit code during onboarding unless the user separately asks for
+implementation.
+""",
     "causality-plan.md": """---
 description: Create an Causality plan with gates, evidence, and verifier criteria.
 ---
@@ -196,9 +215,11 @@ Codex does not require project slash-command files for this integration. Use
 `AGENTS.md` and `.causality/agent-rules.md` as the automatic router.
 
 When the user asks for planning, implementation, debugging, browser/UI testing,
-or completion, select the matching Causality workflow without waiting for the
-user to name it:
+completion, or explicit onboarding, select the matching Causality workflow
+without waiting for the user to name it:
 
+- `onboard` uses `skills/onboard-project.md`, `session-bootstrap`, and bounded
+  subagent inspection when available
 - `causality-plan`
 - `causality-verify`
 - `causality-root-cause`
@@ -277,6 +298,44 @@ Authored skills take precedence over earned skills at dispatch.
 """
 
 
+ONBOARD_PROJECT_SKILL = """# Skill: onboard-project
+
+Use for `/onboard`, session start, or any request to gather current project
+context before implementation.
+
+## Contract
+
+- Build a compact evidence-backed context packet.
+- Use bounded read-only subagents when available; the main agent stays
+  controller.
+- Prioritize current work, implementation plan, risks, and verification.
+- Close every spawned subagent before responding.
+- Do not edit project files during onboarding unless separately asked.
+
+## Flow
+
+1. Read `AGENTS.md` and `.causality/agent-rules.md`.
+2. Read `workflow/session-bootstrap.md`; if delegation is available, read
+   `workflow/subagent-driven-development.md`.
+3. Inspect `causality context` or the ledger tail, plus `git status --short
+   --branch`.
+4. Spawn up to four read-only explorers with narrow packets:
+   - repo map: architecture, entry points, tests.
+   - current work: git state, recent ledger/status, active goal clues.
+   - plan priority: roadmap, TODOs, implementation order.
+   - verification risk: test commands, CI, fragile areas.
+5. While they run, inspect only high-signal files: README, manifests, tests,
+   roadmap/status docs, workflow docs, and scoped memory.
+6. Wait with a bounded timeout, collect reports, then close every subagent.
+7. Synthesize an Onboard Packet: project snapshot, current work, priority plan,
+   verification commands, risks/questions, and subagent accounting.
+
+Treat subagent prose as a claim unless it cites files, command output, or ledger
+refs. If subagent tools are unavailable, state that and perform the same
+read-only inspection sequentially.
+"""
+
+
 MEMORY_INDEX = """# Long-term Memory
 
 Six typed stores (ADR 0005 §2.2). Keep `assumptions` separate from `decisions`:
@@ -342,6 +401,7 @@ def install_agent_files(project_root: str | Path = ".", *, force: bool = False) 
     files[root / "checklists" / "verification-before-completion.md"] = CHECKLIST_VERIFICATION
 
     files[root / "skills" / "README.md"] = SKILL_INDEX
+    files[root / "skills" / "onboard-project.md"] = ONBOARD_PROJECT_SKILL
 
     files[root / "memory" / "README.md"] = MEMORY_INDEX
     for mem_type, purpose in MEMORY_TYPES.items():

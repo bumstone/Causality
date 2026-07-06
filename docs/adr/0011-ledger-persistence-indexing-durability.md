@@ -2,7 +2,7 @@
 
 - **상태(Status):** Accepted — 구현 (R2 캐시 + R4 durable + R4f read-path 캐시)
 - **날짜:** 2026-06-13 (R4f 2026-06-20)
-- **관련:** [ADR 0006](0006-final-blended-architecture.md) §6.1 · [code-review-2026-06-13](../code-review-2026-06-13.md)
+- **관련:** [ADR 0006](0006-final-blended-architecture.md) §6.1
 
 ## 1. 맥락 (Context)
 

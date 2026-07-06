@@ -24,6 +24,9 @@ Once the task type is fixed, read only the matching workflow document:
 
 - Planning request: `workflow/writing-plans.md` (the `causality-plan` flow).
 - Implementation request: plan gate, evidence ledger, and verifier checks.
+- Onboarding request: `workflow/session-bootstrap.md`, then
+  `workflow/subagent-driven-development.md` if subagents are available, and
+  `skills/onboard-project.md`.
 - Debugging request: `workflow/root-cause-protocol.md`.
 - Browser/UI request: the `causality-a11y-observe` flow when a driver is configured.
 - Completion request: `workflow/verification-before-completion.md` before claiming done.

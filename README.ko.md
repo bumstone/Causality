@@ -56,7 +56,8 @@ Causality는 실행을 다섯 계층으로 분리합니다.
 - Codex 라우팅용 `AGENTS.md`.
 - Claude 명령 UX용 `CLAUDE.md`와 `.claude/commands/*`.
 - `.causality/agent-rules.md`, workflow manifest, MCP config, local ledger.
-- on-demand context용 `workflow/`, `checklists/`, `skills/`, `memory/` README.
+- `/onboard`의 `skills/onboard-project.md`를 포함한 on-demand context:
+  `workflow/`, `checklists/`, `skills/`, `memory/`.
 
 `workflow/*.md`는 `src/causality/workflows.py`의 생성된 view입니다. 로컬 프로젝트에
 의도적으로 커스터마이징하는 경우가 아니라면 직접 편집하지 않는 편이 안전합니다.

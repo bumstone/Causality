@@ -2,7 +2,7 @@
 
 The per-module tests cover layers in isolation; these exercise the *whole*
 self-improvement loop across MULTIPLE runs, which is the only way to prove the
-"loop is closed" claim end to end (code-review-2026-06-13 P3):
+"loop is closed" claim end to end (June 2026 P3 review):
 
 - back half: a passing run distills an earned skill, reproducibility is accrued,
   a HITL gate promotes it, and a *later related* run recalls and injects it;
