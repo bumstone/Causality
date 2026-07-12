@@ -17,11 +17,12 @@ context before implementation.
 1. Read `AGENTS.md` and `.causality/agent-rules.md`.
 2. Read `workflow/session-bootstrap.md`; if delegation is available, read
    `workflow/subagent-driven-development.md`.
-3. Inspect `causality context` or the ledger tail, plus `git status --short
-   --branch`.
+3. Inspect `causality context` plus `git status --short --branch`. The context
+   command exposes metadata only; never copy raw ledger payloads into prompts or
+   delegate them to subagents.
 4. Spawn up to four read-only explorers with narrow packets:
    - repo map: architecture, entry points, tests.
-   - current work: git state, recent ledger/status, active goal clues.
+   - current work: git state, recent context metadata/status, active goal clues.
    - plan priority: roadmap, TODOs, implementation order.
    - verification risk: test commands, CI, fragile areas.
 5. While they run, inspect only high-signal files: README, manifests, tests,

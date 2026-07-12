@@ -1,6 +1,6 @@
 # Causality Project Summary
 
-Baseline: `251` green (#32 `e78ec21` + vendored L1 playbooks).
+Baseline: `257` green (PR #34 verification).
 
 ## What It Is
 
@@ -20,6 +20,7 @@ and skills. The point is auditability: claims need evidence.
 | Feedback | Approved failures can become later non-goals; TTL prevents permanent ratchets. |
 | Skills | Earned skills can be distilled, promoted, deduped, recalled, and injected into execution. |
 | Redaction | Distilled skills mask sensitive keys, nested structures, token shapes, and auth headers. |
+| Onboarding | `/onboard` installs project-local guidance; context omits raw ledger payloads and installation rejects symlink escapes. |
 
 ## Still Not Proven
 
@@ -36,9 +37,3 @@ and skills. The point is auditability: claims need evidence.
 | Installed agent templates | `src/causality/agent_bootstrap.py` |
 | Runtime behavior | `src/causality/*.py` |
 | Regression | `tests/*.py` |
-
-## Cleanup Guidance
-
-Don't delete passing tests -- they protect verifier quorum, redaction, ledger
-durability, routing fail-safes, and feedback loops. Split/table-drive rather
-than remove coverage.

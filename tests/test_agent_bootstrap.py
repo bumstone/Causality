@@ -80,6 +80,35 @@ class AgentBootstrapTests(unittest.TestCase):
             self.assertIn(command, result.skipped)
             self.assertIn(skill, result.skipped)
 
+    def test_install_rejects_symlinked_generated_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp_dir)
+            linked_skills = root / "skills"
+            try:
+                linked_skills.symlink_to(Path(outside), target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "contains a symlink"):
+                install_agent_files(root)
+
+            self.assertFalse((Path(outside) / "onboard-project.md").exists())
+            self.assertFalse((root / ".causality").exists())
+
+    def test_install_rejects_symlinked_causality_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp_dir)
+            linked_causality = root / ".causality"
+            try:
+                linked_causality.symlink_to(Path(outside), target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "contains a symlink"):
+                install_agent_files(root)
+
+            self.assertFalse((Path(outside) / "ledger.jsonl").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

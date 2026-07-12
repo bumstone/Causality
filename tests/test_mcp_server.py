@@ -39,6 +39,41 @@ class MCPServerTests(unittest.TestCase):
             self.assertIn("event_id", response["result"]["content"][0]["text"])
             self.assertTrue((Path(temp_dir) / ".causality" / "ledger.jsonl").is_file())
 
+    def test_context_tool_omits_raw_ledger_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = CausalityMCPServer(temp_dir)
+            sentinel = "context-secret-sentinel"
+            server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "causality_append_evidence",
+                        "arguments": {
+                            "kind": "test_output",
+                            "payload": {"token": sentinel},
+                            "contract_id": f"contract-{sentinel}",
+                        },
+                    },
+                }
+            )
+
+            response = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "causality_context", "arguments": {"limit": 5}},
+                }
+            )
+            text = response["result"]["content"][0]["text"]
+            context = json.loads(text)
+
+            self.assertNotIn(sentinel, text)
+            self.assertNotIn("payload", context["ledger_tail"][0])
+            self.assertNotIn("contract_id", context["ledger_tail"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

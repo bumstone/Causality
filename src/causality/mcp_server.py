@@ -93,7 +93,7 @@ class CausalityMCPServer:
             limit = int(arguments.get("limit", 5))
             context = {
                 "project": str(self.project),
-                "ledger_tail": self.ledger.tail(limit),
+                "ledger_tail": self.ledger.context_tail(limit),
                 "workflows": [item["name"] for item in workflow_manifest()["workflows"]],
             }
             return _text_result(json.dumps(context, ensure_ascii=True, indent=2))

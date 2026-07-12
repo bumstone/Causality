@@ -302,6 +302,42 @@ class LedgerTests(unittest.TestCase):
             self.assertNotIn("injected", ledger.tail(1)[0]["payload"])
             self.assertTrue(ledger.verify_chain())
 
+    def test_context_tail_omits_raw_payload_and_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact = Path(temp_dir) / "credential.txt"
+            artifact.write_text("secret", encoding="utf-8")
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            first = ledger.append(
+                AuditEventType.EVIDENCE,
+                {"token": "context-sentinel", "kind": "test_output"},
+                contract_id="private-contract-id",
+                artifact_paths=(artifact,),
+            )
+            second = ledger.append(
+                AuditEventType.STATE_TRANSITION,
+                {"state": "executing"},
+                contract_id="private-contract-id",
+            )
+            third = ledger.append(
+                AuditEventType.EVIDENCE,
+                {"kind": "other"},
+                contract_id="another-private-id",
+            )
+
+            context = ledger.context_tail(3)
+
+            self.assertEqual(
+                [item["event_id"] for item in context],
+                [first.event_id, second.event_id, third.event_id],
+            )
+            self.assertEqual(
+                [item["contract_ref"] for item in context],
+                ["contract-1", "contract-1", "contract-2"],
+            )
+            self.assertNotIn("context-sentinel", json.dumps(context))
+            self.assertNotIn("private-contract-id", json.dumps(context))
+            self.assertNotIn("another-private-id", json.dumps(context))
+
     def test_find_predicate_cannot_corrupt_cache(self) -> None:
         # codex r3445798584: find() scans the shared cache, so the predicate must
         # receive an isolated copy -- a predicate that mutates the event it sees

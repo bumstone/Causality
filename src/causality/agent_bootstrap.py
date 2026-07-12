@@ -317,11 +317,12 @@ context before implementation.
 1. Read `AGENTS.md` and `.causality/agent-rules.md`.
 2. Read `workflow/session-bootstrap.md`; if delegation is available, read
    `workflow/subagent-driven-development.md`.
-3. Inspect `causality context` or the ledger tail, plus `git status --short
-   --branch`.
+3. Inspect `causality context` plus `git status --short --branch`. The context
+   command exposes metadata only; never copy raw ledger payloads into prompts or
+   delegate them to subagents.
 4. Spawn up to four read-only explorers with narrow packets:
    - repo map: architecture, entry points, tests.
-   - current work: git state, recent ledger/status, active goal clues.
+   - current work: git state, recent context metadata/status, active goal clues.
    - plan priority: roadmap, TODOs, implementation order.
    - verification risk: test commands, CI, fragile areas.
 5. While they run, inspect only high-signal files: README, manifests, tests,
@@ -372,10 +373,26 @@ def _workflow_doc(template: WorkflowTemplate) -> str:
     )
 
 
+def _assert_safe_install_path(root: Path, path: Path) -> None:
+    """Reject destinations that can escape the project through symlinks."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"install destination is outside project root: {path}") from exc
+
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"install destination contains a symlink: {current}")
+
+    if not path.resolve(strict=False).is_relative_to(root):
+        raise ValueError(f"install destination resolves outside project root: {path}")
+
+
 def install_agent_files(project_root: str | Path = ".", *, force: bool = False) -> InstallResult:
     root = Path(project_root).resolve()
     causality_dir = root / ".causality"
-    causality_dir.mkdir(parents=True, exist_ok=True)
 
     files: dict[Path, str] = {
         root / "AGENTS.md": AGENTS_MD,
@@ -407,17 +424,23 @@ def install_agent_files(project_root: str | Path = ".", *, force: bool = False) 
     for mem_type, purpose in MEMORY_TYPES.items():
         files[root / "memory" / mem_type / "README.md"] = f"# memory/{mem_type}\n\n{purpose}\n"
 
+    ledger_path = causality_dir / "ledger.jsonl"
+    for path in (*files, ledger_path):
+        _assert_safe_install_path(root, path)
+    causality_dir.mkdir(parents=True, exist_ok=True)
+
     written: list[Path] = []
     skipped: list[Path] = []
     for path, content in files.items():
         if path.exists() and not force:
             skipped.append(path)
             continue
+        _assert_safe_install_path(root, path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         written.append(path)
 
-    ledger = EvidenceLedger(causality_dir / "ledger.jsonl")
+    ledger = EvidenceLedger(ledger_path)
     ledger.append(
         AuditEventType.EVIDENCE,
         {
