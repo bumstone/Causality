@@ -1,39 +1,42 @@
 # Causality Project Summary
 
-Baseline: `257` green (PR #34 verification).
+Baseline: final PR #35 verification pending. Git and the evidence ledger retain
+commit-specific history.
 
 ## What It Is
 
-Causality is a local-first control harness for agent work. A run is bound to a
-goal contract, gated, recorded in a durable ledger, then reflected into memory
-and skills. The point is auditability: claims need evidence.
+Causality is a local-first control harness for agent work. It binds a goal
+contract, gates execution, records evidence, then reflects verified outcomes
+into memory and skills.
 
 ## Current Truth
 
 | Area | Status |
 | --- | --- |
-| Dispatch | L1 routes each task type to one vendored playbook bundle; every routed label resolves to structured phases or raises. |
-| Contract | `GoalContract` freezes into `TaskContract`: objective, non-goals, tools, verification. |
+| Dispatch | Each task type resolves to a structured vendored playbook. |
+| Contract | `GoalContract` freezes objective, non-goals, tools, and verification into `TaskContract`. |
 | Gates | `run_task`, `ExecutionAdapter`, and `ToolAdapter` enforce plan/action/tool/non-goal checks. |
-| Completion | Required evidence + substantive verifier passes; blank/hollow passes do not count. |
-| Ledger | Hash-chained JSONL, durable writes, locks, torn-tail repair, read cache, opt-in chain-verifiable rotation with offset-indexed paging. |
-| Feedback | Approved failures can become later non-goals; TTL prevents permanent ratchets. |
-| Skills | Earned skills can be distilled, promoted, deduped, recalled, and injected into execution. |
-| Redaction | Distilled skills mask sensitive keys, nested structures, token shapes, and auth headers. |
-| Onboarding | `/onboard` installs project-local guidance; context omits raw ledger payloads and installation rejects symlink escapes. |
+| Completion | Evidence and substantive independent verifier passes are required. |
+| Ledger | Durable hash-chained JSONL with repair, cache, rotation, and offset paging. |
+| Feedback | Approved failures can become TTL-bounded later non-goals. |
+| Skills | Earned skills can be distilled, promoted, deduped, recalled, and injected. |
+| Redaction | Skill distillation masks sensitive keys, nested secrets, tokens, and auth headers. |
+| Install | Client-native MCP config, host-safe adoption, handshake/report; context omits raw ledger payloads and paths reject symlink escape. |
 
 ## Still Not Proven
 
-- API/browser execution beyond the file/subprocess `ToolAdapter`; the vendored
-  playbook phases are guidance the agent follows, not engine-auto-executed.
+- Execution of declared verification argv with requirement IDs and hashes.
+- Durable create/approve/act/verify/complete task lifecycle over MCP.
+- API/browser execution through the file/subprocess contract path.
+- Engine execution of vendored playbook phases; they currently guide the agent.
 
 ## Sources
 
 | Need | Source |
 | --- | --- |
-| Current status | `docs/project-summary.md`, `docs/status/roadmap.html` |
+| Status | `docs/project-summary.md`, `docs/status/roadmap.html` |
+| Delivery order | `docs/plans/README.md` |
+| Feature contracts | `docs/specs/README.md` |
 | Decisions | `docs/adr/*.md` |
-| Workflow definitions | `src/causality/workflows.py` |
-| Installed agent templates | `src/causality/agent_bootstrap.py` |
-| Runtime behavior | `src/causality/*.py` |
-| Regression | `tests/*.py` |
+| Workflows/templates | `src/causality/workflows.py`, `agent_bootstrap.py` |
+| Runtime/tests | `src/causality/*.py`, `tests/*.py` |

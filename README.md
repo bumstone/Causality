@@ -12,8 +12,8 @@ runtime for making agent work auditable.
 
 ## Current Status
 
-As of `2026-06-21`, `main` includes PR #29 (`6c239e0`) and the suite is `231`
-tests green.
+The core control path is implemented and covered by the regression suite. See
+[Project Summary](docs/project-summary.md) for the current verified baseline.
 
 - Core control loop: implemented.
 - Plan/action/tool/non-goal gates: enforced through `run_task`,
@@ -28,13 +28,15 @@ tests green.
   common token shapes, and bearer/basic authorization values.
 
 Do not read this as “the product is finished.” Remaining work is operational:
-broader end-to-end scenario evidence, API/browser playbooks, repository
-automation setup, and scale policy for ledger rotation/indexing.
+API/browser execution through the contract and evidence model, executable
+playbook phases, and repository automation setup.
 
 Canonical references:
 
 - [Project Summary](docs/project-summary.md) — compact architecture and status.
 - [Status Dashboard](docs/status/roadmap.html) — visual state board.
+- [Delivery Plans](docs/plans/README.md) — numbered implementation order.
+- [Implementation Specs](docs/specs/README.md) — feature contracts and acceptance tests.
 - [ADR Index](docs/adr/README.md) — design decision history.
 
 ## Architecture
@@ -101,7 +103,7 @@ bash scripts/install.sh
 causality init
 causality context --pretty
 causality manifest --pretty
-causality install-agent
+causality install-agent --client codex --adopt --verify
 causality review-plan
 causality doc-budget --enforce docs/project-summary.md
 ```
@@ -119,6 +121,8 @@ src/causality/        runtime package
 tests/                regression suite
 docs/project-summary.md
 docs/status/          current status board
+docs/plans/           numbered delivery order
+docs/specs/           implementation contracts
 docs/adr/             decision history
 workflow/             generated workflow views
 scripts/              install/update/doctor helpers

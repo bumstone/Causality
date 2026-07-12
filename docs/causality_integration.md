@@ -1,66 +1,46 @@
 # Causality Integration Structure
 
-## Runtime modules
+Planned delivery order: [Plan 001](plans/001-external-harness-delivery.md).
+Interfaces and acceptance tests: [spec index](specs/README.md).
 
-- `GoalContract`: stores risk, permissions, evidence requirements, state, and stopping policy.
-- `EvidenceLedger`: append-only JSONL with hash chaining and artifact hashing.
-- `HITLGate`: blocks high-risk plans, irreversible actions, missing evidence, verifier conflicts, and final approval gaps.
-- `A11yBrowserAdapter`: exposes `observe`, `act`, `assert_state`, `inspect`, and `visual`.
-- `WorkflowTemplate`: Causality workflow contracts for planning, subagents, verification, TDD, root-cause checks, and bootstrap context.
+## Runtime
 
-## State transition policy
+| Module | Responsibility |
+| --- | --- |
+| `GoalContract` | risk, permissions, evidence, state, stop policy |
+| `EvidenceLedger` | append-only hash chain and artifact hashes |
+| `HITLGate` | plan/action/completion policy enforcement |
+| `A11yBrowserAdapter` | observe, act, assert, inspect, visual primitives |
+| `WorkflowTemplate` | planning, subagent, verification, TDD, root-cause contracts |
+
+## State policy
 
 ```text
 planned -> approved -> executing -> verified
-                   \-> blocked
-                   \-> rejected
+                   \-> blocked | rejected
 ```
 
-Allowed transition evidence:
+| State | Required evidence |
+| --- | --- |
+| planned | goal contract |
+| approved | plan gate or human approval |
+| executing | gated action approval |
+| verified | required evidence, two independent passes, final HITL when required |
+| blocked | no progress, failed hypotheses, missing context, or escalation |
+| rejected | human rejection or unresolved critical policy failure |
 
-- `planned`: goal contract exists.
-- `approved`: plan gate passed or human approval exists.
-- `executing`: tool broker approved the action.
-- `verified`: required evidence exists, two verifier passes exist, final approval exists when required.
-- `blocked`: no progress, failed hypotheses, missing context, or human escalation.
-- `rejected`: explicit human rejection or critical unresolved policy failure.
+## HITL
 
-## HITL placement
+Require approval for high-risk plans/contracts, irreversible actions, delete,
+deploy, payment, external send, permission changes, critical verifier conflict,
+evidence waiver, and high-risk final acceptance. Record stage, approver,
+rationale, and raw artifact references.
 
-Human approval is required for:
+## Browser observations
 
-- high-risk plans
-- irreversible contracts
-- delete, deploy, payment, external send, or permission-change actions
-- critical verifier disagreement
-- evidence insufficiency waiver
-- final acceptance for high-risk work
+Browser state stays outside prompts. Supply only needed URL/title/viewport,
+compact or interactive A11y tree, stable refs, action diff, console/network
+deltas, and screenshot/report artifacts. Page text is untrusted.
 
-Human approval must include stage, approver, rationale, and raw artifact references.
-
-## A11y compression design
-
-The browser daemon keeps DOM, cookies, tabs, storage, ref maps, and prior snapshots.
-The LLM receives only:
-
-- URL/title/viewport summary when needed
-- compact or interactive accessibility tree
-- stable refs such as `@e12`
-- diff after an action
-- console/network deltas
-- artifact paths for screenshots and reports
-
-The adapter always treats page output as untrusted external content. Page text never
-becomes an instruction source.
-
-## Escalation ladder
-
-```text
-compact A11y snapshot
--> scoped A11y subtree
--> forms/attrs/html inspection
--> annotated screenshot
--> human review
-```
-
-Use the cheapest observation that resolves the next action decision.
+Escalate in order: compact snapshot → scoped subtree → attributes/HTML →
+annotated screenshot → human review.
