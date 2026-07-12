@@ -18,6 +18,7 @@ from .agent_bootstrap import (
 )
 from .browser_adapter import A11yBrowserAdapter, wrap_untrusted
 from .contracts import (
+    AuditEventType,
     EvidenceKind,
     EvidenceRequirement,
     GoalContract,
@@ -28,7 +29,7 @@ from .contracts import (
 from .http_adapter import HttpAdapter
 from .ledger import EvidenceLedger
 from .memory import TypedMemory
-from .skills import SkillPromotionError, SkillStore
+from .skills import SkillCandidate, SkillPromotionError, SkillStore
 from .task_lifecycle import (
     TaskLifecycle,
     TaskLifecycleError,
@@ -732,6 +733,17 @@ class CausalityMCPServer:
                     "evidence_refs": {"type": "array", "items": _HASH}, "proof": _TEXT,
                 }, ("skill_id", "idempotency_key", "approved_by", "evidence_refs", "proof")),
             ),
+            _tool(
+                "causality_skill_recall",
+                "Recall authored and audited promoted skills for an objective.",
+                _closed(
+                    {
+                        "objective": _TEXT,
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                    },
+                    ("objective",),
+                ),
+            ),
         ]
         if self.lifecycle.policy.allowed_tools & _BROWSER_TOOLS:
             tools.insert(
@@ -983,6 +995,91 @@ class CausalityMCPServer:
             "event_hash": record.event_hashes[-1],
             "data": data,
         }
+
+    @staticmethod
+    def _verification_evidence(session: TaskSession) -> tuple[str, ...]:
+        refs: list[str] = []
+        for frozen in session.requirement_results.values():
+            result = _plain(frozen)
+            response = result.get("response") if isinstance(result, dict) else None
+            if isinstance(response, dict) and response.get("status") in {"pass", "fail"}:
+                ref = response.get("event_hash")
+            elif isinstance(result, dict) and result.get("status") in {"pass", "fail"}:
+                ref = result.get("evidence_event_hash")
+            else:
+                ref = None
+            if isinstance(ref, str) and ref:
+                refs.append(ref)
+        return tuple(dict.fromkeys(refs))
+
+    @staticmethod
+    def _raise_skill_error(exc: SkillPromotionError) -> None:
+        message = str(exc)
+        if "conflict" in message or "different content" in message:
+            code = "idempotency_conflict"
+        elif "unknown skill_id" in message:
+            code = "unknown_skill"
+        else:
+            code = "skill_gate_failed"
+        raise TaskLifecycleError(code, message) from exc
+
+    def _authored_skills(self) -> tuple[SkillCandidate, ...]:
+        authored: list[SkillCandidate] = []
+        for root_name in ("skills", "workflow"):
+            root = self.project / root_name
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*.md")):
+                if path.name.lower() == "readme.md":
+                    continue
+                heading = next(
+                    (
+                        line.removeprefix("# ").strip()
+                        for line in path.read_text(encoding="utf-8").splitlines()
+                        if line.startswith("# ") and line.removeprefix("# ").strip()
+                    ),
+                    path.stem.replace("-", " "),
+                )
+                authored.append(
+                    SkillCandidate(
+                        skill_id=f"authored:{path.relative_to(self.project).as_posix()}",
+                        objective=heading,
+                        steps=(),
+                        provenance="authored",
+                    )
+                )
+        return tuple(authored)
+
+    def _skill_audit(
+        self,
+        kind: str,
+        identity: str,
+        payload: dict[str, Any],
+        *,
+        contract_id: str,
+    ) -> tuple[str, bool]:
+        for event in self.ledger.events(all_segments=True):
+            if (
+                event.event_type == AuditEventType.EVIDENCE.value
+                and event.payload.get("kind") == kind
+                and event.payload.get("identity") == identity
+            ):
+                comparable = dict(event.payload)
+                comparable.pop("idempotency_key", None)
+                expected = dict(payload)
+                expected.pop("idempotency_key", None)
+                if comparable != expected:
+                    raise TaskLifecycleError(
+                        "idempotency_conflict",
+                        f"{kind} identity conflicts with its prior audit record",
+                    )
+                return event.entry_hash, True
+        event = self.ledger.append(
+            AuditEventType.EVIDENCE,
+            payload,
+            contract_id=contract_id,
+        )
+        return event.entry_hash, False
 
     def _resume(self, arguments: dict[str, Any]) -> dict[str, Any]:
         self._strict(arguments, allowed={"task_id"}, required={"task_id"})
@@ -1470,26 +1567,179 @@ class CausalityMCPServer:
                 self._strict(arguments, allowed=set())
                 return _text_result(json.dumps(workflow_manifest(), ensure_ascii=True, indent=2))
             if name == "causality_skill_outcome":
-                self._strict(arguments, allowed={"task_id", "idempotency_key", "skill_id", "success", "evidence_refs"}, required={"task_id", "idempotency_key", "skill_id", "success", "evidence_refs"})
+                fields = {
+                    "task_id", "idempotency_key", "skill_id", "success",
+                    "evidence_refs",
+                }
+                self._strict(arguments, allowed=fields, required=fields)
                 task_id = arguments["task_id"]
-                session = self.lifecycle.get(task_id)
-                if not session.terminal or session.state.value != "verified":
-                    raise TaskLifecycleError("validation_error", "skill outcome requires a verified terminal task")
-                refs = self._string_array(arguments["evidence_refs"], "evidence_refs")
-                if len(refs) != len(set(refs)) or any(ref not in session.event_hashes for ref in refs):
-                    raise TaskLifecycleError("validation_error", "evidence_refs must reference task event hashes")
-                candidate = self.skills.record_outcome(arguments["skill_id"], success=arguments["success"], attempt_id=task_id, evidence_refs=refs)
-                return _text_result({"ok": True, "skill": candidate.to_dict(), "idempotency": {"key": arguments["idempotency_key"]}})
+                refs = tuple(sorted(self._string_array(
+                    arguments["evidence_refs"], "evidence_refs"
+                )))
+                with self.lifecycle.runtime.execution_lock():
+                    if not self.ledger.verify_chain():
+                        raise TaskLifecycleError(
+                            "ledger_integrity_failed",
+                            "ledger hash chain verification failed",
+                        )
+                    session = self.lifecycle.get(task_id)
+                    expected_success = session.state.value == "verified"
+                    if not session.terminal or arguments["success"] is not expected_success:
+                        raise TaskLifecycleError(
+                            "validation_error",
+                            "success must match the verified/rejected terminal task state",
+                        )
+                    expected_refs = self._verification_evidence(session)
+                    if not expected_refs or set(refs) != set(expected_refs):
+                        raise TaskLifecycleError(
+                            "evidence_scope_mismatch",
+                            "evidence_refs must exactly match current task verification evidence",
+                        )
+                    try:
+                        candidate = self.skills.record_outcome(
+                            arguments["skill_id"],
+                            success=arguments["success"],
+                            attempt_id=task_id,
+                            evidence_refs=refs,
+                        )
+                    except SkillPromotionError as exc:
+                        self._raise_skill_error(exc)
+                    audit_hash, replayed = self._skill_audit(
+                        "skill_outcome",
+                        f"{arguments['skill_id']}:{task_id}",
+                        {
+                            "schema_version": 1,
+                            "kind": "skill_outcome",
+                            "identity": f"{arguments['skill_id']}:{task_id}",
+                            "skill_id": arguments["skill_id"],
+                            "task_id": task_id,
+                            "success": arguments["success"],
+                            "evidence_refs": list(refs),
+                            "idempotency_key": arguments["idempotency_key"],
+                        },
+                        contract_id=task_id,
+                    )
+                return _text_result({
+                    "ok": True,
+                    "skill": candidate.to_dict(),
+                    "event_hash": audit_hash,
+                    "idempotency": {
+                        "key": arguments["idempotency_key"],
+                        "replayed": replayed,
+                    },
+                })
             if name == "causality_skill_promote":
-                self._strict(arguments, allowed={"skill_id", "idempotency_key", "approved_by", "evidence_refs", "proof"}, required={"skill_id", "idempotency_key", "approved_by", "evidence_refs", "proof"})
-                refs = self._string_array(arguments["evidence_refs"], "evidence_refs")
-                if len(refs) != len(set(refs)) or any(not isinstance(ref, str) or len(ref) != 64 for ref in refs):
-                    raise TaskLifecycleError("validation_error", "evidence_refs must be unique SHA-256 hashes")
-                if not self._authorize(arguments["approved_by"], "skill", arguments["proof"]):
-                    raise TaskLifecycleError("approval_required", "skill promotion requires authenticated approval")
-                authored = [p.stem for root in (self.project / "skills", self.project / "workflow") if root.is_dir() for p in root.rglob("*.md") if p.name.lower() != "readme.md"]
-                candidate = self.skills.promote(arguments["skill_id"], approved_by=arguments["approved_by"], authored_names=authored, min_successes=2, min_attempts=3, dedup_threshold=0.6, evidence_refs=refs)
-                return _text_result({"ok": True, "skill": candidate.to_dict(), "idempotency": {"key": arguments["idempotency_key"]}, "gate": {"min_successes": 2, "min_attempts": 3, "dedup_threshold": 0.6}})
+                fields = {
+                    "skill_id", "idempotency_key", "approved_by",
+                    "evidence_refs", "proof",
+                }
+                self._strict(arguments, allowed=fields, required=fields)
+                refs = tuple(sorted(self._string_array(
+                    arguments["evidence_refs"], "evidence_refs"
+                )))
+                if not self._authorize(
+                    arguments["approved_by"], "skill", arguments["proof"]
+                ):
+                    raise TaskLifecycleError(
+                        "approval_required",
+                        "skill promotion requires authenticated approval",
+                    )
+                with self.lifecycle.runtime.execution_lock():
+                    if not self.ledger.verify_chain():
+                        raise TaskLifecycleError(
+                            "ledger_integrity_failed",
+                            "ledger hash chain verification failed",
+                        )
+                    try:
+                        current = self.skills.candidate(arguments["skill_id"])
+                    except SkillPromotionError as exc:
+                        self._raise_skill_error(exc)
+                    success_refs = {
+                        ref
+                        for _, success, outcome_refs in current.outcomes
+                        if success
+                        for ref in outcome_refs
+                    }
+                    if not success_refs or set(refs) != success_refs:
+                        raise TaskLifecycleError(
+                            "evidence_scope_mismatch",
+                            "promotion evidence must exactly cover successful outcomes",
+                        )
+                    authored = self._authored_skills()
+                    try:
+                        candidate = self.skills.promote(
+                            arguments["skill_id"],
+                            approved_by=arguments["approved_by"],
+                            authored_names=tuple(item.objective for item in authored),
+                            min_successes=2,
+                            min_attempts=3,
+                            dedup_threshold=0.6,
+                            evidence_refs=refs,
+                        )
+                    except SkillPromotionError as exc:
+                        self._raise_skill_error(exc)
+                    audit_hash, replayed = self._skill_audit(
+                        "skill_promotion",
+                        arguments["skill_id"],
+                        {
+                            "schema_version": 1,
+                            "kind": "skill_promotion",
+                            "identity": arguments["skill_id"],
+                            "skill_id": arguments["skill_id"],
+                            "approved_by": arguments["approved_by"],
+                            "evidence_refs": list(refs),
+                            "idempotency_key": arguments["idempotency_key"],
+                        },
+                        contract_id=candidate.source_task_id,
+                    )
+                return _text_result({
+                    "ok": True,
+                    "skill": candidate.to_dict(),
+                    "event_hash": audit_hash,
+                    "idempotency": {
+                        "key": arguments["idempotency_key"],
+                        "replayed": replayed,
+                    },
+                    "gate": {
+                        "min_successes": 2,
+                        "min_attempts": 3,
+                        "dedup_threshold": 0.6,
+                    },
+                })
+            if name == "causality_skill_recall":
+                self._strict(arguments, allowed={"objective", "limit"}, required={"objective"})
+                limit = arguments.get("limit", 3)
+                if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
+                    raise TaskLifecycleError(
+                        "validation_error", "limit must be an integer from 1 to 10"
+                    )
+                with self.lifecycle.runtime.execution_lock():
+                    if not self.ledger.verify_chain():
+                        raise TaskLifecycleError(
+                            "ledger_integrity_failed",
+                            "ledger hash chain verification failed",
+                        )
+                    audited = {
+                        event.payload.get("skill_id")
+                        for event in self.ledger.events(all_segments=True)
+                        if event.event_type == AuditEventType.EVIDENCE.value
+                        and event.payload.get("kind") == "skill_promotion"
+                    }
+                    audited_earned = tuple(
+                        item
+                        for item in self.skills.promoted()
+                        if item.skill_id in audited
+                    )
+                    recalled = self.skills.recall(
+                        arguments["objective"],
+                        authored=self._authored_skills(),
+                        earned=audited_earned,
+                        limit=limit,
+                    )
+                return _text_result({
+                    "ok": True,
+                    "skills": [item.to_dict() for item in recalled],
+                })
             if name == "causality_task_resume":
                 return self._resume(arguments)
             lifecycle_names = {
