@@ -11,6 +11,7 @@ from causality.playbooks import (
     PLAYBOOKS,
     PlaybookPhase,
     UnknownPlaybookError,
+    build_phase_plan,
     resolve_playbooks,
 )
 
@@ -42,6 +43,37 @@ class PlaybookTests(unittest.TestCase):
         self.assertEqual(data["name"], "tdd")
         self.assertEqual([phase["name"] for phase in data["phases"]], ["red", "green", "refactor"])
         self.assertTrue(all(phase["steps"] for phase in data["phases"]))
+
+    def test_root_cause_protocol_has_exact_order(self) -> None:
+        playbook = resolve_playbooks(("root-cause-protocol",))[0]
+
+        self.assertEqual(
+            playbook.phase_names,
+            ("reproduce", "hypothesis", "verify", "fix"),
+        )
+
+    def test_phase_plan_has_stable_ids_and_explicit_requirements(self) -> None:
+        plan = build_phase_plan(resolve_playbooks(("root-cause-protocol",)))
+
+        self.assertEqual(
+            [item["phase_id"] for item in plan],
+            [
+                "root-cause-protocol/reproduce",
+                "root-cause-protocol/hypothesis",
+                "root-cause-protocol/verify",
+                "root-cause-protocol/fix",
+            ],
+        )
+        self.assertTrue(plan[0]["requires_action"])
+        self.assertTrue(plan[2]["requires_verification"])
+        self.assertEqual(plan[3]["requires_verdicts"], 2)
+
+        # Public playbook serialization remains backward compatible.
+        self.assertEqual(set(PLAYBOOKS["root-cause-protocol"].to_dict()), {"name", "summary", "phases"})
+        self.assertEqual(
+            set(PLAYBOOKS["root-cause-protocol"].to_dict()["phases"][0]),
+            {"name", "steps"},
+        )
 
 
 if __name__ == "__main__":

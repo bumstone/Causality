@@ -27,6 +27,9 @@ class UnknownPlaybookError(KeyError):
 class PlaybookPhase:
     name: str
     steps: tuple[str, ...]
+    requires_action: bool = False
+    requires_verification: bool = False
+    requires_verdicts: int = 2
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "steps": list(self.steps)}
@@ -50,11 +53,33 @@ class Playbook:
         }
 
 
-def _playbook(name: str, summary: str, *phases: tuple[str, tuple[str, ...]]) -> Playbook:
+def _phase(
+    name: str,
+    steps: tuple[str, ...],
+    *,
+    action: bool = False,
+    verification: bool = False,
+    verdicts: int = 2,
+) -> PlaybookPhase:
+    return PlaybookPhase(name, steps, action, verification, verdicts)
+
+
+def _playbook(
+    name: str,
+    summary: str,
+    *phases: PlaybookPhase | tuple[str, tuple[str, ...]],
+) -> Playbook:
+    materialized = tuple(
+        phase if isinstance(phase, PlaybookPhase) else PlaybookPhase(*phase)
+        for phase in phases
+    )
+    names = [phase.name for phase in materialized]
+    if len(names) != len(set(names)):
+        raise ValueError(f"playbook {name!r} contains duplicate phase names")
     return Playbook(
         name=name,
         summary=summary,
-        phases=tuple(PlaybookPhase(phase_name, steps) for phase_name, steps in phases),
+        phases=materialized,
     )
 
 
@@ -77,17 +102,34 @@ PLAYBOOKS: dict[str, Playbook] = {
     "tdd": _playbook(
         "tdd",
         "Red/green/refactor for code (acceptance-check-first otherwise).",
-        ("red", ("Write a failing test for the expected behavior",)),
-        ("green", ("Implement the minimum to pass the test",)),
-        ("refactor", ("Clean up while keeping the suite green",)),
+        _phase("red", ("Write a failing test for the expected behavior",), action=True),
+        _phase("green", ("Implement the minimum to pass the test",), action=True),
+        _phase(
+            "refactor",
+            ("Clean up while keeping the suite green",),
+            action=True,
+            verification=True,
+        ),
     ),
     "debugging": _playbook(
         "debugging",
         "Prove the root cause before fixing.",
-        ("reproduce", ("Reproduce the failure deterministically",)),
-        ("isolate", ("Narrow to the root cause", "Disprove hypotheses with evidence")),
-        ("fix", ("Apply the fix at the root cause, not the symptom",)),
-        ("verify", ("Add a regression test", "Confirm the suite is green")),
+        _phase("reproduce", ("Reproduce the failure deterministically",), action=True),
+        _phase("isolate", ("Narrow to the root cause", "Disprove hypotheses with evidence")),
+        _phase("fix", ("Apply the fix at the root cause, not the symptom",), action=True),
+        _phase(
+            "verify",
+            ("Add a regression test", "Confirm the suite is green"),
+            verification=True,
+        ),
+    ),
+    "root-cause-protocol": _playbook(
+        "root-cause-protocol",
+        "Reproduce, test one hypothesis at a time, verify it, then fix.",
+        _phase("reproduce", ("Reproduce the failure deterministically",), action=True),
+        _phase("hypothesis", ("Record and test one root-cause hypothesis",)),
+        _phase("verify", ("Verify the supported root cause",), verification=True),
+        _phase("fix", ("Fix the verified root cause",), action=True),
     ),
     "contract-harness": _playbook(
         "contract-harness",
@@ -133,3 +175,28 @@ def resolve_playbooks(labels: Iterable[str]) -> tuple[Playbook, ...]:
                 f"no vendored playbook for bundle label {label!r}"
             ) from exc
     return tuple(resolved)
+
+
+def build_phase_plan(playbooks: Iterable[Playbook]) -> tuple[dict[str, Any], ...]:
+    """Flatten selected playbooks into one ordered, immutable runner snapshot."""
+
+    plan: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for playbook in playbooks:
+        for phase in playbook.phases:
+            phase_id = f"{playbook.name}/{phase.name}"
+            if phase_id in seen:
+                raise ValueError(f"duplicate workflow phase id: {phase_id}")
+            seen.add(phase_id)
+            plan.append(
+                {
+                    "phase_id": phase_id,
+                    "playbook": playbook.name,
+                    "name": phase.name,
+                    "steps": list(phase.steps),
+                    "requires_action": phase.requires_action,
+                    "requires_verification": phase.requires_verification,
+                    "requires_verdicts": phase.requires_verdicts,
+                }
+            )
+    return tuple(plan)

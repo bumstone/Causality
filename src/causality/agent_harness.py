@@ -60,6 +60,8 @@ CLASSIFY_KEYWORDS: dict[TaskType, tuple[str, ...]] = {
         "bug",
         "refactor",
         "test",
+        "debug",
+        "diagnose",
     ),
 }
 
