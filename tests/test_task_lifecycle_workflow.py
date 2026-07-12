@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from causality.contracts import (
@@ -23,6 +24,7 @@ from causality.task_lifecycle import (
 
 COMMAND = (sys.executable, "-c", "raise SystemExit(0)")
 REPRODUCE = "root-cause-protocol/reproduce"
+HYPOTHESIS = "root-cause-protocol/hypothesis"
 
 
 class WorkflowLifecycleTests(unittest.TestCase):
@@ -34,7 +36,11 @@ class WorkflowLifecycleTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _contract(title: str = "debug checkout") -> GoalContract:
+    def _contract(
+        title: str = "debug checkout",
+        *,
+        max_failed_hypotheses: int = 3,
+    ) -> GoalContract:
         return GoalContract(
             title=title,
             summary="prove the workflow loop",
@@ -47,7 +53,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
             ),
             stopping_policy={
                 "max_iterations": 8,
-                "max_failed_hypotheses": 3,
+                "max_failed_hypotheses": max_failed_hypotheses,
                 "no_progress_iterations": 2,
             },
         )
@@ -87,6 +93,73 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 session.idempotency[("verdict", key)].response["decision_event_hash"]
             )
         return (action_hash, verify_hash, *verdict_hashes)
+
+    def _start_hypothesis(
+        self,
+        lifecycle: TaskLifecycle,
+        task,
+        suffix: str,
+    ):
+        task = lifecycle.phase(
+            task.task_id,
+            phase_id=REPRODUCE,
+            action="start",
+            idempotency_key=f"{suffix}-reproduce-start",
+        )
+        refs = self._phase_evidence(lifecycle, task.task_id, f"{suffix}-reproduce")
+        task = lifecycle.phase(
+            task.task_id,
+            phase_id=REPRODUCE,
+            action="finish",
+            status="passed",
+            evidence_refs=refs,
+            idempotency_key=f"{suffix}-reproduce-finish",
+        )
+        return lifecycle.phase(
+            task.task_id,
+            phase_id=HYPOTHESIS,
+            action="start",
+            idempotency_key=f"{suffix}-hypothesis-start",
+        )
+
+    @staticmethod
+    def _hypothesis_evidence(
+        lifecycle: TaskLifecycle,
+        task_id: str,
+        suffix: str,
+    ) -> str:
+        task = lifecycle.action(
+            task_id,
+            {
+                "kind": "file_write",
+                "path": "out/hypothesis.txt",
+                "content": suffix,
+            },
+            idempotency_key=f"hypothesis-action-{suffix}",
+        )
+        return task.idempotency[
+            ("action", f"hypothesis-action-{suffix}")
+        ].event_hashes[-1]
+
+    @staticmethod
+    def _record_hypothesis(
+        lifecycle: TaskLifecycle,
+        task_id: str,
+        *,
+        suffix: str,
+        status: str,
+        evidence_ref: str,
+    ):
+        return lifecycle.hypothesis(
+            task_id,
+            phase_id=HYPOTHESIS,
+            hypothesis=f"candidate cause {suffix}",
+            verifier=f"debugger-{suffix}",
+            status=status,
+            rationale=f"experiment {suffix} was {status}",
+            evidence_refs=(evidence_ref,),
+            idempotency_key=f"hypothesis-{suffix}",
+        )
 
     def test_explicit_workflow_snapshot_survives_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -529,6 +602,319 @@ class WorkflowLifecycleTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "phase_not_running")
             self.assertEqual(calls, [])
             self.assertEqual(lifecycle.ledger.event_count(), before)
+
+    def test_hypothesis_outcomes_count_only_rejections_and_replay_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lifecycle, task = self._begin(root)
+            task = self._start_hypothesis(lifecycle, task, "outcomes")
+            self.assertIn("hypothesis", task.allowed_next)
+
+            for suffix, status, expected in (
+                ("supported", "supported", 0),
+                ("unclear", "inconclusive", 0),
+                ("rejected", "rejected", 1),
+            ):
+                evidence = self._hypothesis_evidence(
+                    lifecycle,
+                    task.task_id,
+                    suffix,
+                )
+                task = self._record_hypothesis(
+                    lifecycle,
+                    task.task_id,
+                    suffix=suffix,
+                    status=status,
+                    evidence_ref=evidence,
+                )
+                self.assertEqual(task.hypothesis_count, expected)
+
+            count = lifecycle.ledger.event_count()
+            replay = self._record_hypothesis(
+                lifecycle,
+                task.task_id,
+                suffix="rejected",
+                status="rejected",
+                evidence_ref=self._hypothesis_evidence(
+                    lifecycle,
+                    task.task_id,
+                    "rejected",
+                ),
+            )
+            self.assertEqual(replay.hypothesis_count, 1)
+            self.assertEqual(lifecycle.ledger.event_count(), count)
+            self.assertEqual(self._lifecycle(root).get(task.task_id), replay)
+
+    def test_third_rejection_blocks_effects_until_trusted_phase_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            calls = []
+            lifecycle = TaskLifecycle(
+                root,
+                policy=TaskPolicy(verification_commands=(COMMAND,)),
+                approval_authorizer=lambda _approver, stage, proof: (
+                    stage == "phase" and proof == "trusted"
+                ),
+                effect_runner=lambda action: calls.append(action) or {"status": "ok"},
+            )
+            task = lifecycle.begin(
+                self._contract(),
+                idempotency_key="threshold-begin",
+                workflow="root-cause-protocol",
+            )
+            task = self._start_hypothesis(lifecycle, task, "threshold")
+            hypothesis_hashes = []
+            for index in range(1, 4):
+                suffix = f"threshold-{index}"
+                evidence = self._hypothesis_evidence(
+                    lifecycle,
+                    task.task_id,
+                    suffix,
+                )
+                task = self._record_hypothesis(
+                    lifecycle,
+                    task.task_id,
+                    suffix=suffix,
+                    status="rejected",
+                    evidence_ref=evidence,
+                )
+                hypothesis_hashes.append(
+                    task.idempotency[("hypothesis", f"hypothesis-{suffix}")]
+                    .event_hashes[-1]
+                )
+
+            self.assertEqual(task.hypothesis_count, 3)
+            self.assertEqual(task.state, TaskState.BLOCKED)
+            self.assertEqual(task.workflow_phases[1].status, "blocked")
+            self.assertEqual(task.allowed_next, ("approve",))
+            gate_events = [
+                event
+                for event in lifecycle.ledger.events_for_contract(
+                    task.task_id,
+                    all_segments=True,
+                )
+                if event.event_type == "gate_decision"
+                and event.payload.get("operation") == "hypothesis"
+            ]
+            self.assertEqual(len(gate_events), 1)
+            self.assertEqual(gate_events[0].payload["decision"], "escalate")
+            approval_refs = (*hypothesis_hashes, gate_events[0].entry_hash)
+
+            before_calls = len(calls)
+            with self.assertRaises(TaskLifecycleError):
+                lifecycle.action(
+                    task.task_id,
+                    {
+                        "kind": "file_write",
+                        "path": "out/blocked.txt",
+                        "content": "must not run",
+                    },
+                    idempotency_key="blocked-effect",
+                )
+            self.assertEqual(len(calls), before_calls)
+
+            before = lifecycle.ledger.event_count()
+            with self.assertRaises(TaskLifecycleError) as unrelated:
+                lifecycle.approve(
+                    task.task_id,
+                    stage="phase",
+                    phase_id=HYPOTHESIS,
+                    approved=True,
+                    approver="operator",
+                    rationale="reviewed rejected hypotheses",
+                    evidence_refs=(task.event_hashes[0],),
+                    idempotency_key="phase-approval-unrelated",
+                    proof="trusted",
+                )
+            self.assertEqual(unrelated.exception.code, "evidence_scope_mismatch")
+            self.assertEqual(lifecycle.ledger.event_count(), before)
+
+            with self.assertRaises(TaskLifecycleError) as untrusted:
+                lifecycle.approve(
+                    task.task_id,
+                    stage="phase",
+                    phase_id=HYPOTHESIS,
+                    approved=True,
+                    approver="operator",
+                    rationale="reviewed rejected hypotheses",
+                    evidence_refs=approval_refs,
+                    idempotency_key="phase-approval",
+                    proof="untrusted",
+                )
+            self.assertEqual(untrusted.exception.code, "approval_required")
+            self.assertEqual(lifecycle.ledger.event_count(), before)
+
+            task = lifecycle.approve(
+                task.task_id,
+                stage="phase",
+                phase_id=HYPOTHESIS,
+                approved=True,
+                approver="operator",
+                rationale="reviewed rejected hypotheses",
+                evidence_refs=approval_refs,
+                idempotency_key="phase-approval",
+                proof="trusted",
+            )
+            self.assertEqual(task.state, TaskState.EXECUTING)
+            self.assertEqual(task.workflow_phases[1].status, "failed")
+            self.assertEqual(task.hypothesis_count, 3)
+            self.assertEqual(task.allowed_next, ("phase_start", "reject"))
+
+            task = lifecycle.phase(
+                task.task_id,
+                phase_id=HYPOTHESIS,
+                action="start",
+                idempotency_key="hypothesis-restart",
+            )
+            self.assertEqual(task.workflow_phases[1].attempt, 2)
+            evidence = self._hypothesis_evidence(
+                lifecycle,
+                task.task_id,
+                "after-approval",
+            )
+            task = self._record_hypothesis(
+                lifecycle,
+                task.task_id,
+                suffix="after-approval",
+                status="rejected",
+                evidence_ref=evidence,
+            )
+            self.assertEqual(task.hypothesis_count, 4)
+            self.assertEqual(task.state, TaskState.EXECUTING)
+            self.assertEqual(
+                task.idempotency[("hypothesis", "hypothesis-after-approval")]
+                .response["failed_hypotheses"],
+                1,
+            )
+            for index in (2, 3):
+                suffix = f"after-approval-{index}"
+                evidence = self._hypothesis_evidence(
+                    lifecycle,
+                    task.task_id,
+                    suffix,
+                )
+                task = self._record_hypothesis(
+                    lifecycle,
+                    task.task_id,
+                    suffix=suffix,
+                    status="rejected",
+                    evidence_ref=evidence,
+                )
+            self.assertEqual(task.state, TaskState.BLOCKED)
+            self.assertEqual(task.hypothesis_count, 6)
+
+            before = lifecycle.ledger.event_count()
+            replay = lifecycle.approve(
+                task.task_id,
+                stage="phase",
+                phase_id=HYPOTHESIS,
+                approved=True,
+                approver="operator",
+                rationale="reviewed rejected hypotheses",
+                evidence_refs=approval_refs,
+                idempotency_key="phase-approval",
+                proof="trusted",
+            )
+            self.assertEqual(replay.state, TaskState.BLOCKED)
+            self.assertEqual(replay.workflow_phases[1].status, "blocked")
+            self.assertEqual(lifecycle.ledger.event_count(), before)
+
+    def test_hypothesis_block_recovers_after_transition_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lifecycle, task = self._begin(root)
+            task = self._start_hypothesis(lifecycle, task, "crash")
+            for index in range(1, 3):
+                suffix = f"crash-{index}"
+                evidence = self._hypothesis_evidence(
+                    lifecycle,
+                    task.task_id,
+                    suffix,
+                )
+                task = self._record_hypothesis(
+                    lifecycle,
+                    task.task_id,
+                    suffix=suffix,
+                    status="rejected",
+                    evidence_ref=evidence,
+                )
+            final_evidence = self._hypothesis_evidence(
+                lifecycle,
+                task.task_id,
+                "crash-3",
+            )
+            original_transition = lifecycle._append_transition
+
+            def crash_before_blocked(session, target, **kwargs):
+                if target is TaskState.BLOCKED:
+                    raise RuntimeError("simulated transition crash")
+                return original_transition(session, target, **kwargs)
+
+            with patch.object(
+                lifecycle,
+                "_append_transition",
+                crash_before_blocked,
+            ), self.assertRaises(RuntimeError):
+                self._record_hypothesis(
+                    lifecycle,
+                    task.task_id,
+                    suffix="crash-3",
+                    status="rejected",
+                    evidence_ref=final_evidence,
+                )
+
+            fresh = self._lifecycle(root)
+            blocked = fresh.get(task.task_id)
+            self.assertEqual(blocked.state, TaskState.BLOCKED)
+            before = fresh.ledger.event_count()
+            recovered = self._record_hypothesis(
+                fresh,
+                task.task_id,
+                suffix="crash-3",
+                status="rejected",
+                evidence_ref=final_evidence,
+            )
+            self.assertEqual(recovered.state, TaskState.BLOCKED)
+            self.assertEqual(recovered.hypothesis_count, 3)
+            self.assertEqual(fresh.ledger.event_count(), before + 1)
+            gates = [
+                event
+                for event in fresh.ledger.events_for_contract(
+                    task.task_id,
+                    all_segments=True,
+                )
+                if event.event_type == "gate_decision"
+                and event.payload.get("operation") == "hypothesis"
+            ]
+            self.assertEqual(len(gates), 1)
+
+    def test_hypothesis_threshold_comes_from_frozen_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lifecycle = self._lifecycle(root)
+            task = lifecycle.begin(
+                self._contract(max_failed_hypotheses=2),
+                idempotency_key="custom-threshold",
+                workflow="root-cause-protocol",
+            )
+            task = self._start_hypothesis(lifecycle, task, "custom-threshold")
+            for index in (1, 2):
+                suffix = f"custom-threshold-{index}"
+                evidence = self._hypothesis_evidence(
+                    lifecycle,
+                    task.task_id,
+                    suffix,
+                )
+                task = self._record_hypothesis(
+                    lifecycle,
+                    task.task_id,
+                    suffix=suffix,
+                    status="rejected",
+                    evidence_ref=evidence,
+                )
+
+            self.assertEqual(task.hypothesis_count, 2)
+            self.assertEqual(task.state, TaskState.BLOCKED)
 
     def test_incomplete_workflow_cannot_complete(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

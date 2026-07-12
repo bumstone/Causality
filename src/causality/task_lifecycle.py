@@ -583,6 +583,11 @@ def _validate_phase_evidence_events(
             "phase_evidence_incomplete",
             "phase finish requires task-scoped evidence",
         )
+    if any(not isinstance(ref, str) or not _SHA256.fullmatch(ref) for ref in refs):
+        raise _error(
+            "phase_evidence_incomplete",
+            "phase evidence references must be SHA-256 hashes",
+        )
     if len(refs) != len(set(refs)):
         raise _error(
             "phase_evidence_incomplete",
@@ -868,14 +873,19 @@ def _workflow_allowed_next(
     if current is None:
         return ("verify", "verdict", "append_evidence", "complete")
     if current.status == "running":
-        return (
+        operations = [
             "action",
             "verify",
             "verdict",
             "append_evidence",
-            "phase_finish",
-            "reject",
-        )
+        ]
+        if (current.playbook, current.name) in {
+            ("root-cause-protocol", "hypothesis"),
+            ("debugging", "isolate"),
+        }:
+            operations.append("hypothesis")
+        operations.extend(("phase_finish", "reject"))
+        return tuple(operations)
     if state is TaskState.PLANNED:
         return ("approve", "phase_start", "reject")
     return ("phase_start", "reject")
@@ -2945,6 +2955,199 @@ class TaskLifecycle:
             status=status,
         )
 
+    @staticmethod
+    def _current_hypothesis_records(
+        session: TaskSession,
+    ) -> tuple[IdempotencyRecord, ...]:
+        positions = {
+            event_hash: index
+            for index, event_hash in enumerate(session.event_hashes)
+        }
+        last_approval = max(
+            (
+                positions.get(record.event_hashes[-1], -1)
+                for record in session.idempotency.values()
+                if record.operation == "approve"
+                and isinstance(record.response, Mapping)
+                and record.response.get("stage") == "phase"
+                and record.response.get("approved") is True
+            ),
+            default=-1,
+        )
+        return tuple(
+            sorted(
+                (
+                    record
+                    for record in session.idempotency.values()
+                    if record.operation == "hypothesis"
+                    and positions.get(record.event_hashes[-1], -1) > last_approval
+                ),
+                key=lambda record: positions.get(record.event_hashes[-1], -1),
+            )
+        )
+
+    def _hypothesis_block_record(
+        self,
+        session: TaskSession,
+    ) -> IdempotencyRecord | None:
+        maximum = int(
+            self._contract(session).stopping_policy.get(
+                "max_failed_hypotheses",
+                0,
+            )
+            or 0
+        )
+        if maximum < 1:
+            return None
+        return next(
+            (
+                record
+                for record in reversed(self._current_hypothesis_records(session))
+                if isinstance(record.response, Mapping)
+                and record.response.get("failed_hypotheses", 0) >= maximum
+            ),
+            None,
+        )
+
+    @classmethod
+    def _failed_hypotheses(cls, session: TaskSession) -> int:
+        return sum(
+            1
+            for record in cls._current_hypothesis_records(session)
+            if isinstance(record.response, Mapping)
+            and record.response.get("status") == "rejected"
+        )
+
+    def _reconcile_hypothesis_block(self, session: TaskSession) -> TaskSession:
+        record = self._hypothesis_block_record(session)
+        if record is None:
+            return session
+        failed = int(record.response["failed_hypotheses"])
+        gate_event = self._authoritative_event(
+            session.task_id,
+            "hypothesis",
+            record.idempotency_key,
+            record.request_sha256,
+            AuditEventType.GATE_DECISION,
+        )
+        if gate_event is None:
+            gate = self.runtime.should_stop(
+                self._contract(session),
+                {"failed_hypotheses": failed},
+                event_metadata=self._operation_metadata(
+                    session.task_id,
+                    "hypothesis",
+                    record.idempotency_key,
+                    record.request_sha256,
+                ),
+            )
+            if gate.decision is not GateDecision.ESCALATE:
+                raise _error(
+                    "invalid_task_event",
+                    "hypothesis threshold did not produce escalation",
+                )
+            gate_event = self._authoritative_event(
+                session.task_id,
+                "hypothesis",
+                record.idempotency_key,
+                record.request_sha256,
+                AuditEventType.GATE_DECISION,
+            )
+        if gate_event is None:
+            raise _error("invalid_task_event", "hypothesis escalation is missing")
+        durable_state = self._durable_state(session.task_id)
+        if durable_state is TaskState.BLOCKED:
+            return self.get(session.task_id)
+        if durable_state is not TaskState.EXECUTING:
+            raise _error(
+                "invalid_transition",
+                "hypothesis escalation requires executing state",
+            )
+        self._append_transition(
+            replace(session, state=durable_state),
+            TaskState.BLOCKED,
+            reason="failed hypothesis limit requires human review",
+            cause_event_hash=gate_event.entry_hash,
+        )
+        return self.get(session.task_id)
+
+    def _phase_block_event(self, session: TaskSession) -> LedgerEvent | None:
+        current = session.current_phase_id
+        return next(
+            (
+                event
+                for event in reversed(
+                    self.ledger.events_for_contract(
+                        session.task_id,
+                        all_segments=True,
+                    )
+                )
+                if event.event_type == TASK_OPERATION
+                and event.payload.get("operation") == "phase"
+                and isinstance(event.payload.get("response"), Mapping)
+                and isinstance(event.payload["response"].get("phase"), Mapping)
+                and event.payload["response"]["phase"].get("phase_id") == current
+                and event.payload["response"]["phase"].get("status") == "blocked"
+            ),
+            None,
+        )
+
+    def _reconcile_phase_block(self, session: TaskSession) -> TaskSession:
+        current = next(
+            (
+                phase
+                for phase in session.workflow_phases
+                if phase.phase_id == session.current_phase_id
+            ),
+            None,
+        )
+        if current is None or current.status != "blocked":
+            return session
+        hypothesis = self._hypothesis_block_record(session)
+        if hypothesis is not None:
+            return self._reconcile_hypothesis_block(session)
+        durable_state = self._durable_state(session.task_id)
+        if durable_state is TaskState.BLOCKED:
+            return session
+        cause = self._phase_block_event(session)
+        if cause is None or durable_state is not TaskState.EXECUTING:
+            raise _error("invalid_task_event", "blocked phase has no durable cause")
+        self._append_transition(
+            replace(session, state=durable_state),
+            TaskState.BLOCKED,
+            reason="workflow phase requires human review",
+            cause_event_hash=cause.entry_hash,
+        )
+        return self.get(session.task_id)
+
+    def _phase_approval_evidence(self, session: TaskSession) -> tuple[str, ...]:
+        hypothesis = self._hypothesis_block_record(session)
+        if hypothesis is not None:
+            gate = self._authoritative_event(
+                session.task_id,
+                "hypothesis",
+                hypothesis.idempotency_key,
+                hypothesis.request_sha256,
+                AuditEventType.GATE_DECISION,
+            )
+            if gate is None:
+                raise _error(
+                    "invalid_task_event",
+                    "blocked hypothesis phase is missing its escalation gate",
+                )
+            rejected = tuple(
+                record.event_hashes[-1]
+                for record in self._current_hypothesis_records(session)
+                if isinstance(record.response, Mapping)
+                and record.response.get("status") == "rejected"
+            )
+            return (*rejected, gate.entry_hash)
+        cause_event = self._phase_block_event(session)
+        cause = cause_event.entry_hash if cause_event is not None else None
+        if cause is None:
+            raise _error("invalid_task_event", "blocked phase has no approval evidence")
+        return (cause,)
+
     def phase(
         self,
         task_id: str,
@@ -3032,7 +3235,86 @@ class TaskLifecycle:
                 request,
                 {"phase": phase_value},
             )
+            if status == "blocked":
+                session = self.get(task_id)
+                return self._reconcile_phase_block(session)
             return self.get(task_id)
+
+    def hypothesis(
+        self,
+        task_id: str,
+        *,
+        phase_id: str,
+        hypothesis: str,
+        verifier: str,
+        status: str,
+        rationale: str,
+        evidence_refs: tuple[str, ...],
+        idempotency_key: str,
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        values = {
+            "phase_id": phase_id,
+            "hypothesis": hypothesis,
+            "verifier": verifier,
+            "rationale": rationale,
+        }
+        if any(not isinstance(value, str) or not value.strip() for value in values.values()):
+            raise _error("validation_error", "hypothesis text fields must be non-blank")
+        if status not in {"supported", "rejected", "inconclusive"}:
+            raise _error(
+                "validation_error",
+                "hypothesis status must be supported, rejected, or inconclusive",
+            )
+        refs = tuple(evidence_refs)
+        request = {
+            **{name: value.strip() for name, value in values.items()},
+            "status": status,
+            "evidence_refs": list(refs),
+        }
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            if self._existing(session, "hypothesis", key, digest) is not None:
+                return self._reconcile_phase_block(session)
+            phase = self._require_running_workflow_phase(session, "hypothesis")
+            session = self._ensure_executing(session)
+            if session.unresolved_intents:
+                raise _error("task_blocked", "unresolved intent blocks hypotheses")
+            if phase is None or phase.phase_id != request["phase_id"]:
+                raise _error(
+                    "phase_mismatch",
+                    "phase_id does not match the running workflow phase",
+                )
+            if (phase.playbook, phase.name) not in {
+                ("root-cause-protocol", "hypothesis"),
+                ("debugging", "isolate"),
+            }:
+                raise _error(
+                    "hypothesis_not_allowed",
+                    "hypotheses are only allowed in a debugging hypothesis phase",
+                )
+            evidence = self._phase_evidence(session, phase, refs, "failed")
+            hypothesis_count = session.hypothesis_count + int(status == "rejected")
+            failed_hypotheses = self._failed_hypotheses(session) + int(
+                status == "rejected"
+            )
+            self._append_operation(
+                session,
+                "hypothesis",
+                key,
+                digest,
+                request,
+                {
+                    "phase_id": phase.phase_id,
+                    "status": status,
+                    "evidence_refs": list(evidence),
+                    "hypothesis_count": hypothesis_count,
+                    "failed_hypotheses": failed_hypotheses,
+                },
+            )
+            session = self.get(task_id)
+            return self._reconcile_phase_block(session)
 
     def approve(
         self,
@@ -3042,17 +3324,24 @@ class TaskLifecycle:
         approved: bool,
         approver: str,
         rationale: str,
+        phase_id: str | None = None,
         evidence_refs: tuple[str, ...] = (),
         idempotency_key: str,
         proof: str | None = None,
     ) -> TaskSession:
         key = _idempotency_key(idempotency_key)
         action_stage = stage in IRREVERSIBLE_ACTIONS
-        if stage not in {"plan", "final"} and not action_stage:
+        if stage not in {"plan", "final", "phase"} and not action_stage:
             raise _error(
                 "validation_error",
-                "approval stage must be plan, final, or an irreversible action kind",
+                "approval stage must be plan, final, phase, or an irreversible action kind",
             )
+        if stage == "phase":
+            if not isinstance(phase_id, str) or not phase_id.strip():
+                raise _error("validation_error", "phase approval requires phase_id")
+            phase_id = phase_id.strip()
+        elif phase_id is not None:
+            raise _error("validation_error", "phase_id is only valid for phase approval")
         if not isinstance(approved, bool):
             raise _error("validation_error", "approved must be a boolean")
         if not isinstance(approver, str) or not approver.strip():
@@ -3067,11 +3356,38 @@ class TaskLifecycle:
             "rationale": rationale.strip(),
             "evidence_refs": list(refs),
         }
+        if stage == "phase":
+            request["phase_id"] = phase_id
         digest = canonical_sha256(request)
         with self.runtime.execution_lock():
             session = self.get(task_id)
+            if stage == "phase":
+                session = self._reconcile_phase_block(session)
             prior = self._existing(session, "approve", key, digest)
             if prior is not None:
+                if stage == "phase":
+                    current = next(
+                        (
+                            phase
+                            for phase in session.workflow_phases
+                            if phase.phase_id == session.current_phase_id
+                        ),
+                        None,
+                    )
+                    if (
+                        approved
+                        and session.state is TaskState.BLOCKED
+                        and current is not None
+                        and current.status == "failed"
+                    ):
+                        self._append_transition(
+                            session,
+                            TaskState.EXECUTING,
+                            reason="trusted phase approval restarted debugging",
+                            cause_event_hash=prior.event_hashes[-1],
+                        )
+                        return self.get(task_id)
+                    return session
                 if not approved:
                     if action_stage:
                         return session
@@ -3134,6 +3450,30 @@ class TaskLifecycle:
                         "invalid_transition",
                         "final decision requires executing or completion-blocked state",
                     )
+                if stage == "phase":
+                    current = next(
+                        (
+                            phase
+                            for phase in session.workflow_phases
+                            if phase.phase_id == session.current_phase_id
+                        ),
+                        None,
+                    )
+                    if (
+                        session.state is not TaskState.BLOCKED
+                        or current is None
+                        or current.status != "blocked"
+                        or current.phase_id != phase_id
+                    ):
+                        raise _error(
+                            "invalid_transition",
+                            "phase decision requires the matching blocked phase",
+                        )
+                    if not refs:
+                        raise _error(
+                            "evidence_scope_mismatch",
+                            "phase approval requires task evidence",
+                        )
                 if (
                     stage == "final"
                     and session.state is TaskState.BLOCKED
@@ -3145,6 +3485,13 @@ class TaskLifecycle:
                     )
                 self._authorize(approver.strip(), stage, proof)
                 self._validate_evidence_refs(task_id, refs)
+                if stage == "phase" and set(refs) != set(
+                    self._phase_approval_evidence(session)
+                ):
+                    raise _error(
+                        "evidence_scope_mismatch",
+                        "phase approval must cite the current rejection streak and gate",
+                    )
                 if stage == "final" and approved and set(refs) != set(
                     self._current_evidence(session)
                 ):
@@ -3175,6 +3522,29 @@ class TaskLifecycle:
                         rationale.strip(),
                         metadata=metadata,
                     )
+            if stage == "phase":
+                operation = self._append_operation(
+                    session,
+                    "approve",
+                    key,
+                    digest,
+                    request,
+                    {
+                        "stage": stage,
+                        "approved": approved,
+                        "phase_id": phase_id,
+                        "decision_event_hash": decision.entry_hash,
+                    },
+                )
+                if approved:
+                    blocked = self.get(task_id)
+                    self._append_transition(
+                        blocked,
+                        TaskState.EXECUTING,
+                        reason="trusted phase approval restarted debugging",
+                        cause_event_hash=operation.entry_hash,
+                    )
+                return self.get(task_id)
             if not approved and not action_stage:
                 self._append_transition(
                     session,
@@ -4064,6 +4434,26 @@ class TaskLifecycle:
                 requirement_id = requirement.get("id")
                 if isinstance(requirement_id, str) and requirement_id:
                     requirement_results[requirement_id] = _freeze({"status": "pending"})
+        try:
+            max_failed_hypotheses = int(
+                contract.get("stopping_policy", {}).get(
+                    "max_failed_hypotheses",
+                    0,
+                )
+                or 0
+            )
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                "invalid_task_contract",
+                "max_failed_hypotheses must be an integer",
+            ) from exc
+        if max_failed_hypotheses < 0:
+            raise _error(
+                "invalid_task_contract",
+                "max_failed_hypotheses cannot be negative",
+            )
+        hypothesis_count = 0
+        failed_hypotheses = 0
 
         state = initial_state
         terminal_hash: str | None = None
@@ -4071,6 +4461,9 @@ class TaskLifecycle:
         reflection_intent: PendingIntent | None = None
         seen_hashes: set[str] = set()
         seen_positions: dict[str, int] = {}
+        rejected_hypothesis_hashes: list[str] = []
+        hypothesis_gate_hash: str | None = None
+        phase_block_hash: str | None = None
         started_seen = False
 
         for event in scoped:
@@ -4087,6 +4480,18 @@ class TaskLifecycle:
                 raise _error(
                     "invalid_task_order",
                     "task lifecycle event precedes task_started",
+                    event_hash=event.entry_hash,
+                )
+
+            if any(
+                phase["status"] == "blocked" for phase in workflow_phases
+            ) and (
+                event.payload.get("mutates_task") is True
+                or event.event_type == TASK_ACTION_INTENT
+            ):
+                raise _error(
+                    "invalid_task_state",
+                    "blocked workflow phase cannot record new effects",
                     event_hash=event.entry_hash,
                 )
 
@@ -4136,6 +4541,39 @@ class TaskLifecycle:
                         completion_blocks.pop(completed_id)
                 if state in {TaskState.VERIFIED, TaskState.REJECTED}:
                     terminal_hash = event.entry_hash
+                continue
+
+            if (
+                event.event_type == AuditEventType.GATE_DECISION.value
+                and event.payload.get("operation") == "hypothesis"
+            ):
+                payload = _common_payload(event, task_id)
+                key = _required_text(payload, "idempotency_key", event)
+                digest = _request_digest(payload, event)
+                operation_id = _required_text(payload, "operation_id", event)
+                record = idempotency.get(("hypothesis", key))
+                if (
+                    max_failed_hypotheses < 1
+                    or hypothesis_gate_hash is not None
+                    or payload.get("decision") != GateDecision.ESCALATE.value
+                    or record is None
+                    or record.operation_id != operation_id
+                    or record.request_sha256 != digest
+                    or not isinstance(record.response, Mapping)
+                    or record.response.get("status") != "rejected"
+                    or record.event_hashes[-1]
+                    not in rejected_hypothesis_hashes
+                    or record.response.get("failed_hypotheses")
+                    != len(rejected_hypothesis_hashes)
+                    or record.response.get("failed_hypotheses", 0)
+                    < max_failed_hypotheses
+                ):
+                    raise _error(
+                        "invalid_task_event",
+                        "hypothesis escalation gate is invalid",
+                        event_hash=event.entry_hash,
+                    )
+                hypothesis_gate_hash = event.entry_hash
                 continue
 
             if (
@@ -4217,6 +4655,20 @@ class TaskLifecycle:
                 operation_id = _required_text(payload, "operation_id", event)
                 key = _required_text(payload, "idempotency_key", event)
                 digest = _request_digest(payload, event)
+                phase_blocked = any(
+                    phase["status"] == "blocked" for phase in workflow_phases
+                )
+                phase_approval = bool(
+                    operation == "approve"
+                    and isinstance(payload.get("request"), Mapping)
+                    and payload["request"].get("stage") == "phase"
+                )
+                if phase_blocked and not phase_approval:
+                    raise _error(
+                        "invalid_task_state",
+                        "blocked workflow phase only accepts phase approval",
+                        event_hash=event.entry_hash,
+                    )
                 scope = (operation, key)
                 if scope in idempotency or operation_id in operation_ids:
                     rejection = authoritative_rejections.get(operation_id)
@@ -4393,6 +4845,8 @@ class TaskLifecycle:
                             start_index=expected["start_position"],
                             status=status_value,
                         )
+                    if status_value == "blocked":
+                        phase_block_hash = event.entry_hash
                     expected.update(
                         {
                             "status": status_value,
@@ -4405,6 +4859,212 @@ class TaskLifecycle:
                             ),
                         }
                     )
+                elif operation == "hypothesis":
+                    request_value = payload.get("request")
+                    response_value = response if isinstance(response, Mapping) else None
+                    request_fields = {
+                        "phase_id",
+                        "hypothesis",
+                        "verifier",
+                        "status",
+                        "rationale",
+                        "evidence_refs",
+                    }
+                    response_fields = {
+                        "phase_id",
+                        "status",
+                        "evidence_refs",
+                        "hypothesis_count",
+                        "failed_hypotheses",
+                    }
+                    current = _current_workflow_phase(workflow_phases)
+                    if (
+                        state is not TaskState.EXECUTING
+                        or record.outcome != "completed"
+                        or not isinstance(request_value, Mapping)
+                        or set(request_value) != request_fields
+                        or not isinstance(response_value, Mapping)
+                        or set(response_value) != response_fields
+                        or current is None
+                        or current["status"] != "running"
+                    ):
+                        raise _error(
+                            "invalid_task_event",
+                            "hypothesis operation shape or state is invalid",
+                            event_hash=event.entry_hash,
+                        )
+                    phase_id = request_value.get("phase_id")
+                    hypothesis = request_value.get("hypothesis")
+                    verifier = request_value.get("verifier")
+                    status_value = request_value.get("status")
+                    rationale = request_value.get("rationale")
+                    evidence_refs = request_value.get("evidence_refs")
+                    if (
+                        phase_id != current["phase_id"]
+                        or (current["playbook"], current["name"])
+                        not in {
+                            ("root-cause-protocol", "hypothesis"),
+                            ("debugging", "isolate"),
+                        }
+                        or any(
+                            not isinstance(value, str) or not value.strip()
+                            for value in (phase_id, hypothesis, verifier, rationale)
+                        )
+                        or status_value
+                        not in {"supported", "rejected", "inconclusive"}
+                        or not isinstance(evidence_refs, (list, tuple))
+                        or canonical_sha256(_thaw(request_value)) != digest
+                    ):
+                        raise _error(
+                            "invalid_task_event",
+                            "hypothesis operation request is invalid",
+                            event_hash=event.entry_hash,
+                        )
+                    phase = WorkflowPhase(
+                        phase_id=current["phase_id"],
+                        playbook=current["playbook"],
+                        name=current["name"],
+                        steps=tuple(current["steps"]),
+                        requires_action=current["requires_action"],
+                        requires_verification=current["requires_verification"],
+                        requires_verdicts=current["requires_verdicts"],
+                        status=current["status"],
+                        attempt=current["attempt"],
+                        evidence_hashes=tuple(current["evidence_hashes"]),
+                    )
+                    evidence = _validate_phase_evidence_events(
+                        scoped[: seen_positions[event.entry_hash]],
+                        phase,
+                        tuple(evidence_refs),
+                        start_index=current["start_position"],
+                        status="failed",
+                    )
+                    hypothesis_count += int(status_value == "rejected")
+                    failed_hypotheses += int(status_value == "rejected")
+                    if status_value == "rejected":
+                        rejected_hypothesis_hashes.append(event.entry_hash)
+                    expected_response = {
+                        "phase_id": phase_id,
+                        "status": status_value,
+                        "evidence_refs": list(evidence),
+                        "hypothesis_count": hypothesis_count,
+                        "failed_hypotheses": failed_hypotheses,
+                    }
+                    if _thaw(response_value) != expected_response:
+                        raise _error(
+                            "invalid_task_event",
+                            "hypothesis operation response is invalid",
+                            event_hash=event.entry_hash,
+                        )
+                    if (
+                        max_failed_hypotheses
+                        and failed_hypotheses >= max_failed_hypotheses
+                    ):
+                        current.update(
+                            {
+                                "status": "blocked",
+                                "evidence_hashes": tuple(evidence),
+                            }
+                        )
+                elif operation == "approve":
+                    request_value = payload.get("request")
+                    if (
+                        isinstance(request_value, Mapping)
+                        and request_value.get("stage") == "phase"
+                    ):
+                        response_value = (
+                            response if isinstance(response, Mapping) else None
+                        )
+                        current = _current_workflow_phase(workflow_phases)
+                        phase_id = request_value.get("phase_id")
+                        approved = request_value.get("approved")
+                        refs = request_value.get("evidence_refs")
+                        decision_hash = (
+                            response_value.get("decision_event_hash")
+                            if isinstance(response_value, Mapping)
+                            else None
+                        )
+                        decision_event = next(
+                            (
+                                prior
+                                for prior in scoped[
+                                    : seen_positions[event.entry_hash]
+                                ]
+                                if prior.entry_hash == decision_hash
+                            ),
+                            None,
+                        )
+                        expected_request_fields = {
+                            "stage",
+                            "approved",
+                            "approver",
+                            "rationale",
+                            "evidence_refs",
+                            "phase_id",
+                        }
+                        expected_response = {
+                            "stage": "phase",
+                            "approved": approved,
+                            "phase_id": phase_id,
+                            "decision_event_hash": decision_hash,
+                        }
+                        required_phase_refs = (
+                            set(rejected_hypothesis_hashes)
+                            | {hypothesis_gate_hash}
+                            if hypothesis_gate_hash is not None
+                            else {phase_block_hash}
+                            if phase_block_hash is not None
+                            else set()
+                        )
+                        if (
+                            state is not TaskState.BLOCKED
+                            or record.outcome != "completed"
+                            or set(request_value) != expected_request_fields
+                            or not isinstance(approved, bool)
+                            or not isinstance(refs, (list, tuple))
+                            or not refs
+                            or any(
+                                not isinstance(ref, str)
+                                or not _SHA256.fullmatch(ref)
+                                or ref not in seen_hashes
+                                for ref in refs
+                            )
+                            or len(refs) != len(set(refs))
+                            or set(refs) != required_phase_refs
+                            or current is None
+                            or current["status"] != "blocked"
+                            or phase_id != current["phase_id"]
+                            or canonical_sha256(_thaw(request_value)) != digest
+                            or _thaw(response_value) != expected_response
+                            or decision_event is None
+                            or decision_event.event_type
+                            != AuditEventType.HUMAN_DECISION.value
+                            or decision_event.payload.get("operation") != "approve"
+                            or decision_event.payload.get("idempotency_key") != key
+                            or decision_event.payload.get("request_sha256") != digest
+                            or decision_event.payload.get("stage") != "phase"
+                            or decision_event.payload.get("approved") is not approved
+                            or decision_event.payload.get("approver")
+                            != request_value.get("approver")
+                            or decision_event.payload.get("rationale")
+                            != request_value.get("rationale")
+                            or (
+                                approved
+                                and decision_event.payload.get("evidence_refs")
+                                != list(refs)
+                            )
+                        ):
+                            raise _error(
+                                "invalid_task_event",
+                                "phase approval operation is invalid",
+                                event_hash=event.entry_hash,
+                            )
+                        if approved:
+                            current["status"] = "failed"
+                            failed_hypotheses = 0
+                            rejected_hypothesis_hashes.clear()
+                            hypothesis_gate_hash = None
+                            phase_block_hash = None
                 elif operation == "complete":
                     completion_intent = completion_intents.get(operation_id)
                     response_map = response if isinstance(response, Mapping) else {}
@@ -4724,10 +5384,13 @@ class TaskLifecycle:
                 "terminal task contains an unfinished completion decision",
                 task_id=task_id,
             )
+        workflow_blocked = any(
+            phase["status"] == "blocked" for phase in workflow_phases
+        )
         if rejection_event is not None:
             projected_state = TaskState.REJECTED
             terminal_hash = terminal_hash or rejection_event.entry_hash
-        elif action_orphan or completion_orphan:
+        elif action_orphan or completion_orphan or workflow_blocked:
             projected_state = TaskState.BLOCKED
         else:
             projected_state = state
@@ -4781,11 +5444,14 @@ class TaskLifecycle:
                 projected_workflow_phases,
                 projected_current_phase,
             ),
+            hypothesis_count=hypothesis_count,
             blocked_reason=(
                 "unresolved action intent"
                 if action_orphan
                 else "unfinished completion decision"
                 if completion_orphan
+                else "workflow phase requires human review"
+                if workflow_blocked
                 else None
             ),
             workflow=workflow,
