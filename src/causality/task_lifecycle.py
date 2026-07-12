@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import tempfile
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -39,7 +40,7 @@ from .browser_adapter import (
     INSPECTION_KINDS,
     REF_RE,
 )
-from .durable import file_lock, write_text_durably
+from .durable import file_lock
 from .execution import ActionBlocked, ExecutionAdapter
 from .gates import GateResult
 from .http_adapter import (
@@ -72,6 +73,7 @@ _BROWSER_TOOL_BY_OPERATION = MappingProxyType(
 _BROWSER_TOOLS = frozenset(_BROWSER_TOOL_BY_OPERATION.values())
 _BROWSER_MODES = frozenset({"interactive", "compact", "full"})
 _MAX_BROWSER_CACHE_BYTES = 8 * 1024 * 1024
+_browser_mkstemp = tempfile.mkstemp
 _CALLER_FORBIDDEN_HTTP_HEADERS = frozenset(
     {
         "authorization",
@@ -1525,14 +1527,7 @@ class TaskLifecycle:
                 directory /= part
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                status = directory.lstat()
-                if not stat.S_ISDIR(status.st_mode) or not _within(
-                    directory.resolve(), self.project_root
-                ):
-                    raise _error(
-                        "browser_runtime_invalid",
-                        "browser runtime directory escapes the project",
-                    )
+                self._browser_directory_identity(directory)
             except OSError as exc:
                 raise _error(
                     "browser_runtime_invalid",
@@ -1543,6 +1538,17 @@ class TaskLifecycle:
             except OSError:
                 pass
         return directory
+
+    def _browser_directory_identity(self, directory: Path) -> tuple[int, int]:
+        status = directory.lstat()
+        if not stat.S_ISDIR(status.st_mode) or not _within(
+            directory.resolve(), self.project_root
+        ):
+            raise _error(
+                "browser_runtime_invalid",
+                "browser runtime directory escapes the project",
+            )
+        return status.st_dev, status.st_ino
 
     def _browser_internal_path(
         self,
@@ -1573,15 +1579,57 @@ class TaskLifecycle:
                 "browser_output_too_large",
                 "browser replay cache exceeds the server limit",
             )
-        path = self._browser_internal_path(
-            "observations", context, operation_id, ".json"
+        directory = self._browser_runtime_directory(
+            "observations", context.session_id
         )
-        write_text_durably(path, encoded)
+        parent_identity = self._browser_directory_identity(directory)
+        descriptor = -1
+        path: Path | None = None
         try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        return {"path": str(path), "bytes": size, "sha256": sha256_file(path)}
+            descriptor, raw_path = _browser_mkstemp(
+                dir=directory,
+                prefix=f"{operation_id}.",
+                suffix=".json",
+            )
+            path = Path(raw_path)
+            if self._browser_directory_identity(directory) != parent_identity:
+                raise _error(
+                    "browser_runtime_invalid",
+                    "browser runtime directory changed during cache creation",
+                )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                descriptor = -1
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+                opened = os.fstat(handle.fileno())
+            if self._browser_directory_identity(directory) != parent_identity:
+                raise _error(
+                    "browser_runtime_invalid",
+                    "browser runtime directory changed during cache write",
+                )
+            written = path.lstat()
+            if (
+                not stat.S_ISREG(written.st_mode)
+                or written.st_nlink != 1
+                or (written.st_dev, written.st_ino) != (opened.st_dev, opened.st_ino)
+                or not _within(path.resolve(), self.project_root)
+            ):
+                raise _error(
+                    "browser_runtime_invalid",
+                    "browser cache file changed during write",
+                )
+            return {
+                "path": str(path),
+                "bytes": size,
+                "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+            }
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if path is not None:
+                path.unlink(missing_ok=True)
+            raise
 
     def _read_browser_cache(self, response: Mapping[str, Any]) -> dict[str, str]:
         cache = response.get("cache")

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Mapping, Sequence
+from unittest.mock import patch
 
 from causality.browser_adapter import (
     A11yBrowserAdapter,
@@ -611,6 +612,44 @@ class BrowserLifecycleTests(unittest.TestCase):
                 task.task_id, idempotency_key="browser-complete"
             )
             self.assertEqual(completed.state, TaskState.VERIFIED)
+
+    def test_cache_parent_swap_is_detected_and_outside_file_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            outside = root / "outside"
+            outside.mkdir()
+            probe = root / "symlink-probe"
+            try:
+                os.symlink(outside, probe, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+            else:
+                probe.unlink()
+
+            driver = FakeBrowserDriver()
+            lifecycle = self._lifecycle(root, driver)
+            task = self._begin(lifecycle)
+            real_mkstemp = tempfile.mkstemp
+            swapped = False
+
+            def swapping_mkstemp(*args, **kwargs):
+                nonlocal swapped
+                directory = Path(kwargs["dir"])
+                if not swapped and directory.name:
+                    moved = directory.with_name(directory.name + "-moved")
+                    directory.rename(moved)
+                    os.symlink(outside, directory, target_is_directory=True)
+                    swapped = True
+                return real_mkstemp(*args, **kwargs)
+
+            with patch(
+                "causality.task_lifecycle._browser_mkstemp",
+                side_effect=swapping_mkstemp,
+            ), self.assertRaises(TaskLifecycleError) as caught:
+                self._observe(lifecycle, task.task_id)
+
+            self.assertEqual(caught.exception.code, "browser_runtime_invalid")
+            self.assertEqual(list(outside.iterdir()), [])
 
 
 if __name__ == "__main__":
