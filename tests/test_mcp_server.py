@@ -11,12 +11,17 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.mcp_server import CausalityMCPServer
+from causality.browser_adapter import (
+    A11yBrowserAdapter,
+    CommandResult,
+    REQUIRED_BROWSER_OPERATIONS,
+)
 from causality.http_adapter import HttpResult
 from causality.task_lifecycle import TaskLifecycle, TaskPolicy
 
@@ -34,6 +39,18 @@ LIFECYCLE_TOOLS = {
 }
 
 WIRE_COMMAND = (sys.executable, "-c", "print('wire-pass')")
+BROWSER_TOOLS = frozenset(
+    {
+        "browser.observe",
+        "browser.act",
+        "browser.assert",
+        "browser.inspect",
+        "browser.visual",
+    }
+)
+BROWSER_ORIGIN = "https://browser.example"
+BROWSER_PAGE_SECRET = "browser-page-secret-wire"
+BROWSER_VALUE_SECRET = "browser-value-secret-wire"
 
 
 class SimulatedProcessDeath(BaseException):
@@ -77,6 +94,57 @@ class _RecordingHttpAdapter:
             artifact_written=request.artifact_path is not None,
             artifact_sha256=digest if request.artifact_path is not None else None,
         )
+
+
+class _RecordingBrowserDriver:
+    def __init__(self) -> None:
+        self.effects = 0
+        self.calls: list[str] = []
+        self.states: dict[str, str] = {}
+
+    def __call__(
+        self, command: Sequence[str], environment: Mapping[str, str]
+    ) -> CommandResult:
+        operation = command[1]
+        self.calls.append(operation)
+        if operation == "capabilities":
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "protocol_version": 1,
+                        "session_isolation": True,
+                        "network_scope_enforcement": True,
+                        "operations": sorted(REQUIRED_BROWSER_OPERATIONS),
+                    }
+                ),
+                "",
+            )
+        session = environment["CAUSALITY_BROWSER_SESSION_ID"]
+        snapshot = self.states.setdefault(
+            session,
+            f'@e1 [button] "Before {BROWSER_PAGE_SECRET}"\n@e2 [textbox] "Email"',
+        )
+        if operation == "snapshot":
+            return CommandResult(0, snapshot, "")
+        if operation in {"click", "fill", "hover", "press", "select"}:
+            self.effects += 1
+            self.states[session] = (
+                f'@e1 [button] "After {BROWSER_PAGE_SECRET}"\n@e2 [textbox] "Email"'
+            )
+            return CommandResult(0, "acted", "")
+        if operation == "console":
+            return CommandResult(0, "console delta" if self.effects else "", "")
+        if operation == "network":
+            return CommandResult(0, "network delta" if self.effects else "", "")
+        if operation == "is":
+            return CommandResult(0, "true", "")
+        if operation in {"attrs", "html", "css"}:
+            return CommandResult(0, f"inspection {BROWSER_PAGE_SECRET}", "")
+        if operation == "screenshot":
+            Path(command[-1]).write_bytes(b"wire-png")
+            return CommandResult(0, "", "")
+        return CommandResult(9, "", "unknown")
 
 
 class MCPServerTests(unittest.TestCase):
@@ -420,6 +488,216 @@ class MCPServerTests(unittest.TestCase):
                 )
             )
             self.assertNotIn("contract_id", evidence["properties"])
+
+    def test_browser_tool_is_capability_gated_and_schema_is_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            default = self._server(temp_dir).handle(
+                {"jsonrpc": "2.0", "id": 20, "method": "tools/list"}
+            )
+            assert default is not None
+            self.assertNotIn(
+                "causality_task_browser",
+                {tool["name"] for tool in default["result"]["tools"]},
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            driver = _RecordingBrowserDriver()
+            server = CausalityMCPServer(
+                temp_dir,
+                policy=TaskPolicy(
+                    allowed_tools=BROWSER_TOOLS,
+                    allowed_network_origins=frozenset({BROWSER_ORIGIN}),
+                    verification_commands=(WIRE_COMMAND,),
+                ),
+                browser_adapter=A11yBrowserAdapter("fake", runner=driver),
+            )
+            response = server.handle(
+                {"jsonrpc": "2.0", "id": 21, "method": "tools/list"}
+            )
+            assert response is not None
+            tools = {tool["name"]: tool for tool in response["result"]["tools"]}
+            schema = tools["causality_task_browser"]["inputSchema"]
+            self.assertEqual(schema["type"], "object")
+            self.assertIs(schema["additionalProperties"], False)
+            self.assertEqual(
+                {
+                    branch["properties"]["operation"]["const"]
+                    for branch in schema["oneOf"]
+                },
+                {"observe", "act", "assert", "inspect", "visual"},
+            )
+            self.assertTrue(
+                all(
+                    branch["additionalProperties"] is False
+                    for branch in schema["oneOf"]
+                )
+            )
+
+    def test_browser_environment_command_is_explicit_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            driver = root / "browser_protocol.py"
+            driver.write_text(
+                "import json\n"
+                "print(json.dumps({"
+                "'protocol_version': 1, "
+                "'session_isolation': True, "
+                "'network_scope_enforcement': True, "
+                f"'operations': {sorted(REQUIRED_BROWSER_OPERATIONS)!r}"
+                "}))\n",
+                encoding="utf-8",
+            )
+            environment = {
+                "CAUSALITY_BROWSER_COMMAND_JSON": json.dumps(
+                    [sys.executable, str(driver)]
+                ),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                server = CausalityMCPServer(root)
+            self.assertTrue(BROWSER_TOOLS.issubset(server.lifecycle.policy.allowed_tools))
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"CAUSALITY_BROWSER_COMMAND_JSON": "[]"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "non-empty argv"):
+                CausalityMCPServer(temp_dir)
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"CAUSALITY_BROWSER_COMMAND_JSON": "not-json"},
+            clear=True,
+        ):
+            driver = _RecordingBrowserDriver()
+            server = CausalityMCPServer(
+                temp_dir,
+                policy=TaskPolicy(allowed_tools=BROWSER_TOOLS),
+                browser_adapter=A11yBrowserAdapter("fake", runner=driver),
+            )
+            self.assertTrue(BROWSER_TOOLS.issubset(server.lifecycle.policy.allowed_tools))
+
+    def test_browser_tool_returns_untrusted_data_and_replays_without_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            driver = _RecordingBrowserDriver()
+            adapter = A11yBrowserAdapter("fake", runner=driver)
+            policy = TaskPolicy(
+                allowed_tools=BROWSER_TOOLS,
+                allowed_network_origins=frozenset({BROWSER_ORIGIN}),
+                verification_commands=(WIRE_COMMAND,),
+            )
+            server = CausalityMCPServer(
+                root,
+                approval_token="trusted-secret",
+                policy=policy,
+                browser_adapter=adapter,
+            )
+            begin = self._begin_arguments(key="browser-wire-begin")
+            begin["permissions"] = {
+                "allowed_tools": sorted(BROWSER_TOOLS),
+                "write_scope": [],
+                "network_scope": [BROWSER_ORIGIN],
+                "auth_scope": [],
+            }
+            begin_result, begun = self._call(
+                server, "causality_task_begin", begin, request_id=22
+            )
+            self._assert_success(begin_result, begun, key="browser-wire-begin")
+            task_id = begun["task"]["task_id"]
+
+            observe_arguments = {
+                "task_id": task_id,
+                "idempotency_key": "browser-wire-observe",
+                "operation": "observe",
+                "mode": "interactive",
+            }
+            observe_result, observed = self._call(
+                server,
+                "causality_task_browser",
+                observe_arguments,
+                request_id=23,
+            )
+            self._assert_success(
+                observe_result, observed, key="browser-wire-observe"
+            )
+            self.assertIn(
+                BROWSER_PAGE_SECRET, observed["data"]["untrusted"]["snapshot"]
+            )
+            state_hash = observed["data"]["state_hash"]
+
+            approve_result, approved = self._call(
+                server,
+                "causality_task_approve",
+                {
+                    "task_id": task_id,
+                    "idempotency_key": "browser-wire-approval",
+                    "stage": "external_send",
+                    "approved": True,
+                    "approver": "operator",
+                    "rationale": "approve one state-bound browser action",
+                    "evidence_refs": [],
+                    "proof": "trusted-secret",
+                },
+                request_id=24,
+            )
+            self._assert_success(
+                approve_result, approved, key="browser-wire-approval"
+            )
+            act_arguments = {
+                "task_id": task_id,
+                "idempotency_key": "browser-wire-act",
+                "operation": "act",
+                "action": "fill",
+                "ref": "@e2",
+                "value": BROWSER_VALUE_SECRET,
+                "expected_state_hash": state_hash,
+            }
+            act_result, acted = self._call(
+                server, "causality_task_browser", act_arguments, request_id=25
+            )
+            self._assert_success(act_result, acted, key="browser-wire-act")
+            self.assertEqual(driver.effects, 1)
+            self.assertIn("diff", acted["data"]["untrusted"])
+
+            restarted = CausalityMCPServer(
+                root,
+                approval_token="trusted-secret",
+                policy=policy,
+                browser_adapter=adapter,
+            )
+            replay_result, replay = self._call(
+                restarted,
+                "causality_task_browser",
+                copy.deepcopy(act_arguments),
+                request_id=26,
+            )
+            self._assert_success(
+                replay_result, replay, key="browser-wire-act", replayed=True
+            )
+            self.assertEqual(driver.effects, 1)
+            self.assertEqual(replay["data"], acted["data"])
+            ledger_text = restarted.ledger.path.read_text(encoding="utf-8")
+            serialized = json.dumps(acted, sort_keys=True)
+            for secret in (BROWSER_PAGE_SECRET, BROWSER_VALUE_SECRET):
+                self.assertNotIn(secret, ledger_text)
+            self.assertNotIn(BROWSER_VALUE_SECRET, serialized)
+
+            invalid = dict(act_arguments)
+            invalid["idempotency_key"] = "browser-wire-invalid"
+            invalid["selector"] = "#unsafe"
+            calls = len(driver.calls)
+            invalid_result, invalid_payload = self._call(
+                restarted,
+                "causality_task_browser",
+                invalid,
+                request_id=27,
+            )
+            self._assert_domain_error(
+                invalid_result, invalid_payload, code="validation_error"
+            )
+            self.assertEqual(len(driver.calls), calls)
 
     def test_http_environment_policy_is_explicit_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
