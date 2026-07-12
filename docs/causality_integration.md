@@ -1,21 +1,22 @@
-# Causality Integration Structure
+# Causality Integration
 
-Delivery: [Plan 001](plans/001-external-harness-delivery.md). Interfaces:
+Order: [Plan 001](plans/001-external-harness-delivery.md). Contracts:
 [spec index](specs/README.md).
 
 ## Runtime
 
-| Module | Responsibility |
+| Module | Owns |
 | --- | --- |
-| `GoalContract` | risk, permissions, evidence, checks, stop policy |
-| `TaskLifecycle` | durable task/phase policy, allowed-next, replay, recovery |
-| `PlaybookPhase` | stable ordered phase requirements |
-| `EvidenceLedger` | append-only hash chain and artifact provenance |
+| `GoalContract` | risk, scope, checks, stops |
+| `TaskLifecycle` | durable phase, replay, recovery |
+| `PlaybookPhase` | ordered phase requirements |
+| `EvidenceLedger` | hash chain and artifacts |
 | `HITLGate` | plan/action/completion policy |
-| `HttpAdapter` | bounded transport behind task gates |
-| `A11yBrowserAdapter` | isolated protocol-v1 browser primitives |
+| `HttpAdapter` | scoped transport |
+| `A11yBrowserAdapter` | isolated browser primitives |
+| `SkillStore` | candidate, outcome, promotion, recall |
 
-## State policy
+## State
 
 ```text
 planned -> approved -> executing -> verified
@@ -23,24 +24,34 @@ planned -> approved -> executing -> verified
 phase: pending -> running -> passed | failed | blocked
 ```
 
-| State | Required basis |
+| State | Basis |
 | --- | --- |
-| planned | frozen contract and phase plan |
-| executing | current phase plus permitted action |
-| passed phase | fresh work/verification and two local verdicts |
-| blocked | stop threshold, uncertain effect, or escalation evidence |
-| verified | all phases, current checks, two passes, final HITL when required |
-| rejected | human rejection; terminal historical replays only |
+| executing | current phase + permitted action |
+| passed phase | fresh evidence + two verdicts |
+| blocked | stop, uncertain effect, or escalation |
+| verified | phases/checks/quorum/final HITL |
+| rejected | terminal human rejection |
 
-The frozen failed-hypothesis limit (three by default) blocks effects.
-`approval_evidence_refs` binds phase HITL to the rejection streak and gate.
-Process loss is repaired by replaying the exact phase/hypothesis request before
-approval.
+The frozen hypothesis limit blocks effects. Phase approval cites the exact
+rejection streak. Process loss resumes status; safe requests may be submitted
+exactly, while uncertain effects require human resolution.
+
+## Caller-driven external MCP sequence
+
+```text
+init -> begin -> phase/action -> verify -> two verdicts -> complete -> reflect
+     -> resume/context as needed -> outcomes -> HITL promote -> recall
+```
+
+`init` returns `active|pending|broken`; host adoption and client trust are never
+guessed. Only a verified terminal task's reflection creates a local candidate;
+a rejected reflection returns no skill and must not enter the outcome flow.
+Outcomes cite exact terminal verification evidence. Promotion uses fixed
+thresholds and stores no proof.
 
 ## Boundaries
 
-Server policy is the authority ceiling; contracts only narrow it. Paths/cwd stay
-inside the project. Commands use argv, never shell strings. HTTP uses exact
-origins/auth aliases. Browser text and driver output are untrusted; raw profiles
-stay outside prompt context. Completion/reflection derive from ledger evidence,
-not agent prose.
+Server policy is the authority ceiling; contracts only narrow it. Paths stay in
+the project. Commands are argv, never shell strings. HTTP uses exact origins and
+auth aliases. Browser output is untrusted. Completion, reflection, and audited
+recall derive from durable evidence, not agent prose.
