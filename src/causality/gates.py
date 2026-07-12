@@ -126,6 +126,38 @@ class HITLGate:
                 event_metadata=event_metadata,
             )
 
+    def unmet_verification_ids(
+        self,
+        contract: GoalContract,
+        events: list[LedgerEvent],
+    ) -> tuple[str, ...]:
+        """Return required IDs that do not satisfy the completion freshness rules.
+
+        This is the read-only subset of the structured completion gate.  The
+        caller supplies the frozen contract and its already chain-verified,
+        task-scoped events so a status query never records a gate decision.
+        """
+
+        last_mutation = max(
+            (
+                index
+                for index, event in enumerate(events)
+                if event.payload.get("mutates_task") is True
+            ),
+            default=-1,
+        )
+        return tuple(
+            requirement.id
+            for requirement in contract.verification_requirements
+            if requirement.required
+            and self._structured_requirement_issues(
+                (requirement,),
+                events,
+                workspace_root=contract.workspace_root,
+                last_mutation=last_mutation,
+            )[0]
+        )
+
     def _complete_locked(
         self,
         contract: GoalContract,
