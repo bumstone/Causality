@@ -38,9 +38,16 @@ class LoopTests(unittest.TestCase):
             )
 
             def step(c: GoalContract, i: int) -> StepOutcome:
-                runtime.record_evidence(c, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
-                runtime.record_verifier(c, VerifierDecision("correctness", "pass", "ok"))
-                runtime.record_verifier(c, VerifierDecision("evidence", "pass", "ok"))
+                evidence = runtime.record_evidence(
+                    c, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+                )
+                refs = (evidence.entry_hash,)
+                runtime.record_verifier(
+                    c, VerifierDecision("correctness", "pass", "ok", evidence_refs=refs)
+                )
+                runtime.record_verifier(
+                    c, VerifierDecision("evidence", "pass", "ok", evidence_refs=refs)
+                )
                 return StepOutcome(progress=True)
 
             result = run_bounded_loop(runtime, contract, step)
@@ -131,9 +138,18 @@ class LoopTests(unittest.TestCase):
                 # Satisfy completion only on the second iteration: iter 0 -> a
                 # REPAIR gate decision, iter 1 -> the terminal completion PASS.
                 if i >= 1:
-                    runtime.record_evidence(c, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
-                    runtime.record_verifier(c, VerifierDecision("correctness", "pass", "ok"))
-                    runtime.record_verifier(c, VerifierDecision("evidence", "pass", "ok"))
+                    evidence = runtime.record_evidence(
+                        c, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+                    )
+                    refs = (evidence.entry_hash,)
+                    runtime.record_verifier(
+                        c,
+                        VerifierDecision("correctness", "pass", "ok", evidence_refs=refs),
+                    )
+                    runtime.record_verifier(
+                        c,
+                        VerifierDecision("evidence", "pass", "ok", evidence_refs=refs),
+                    )
                 return StepOutcome(progress=True)
 
             result = run_bounded_loop(runtime, contract, step)

@@ -267,6 +267,12 @@ class VerificationResult:
     completed_at: str
     event_hash: str
     reason: str = ""
+    stdout: str = ""
+    stderr: str = ""
+    stdout_sha256: str = ""
+    stderr_sha256: str = ""
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "artifact_hashes", MappingProxyType(dict(self.artifact_hashes)))
@@ -280,6 +286,12 @@ class VerificationResult:
             "exit_code": self.exit_code,
             "stdout_bytes": self.stdout_bytes,
             "stderr_bytes": self.stderr_bytes,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "stdout_sha256": self.stdout_sha256,
+            "stderr_sha256": self.stderr_sha256,
+            "stdout_truncated": self.stdout_truncated,
+            "stderr_truncated": self.stderr_truncated,
             "artifact_hashes": dict(self.artifact_hashes),
             "completed_at": self.completed_at,
             "event_hash": self.event_hash,

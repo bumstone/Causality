@@ -19,6 +19,7 @@ shared skill library (see :mod:`skills`).
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ def _is_within(path: Path, base: Path) -> bool:
 # real subprocess; tests inject a fake so the suite never spawns a process.
 CommandRunner = Callable[[Sequence[str]], CommandResult]
 EffectHook = Callable[[], None]
+MAX_LEDGER_OUTPUT_BYTES = 64 * 1024
 
 
 def utf8_size(value: str | bytes | None) -> int:
@@ -52,6 +54,32 @@ def utf8_size(value: str | bytes | None) -> int:
     if isinstance(value, bytes):
         return len(value)
     return len(value.encode("utf-8"))
+
+
+def captured_output(value: str | bytes | None) -> tuple[str, int, str, bool]:
+    """Return bounded ledger text plus full byte count/hash."""
+    if value is None:
+        raw = b""
+    elif isinstance(value, bytes):
+        raw = value
+    else:
+        raw = value.encode("utf-8")
+    size = len(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    text = value if isinstance(value, str) else raw.decode("utf-8", errors="replace")
+    canonical = text.encode("utf-8")
+    truncated = size > MAX_LEDGER_OUTPUT_BYTES or len(canonical) > MAX_LEDGER_OUTPUT_BYTES
+    captured = canonical
+    if truncated:
+        marker = b"\n... output truncated ...\n"
+        keep = MAX_LEDGER_OUTPUT_BYTES - len(marker)
+        head = keep // 2
+        prefix = canonical[:head].decode("utf-8", errors="ignore").encode("utf-8")
+        suffix = canonical[-(keep - head) :].decode("utf-8", errors="ignore").encode(
+            "utf-8"
+        )
+        captured = prefix + marker + suffix
+    return captured.decode("utf-8"), size, digest, truncated
 
 
 @dataclass
@@ -152,14 +180,26 @@ class ToolAdapter:
             result = self.execution.execute(
                 tool=tool, action_kind=action_kind, description=desc, run=_do
             )
+            stdout, stdout_bytes, stdout_sha256, stdout_truncated = captured_output(
+                result.stdout
+            )
+            stderr, stderr_bytes, stderr_sha256, stderr_truncated = captured_output(
+                result.stderr
+            )
             self._record(
                 AuditEventType.TOOL_CALL,
                 {
                     "tool": tool,
                     "argv": argv,
                     "exit_code": result.exit_code,
-                    "stdout_bytes": utf8_size(result.stdout),
-                    "stderr_bytes": utf8_size(result.stderr),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "stdout_bytes": stdout_bytes,
+                    "stderr_bytes": stderr_bytes,
+                    "stdout_sha256": stdout_sha256,
+                    "stderr_sha256": stderr_sha256,
+                    "stdout_truncated": stdout_truncated,
+                    "stderr_truncated": stderr_truncated,
                     "mutates_task": mutates_task,
                     "environment_overrides": dict(environment_overrides),
                 },

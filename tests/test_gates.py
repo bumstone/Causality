@@ -38,9 +38,18 @@ class GateTests(unittest.TestCase):
             self.assertEqual(runtime.evaluate_plan(contract).decision, GateDecision.PASS)
             self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
 
-            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "passed"})
-            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "tests passed"))
-            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "evidence present"))
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "passed"}
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "pass", "tests passed", evidence_refs=refs),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("evidence", "pass", "evidence present", evidence_refs=refs),
+            )
 
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 
@@ -345,14 +354,34 @@ class GateTests(unittest.TestCase):
                     evidence_required=[EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "tests")],
                 )
             )
-            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
-            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "round 1"))
-            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "round 2"))
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "pass", "round 1", evidence_refs=refs),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "pass", "round 2", evidence_refs=refs),
+            )
 
             # One verifier, two events -> still only one independent pass.
             self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
 
-            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "second verifier"))
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "fresh review"}
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "pass", "current verifier", evidence_refs=refs),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("evidence", "pass", "second verifier", evidence_refs=refs),
+            )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 
     def test_fixed_critical_failure_no_longer_blocks_completion(self) -> None:
@@ -367,15 +396,35 @@ class GateTests(unittest.TestCase):
                     evidence_required=[EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "tests")],
                 )
             )
-            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+            )
+            refs = (evidence.entry_hash,)
             runtime.record_verifier(
-                contract, VerifierDecision("safety", "fail", "unsafe", severity="critical")
+                contract,
+                VerifierDecision(
+                    "safety",
+                    "fail",
+                    "unsafe",
+                    severity="critical",
+                    evidence_refs=refs,
+                ),
             )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
 
             # The same verifier now passes; a second independent verifier passes.
-            runtime.record_verifier(contract, VerifierDecision("safety", "pass", "now safe"))
-            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "evidence present"))
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "fixed"}
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("safety", "pass", "now safe", evidence_refs=refs),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("evidence", "pass", "evidence present", evidence_refs=refs),
+            )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 
     def test_complete_with_empty_list_does_not_fall_back_to_ledger(self) -> None:

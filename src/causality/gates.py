@@ -154,7 +154,7 @@ class HITLGate:
                     metadata=event_metadata,
                 )
         structured = snapshot.verification_requirements
-        if structured or snapshot.approval_required:
+        if structured or snapshot.required_evidence_kinds() or snapshot.approval_required:
             if events is None:
                 events = self.ledger.events_for_contract(
                     contract.goal_id,
@@ -561,11 +561,25 @@ class HITLGate:
                 ):
                     issues.append(f"{requirement.id}: executable tool provenance is stale")
                     valid = False
+                output_fields = (
+                    "stdout",
+                    "stderr",
+                    "stdout_bytes",
+                    "stderr_bytes",
+                    "stdout_sha256",
+                    "stderr_sha256",
+                    "stdout_truncated",
+                    "stderr_truncated",
+                )
                 if (
                     tuple(tool_payload.get("argv", ())) != requirement.argv
                     or tool_payload.get("exit_code") != result.payload.get("exit_code")
-                    or tool_payload.get("stdout_bytes") != result.payload.get("stdout_bytes")
-                    or tool_payload.get("stderr_bytes") != result.payload.get("stderr_bytes")
+                    or any(
+                        field not in tool_payload
+                        or field not in result.payload
+                        or tool_payload.get(field) != result.payload.get(field)
+                        for field in output_fields
+                    )
                     or tool_payload.get("mutates_task") is not False
                     or tool_payload.get("environment_overrides")
                     != {"PYTHONDONTWRITEBYTECODE": "1"}

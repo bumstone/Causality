@@ -22,7 +22,7 @@ from .contracts import (
 )
 from .execution import ActionBlocked, ExecutionAdapter
 from .ledger import sha256_file, sha256_text
-from .tool_adapter import ToolAdapter, utf8_size
+from .tool_adapter import ToolAdapter, captured_output
 
 if TYPE_CHECKING:
     from .orchestrator import Causality
@@ -404,8 +404,8 @@ def _execute_requirement_locked(
     _, artifact_records_before, _, _ = _resolve_artifacts(requirement, project_root)
     status = "error"
     exit_code: int | None = None
-    stdout_bytes = 0
-    stderr_bytes = 0
+    stdout, stdout_bytes, stdout_sha256, stdout_truncated = captured_output(None)
+    stderr, stderr_bytes, stderr_sha256, stderr_truncated = captured_output(None)
     tool_event_hash: str | None = None
     reason = ""
 
@@ -424,8 +424,12 @@ def _execute_requirement_locked(
             before_effect=before_effect,
         )
         exit_code = command.exit_code
-        stdout_bytes = utf8_size(command.stdout)
-        stderr_bytes = utf8_size(command.stderr)
+        stdout, stdout_bytes, stdout_sha256, stdout_truncated = captured_output(
+            command.stdout
+        )
+        stderr, stderr_bytes, stderr_sha256, stderr_truncated = captured_output(
+            command.stderr
+        )
         tool_event_hash = tools.last_event_hash
         if exit_code in requirement.expected_exit_codes:
             status = "pass"
@@ -440,8 +444,8 @@ def _execute_requirement_locked(
         reason = str(exc)
     except subprocess.TimeoutExpired as exc:
         status = "timeout"
-        stdout_bytes = utf8_size(exc.stdout)
-        stderr_bytes = utf8_size(exc.stderr)
+        stdout, stdout_bytes, stdout_sha256, stdout_truncated = captured_output(exc.stdout)
+        stderr, stderr_bytes, stderr_sha256, stderr_truncated = captured_output(exc.stderr)
         reason = f"verification timed out after {requirement.timeout_seconds:g}s"
     except (OSError, ValueError, UnicodeError, subprocess.SubprocessError) as exc:
         status = "error"
@@ -502,8 +506,14 @@ def _execute_requirement_locked(
         "argv": list(requirement.argv),
         "expected_exit_codes": list(requirement.expected_exit_codes),
         "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
         "stdout_bytes": stdout_bytes,
         "stderr_bytes": stderr_bytes,
+        "stdout_sha256": stdout_sha256,
+        "stderr_sha256": stderr_sha256,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
         "tool_event_hash": tool_event_hash,
         "artifact_records": artifact_records,
         "completed_at": completed_at,
@@ -539,4 +549,10 @@ def _execute_requirement_locked(
         completed_at=completed_at,
         event_hash=event.entry_hash,
         reason=reason,
+        stdout=stdout,
+        stderr=stderr,
+        stdout_sha256=stdout_sha256,
+        stderr_sha256=stderr_sha256,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
     )

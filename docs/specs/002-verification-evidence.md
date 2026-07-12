@@ -4,46 +4,45 @@ Status: implemented (2026-07-11).
 
 ## Contract
 
-Completion requires each required ID's latest pass and fresh generic
-evidence. Two independent verdicts—and high-risk final approval—each cite the
-current hashes. Risk is canonical; high-risk plan approval stays active.
+Completion needs every required ID's latest pass, fresh generic evidence, and
+two verdicts citing all current hashes. High-risk work also needs plan and final
+approval.
 
 ## Model
 
-Requirements store ID, argv, exits, timeout, required/manual, and
-`{artifact_path: sha256|null}` under the durable workspace root. Manual checks
-declare no argv/artifacts; they need same-task evidence, a boolean verdict, and
-a named human.
+Requirements freeze ID, argv, exits, timeout, required/manual, and artifact
+hashes under the workspace root. Manual checks need same-task evidence, a
+boolean verdict, and a named human.
 
-Legacy strings remain one minor: parse to argv/`verify-NNN` and warn. Legacy
-keeps durable binding and a two-verifier floor.
+Legacy strings parse to argv/`verify-NNN`, warn for one minor, and retain
+durable binding plus the two-verifier floor.
 
 ## Execution
 
-`verify_requirement(contract, id, root)` gates argv with `shell=False` and
-disables bytecode writes. Evidence records argv, exits, UTF-8 byte counts,
-artifact state, workspace digest, status, reason, and time.
+`verify_requirement(contract, id, root)` gates argv with `shell=False`, disables
+bytecode writes, and records argv, exits, output, artifacts, workspace digest,
+status, reason, and time. Each stream keeps 64 KiB plus its full UTF-8 byte
+count, SHA-256, and truncation flag.
 `VerificationResult.event_hash` equals the ledger event's `entry_hash`.
 
-Failures are recorded. Artifacts stay regular in-root files with the
-recorded resolved path, mode, and hash.
+Artifacts remain regular in-root files with recorded path, mode, and hash.
 
 ## Freshness and durability
 
-Completion rechecks project, dependency, bytecode, symlink-target, and full Git
-state. Mutations stale prior checks. Latest requirement result wins; verifier
-IDs cannot repeat per batch. Invalid citations fail.
+Completion rechecks project, dependency, bytecode, symlink-target, and Git
+state. Mutations stale prior checks; latest results win. Duplicate verifier IDs
+or invalid citations fail.
 
-Contract creation, public gated actions, verification, and completion serialize
-on one durable lock. The hash chain plus tail anchor detects edits,
-rotation gaps, and current-segment deletion.
+One durable lock serializes contract creation, actions, verification, and
+completion. Hash chain and tail anchor detect edits, rotation gaps, and segment
+deletion.
 
 ## Boundary and acceptance
 
-The entire `.causality/` tree and analysis caches (`.pytest_cache`, `.mypy_cache`,
-`.ruff_cache`) are excluded. Outside-root/remote effects, declared argv, and raw
-ledger writers are trusted; this is not an OS sandbox or writer-authentication
-system; hostile commands need an external sandbox.
+`.causality/` and analysis caches are excluded. Outside-root effects, declared
+argv, and raw ledger writers are trusted; hostile commands need an external
+sandbox. The ignored ledger may contain output. Distinct verifier names are
+caller-attested; the runtime validates citations, not organizational provenance.
 
-Spec 003 adds task/MCP lifecycle binding. Unit, concurrency, rotation, engine
-E2E, and pip-installed external-project fixtures cover this phase.
+Spec 003 adds task/MCP lifecycle binding. Unit, concurrency, rotation, engine,
+and installed-project E2E tests cover this phase.

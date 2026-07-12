@@ -219,7 +219,11 @@ class VerificationExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             runtime = Causality(root / "ledger.jsonl")
-            requirement = _requirement(argv=_python("print('hello')"))
+            requirement = _requirement(
+                argv=_python(
+                    "import sys; print('hello'); print('warning', file=sys.stderr)"
+                )
+            )
             contract = _contract(runtime, requirement)
 
             result = runtime.verify_requirement(contract, "unit", root=root)
@@ -233,7 +237,14 @@ class VerificationExecutionTests(unittest.TestCase):
             self.assertEqual(evidence[-1].payload["requirement_id"], "unit")
             self.assertEqual(evidence[-1].payload["argv"], list(requirement.argv))
             self.assertGreater(evidence[-1].payload["stdout_bytes"], 0)
-            self.assertNotIn("stdout", evidence[-1].payload)
+            self.assertEqual(evidence[-1].payload["stdout"].strip(), "hello")
+            self.assertEqual(evidence[-1].payload["stderr"].strip(), "warning")
+            self.assertEqual(result.stdout, evidence[-1].payload["stdout"])
+            self.assertEqual(result.stderr, evidence[-1].payload["stderr"])
+            self.assertEqual(
+                result.stdout_sha256,
+                hashlib.sha256(result.stdout.encode("utf-8")).hexdigest(),
+            )
 
     def test_expected_nonzero_exit_can_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -737,6 +748,63 @@ class VerificationCompletionTests(unittest.TestCase):
                 contract,
                 VerifierDecision("evidence", "pass", "all evidence", evidence_refs=all_refs),
             )
+
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
+
+    def test_generic_only_evidence_must_be_fresh_and_cited(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = Causality(root / "ledger.jsonl")
+            contract = runtime.create_contract(
+                GoalContract(
+                    "generic evidence",
+                    "fresh cited output",
+                    evidence_required=[
+                        EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "external report")
+                    ],
+                )
+            )
+            runtime.record_evidence(
+                contract,
+                EvidenceKind.TEST_OUTPUT,
+                {"summary": "old"},
+            )
+            (root / "changed.txt").write_text("changed", encoding="utf-8")
+            runtime.record_verifier(contract, VerifierDecision("one", "pass", "looks good"))
+            runtime.record_verifier(contract, VerifierDecision("two", "pass", "also good"))
+
+            stale = runtime.complete(contract)
+            self.assertEqual(stale.decision, GateDecision.REPAIR)
+            self.assertIn("stale generic evidence workspace", " ".join(stale.reasons))
+            self.assertIn("citation", " ".join(stale.reasons))
+
+            fresh = runtime.record_evidence(
+                contract,
+                EvidenceKind.TEST_OUTPUT,
+                {"summary": "fresh"},
+            )
+            _cite(runtime, contract, fresh.entry_hash)
+
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
+
+    def test_optional_generic_evidence_does_not_become_mandatory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(
+                GoalContract(
+                    "optional evidence",
+                    "legacy verifier completion",
+                    evidence_required=[
+                        EvidenceRequirement(
+                            EvidenceKind.TEST_OUTPUT,
+                            "optional report",
+                            required=False,
+                        )
+                    ],
+                )
+            )
+            runtime.record_verifier(contract, VerifierDecision("one", "pass", "reviewed"))
+            runtime.record_verifier(contract, VerifierDecision("two", "pass", "reviewed"))
 
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 

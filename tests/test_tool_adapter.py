@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from causality.browser_adapter import CommandResult
 from causality.contracts import AuditEventType, GoalContract, PermissionContract, Risk
 from causality.execution import ActionBlocked, ExecutionAdapter
 from causality.orchestrator import Causality
-from causality.tool_adapter import ToolAdapter
+from causality.tool_adapter import MAX_LEDGER_OUTPUT_BYTES, ToolAdapter
 
 
 def _recording_runner(record: list, result: CommandResult = CommandResult(0, "", "")):
@@ -44,8 +45,52 @@ class ToolAdapterTests(unittest.TestCase):
             tool_calls = runtime.ledger.find(AuditEventType.TOOL_CALL)
             self.assertEqual(len(tool_calls), 1)
             self.assertEqual(tool_calls[0].payload["argv"], ["echo", "hello"])
+            self.assertEqual(tool_calls[0].payload["stdout"], "hello\n")
+            self.assertEqual(
+                tool_calls[0].payload["stdout_sha256"],
+                hashlib.sha256(b"hello\n").hexdigest(),
+            )
             self.assertIs(tool_calls[0].payload["mutates_task"], True)
             self.assertEqual(tool_calls[0].contract_id, contract.goal_id)
+
+    def test_run_bounds_large_ledger_output_and_hashes_the_full_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime, _, adapter = self._setup(temp_dir)
+            raw = "x" * (MAX_LEDGER_OUTPUT_BYTES + 100)
+            tool = ToolAdapter(
+                runtime.ledger,
+                adapter,
+                runner=_recording_runner([], CommandResult(1, raw, "failure")),
+            )
+
+            tool.run(["noisy"])
+
+            payload = runtime.ledger.find(AuditEventType.TOOL_CALL)[0].payload
+            self.assertTrue(payload["stdout_truncated"])
+            self.assertEqual(payload["stdout_bytes"], len(raw))
+            self.assertLessEqual(len(payload["stdout"].encode("utf-8")), MAX_LEDGER_OUTPUT_BYTES)
+            self.assertEqual(
+                payload["stdout_sha256"],
+                hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            )
+
+            multibyte = "a" + "🙂" * (MAX_LEDGER_OUTPUT_BYTES // 4 + 10) + "z"
+            unicode_tool = ToolAdapter(
+                runtime.ledger,
+                adapter,
+                runner=_recording_runner([], CommandResult(1, multibyte, "")),
+            )
+            unicode_tool.run(["unicode-noisy"])
+            unicode_payload = runtime.ledger.find(AuditEventType.TOOL_CALL)[-1].payload
+            self.assertNotIn("\ufffd", unicode_payload["stdout"])
+            self.assertLessEqual(
+                len(unicode_payload["stdout"].encode("utf-8")),
+                MAX_LEDGER_OUTPUT_BYTES,
+            )
+            self.assertEqual(
+                unicode_payload["stdout_sha256"],
+                hashlib.sha256(multibyte.encode("utf-8")).hexdigest(),
+            )
 
     def test_public_run_cannot_suppress_mutation_tracking(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
