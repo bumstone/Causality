@@ -4,13 +4,15 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 
 ObserveMode = Literal["interactive", "compact", "full"]
 BrowserActionType = Literal["click", "fill", "hover", "press", "select"]
@@ -105,6 +107,7 @@ class BrowserContext:
     session_id: str
     profile_dir: str | Path
     allowed_origins: tuple[str, ...] = ()
+    artifact_staging_dir: str | Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not SESSION_RE.fullmatch(
@@ -118,6 +121,10 @@ class BrowserContext:
             for origin in self.allowed_origins
         ):
             raise ValueError("browser allowed_origins must contain non-blank strings")
+        if self.artifact_staging_dir is not None and not str(
+            self.artifact_staging_dir
+        ):
+            raise ValueError("browser artifact_staging_dir must be non-blank")
         object.__setattr__(self, "allowed_origins", tuple(self.allowed_origins))
 
 
@@ -216,12 +223,115 @@ def _stable_ref(value: str, name: str) -> str:
     return value
 
 
-def _sha256_file(path: Path) -> str:
+@dataclass(frozen=True)
+class _DirectoryGuard:
+    path: Path
+    identity: tuple[int, int]
+    descriptor: int | None = None
+
+
+def _guard_matches(guard: _DirectoryGuard) -> bool:
+    try:
+        status = guard.path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(status.st_mode) and (
+        status.st_dev,
+        status.st_ino,
+    ) == guard.identity
+
+
+@contextmanager
+def _guard_directory(directory: Path) -> Iterator[_DirectoryGuard]:
+    status = directory.lstat()
+    if not stat.S_ISDIR(status.st_mode):
+        raise ValueError("browser artifact parent must be a real directory")
+    resolved = directory.resolve(strict=True)
+    identity = (status.st_dev, status.st_ino)
+    resolved_status = resolved.lstat()
+    if not stat.S_ISDIR(resolved_status.st_mode) or (
+        resolved_status.st_dev,
+        resolved_status.st_ino,
+    ) != identity:
+        raise ValueError("browser artifact parent must not be a symlink")
+
+    if os.name != "nt":
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+            os, "O_NOFOLLOW", 0
+        )
+        descriptor = os.open(resolved, flags)
+        opened = os.fstat(descriptor)
+        guard = _DirectoryGuard(resolved, identity, descriptor)
+        if (opened.st_dev, opened.st_ino) != identity or not _guard_matches(guard):
+            os.close(descriptor)
+            raise ValueError("browser artifact parent changed while opening")
+        try:
+            yield guard
+        finally:
+            os.close(descriptor)
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(
+        str(resolved),
+        0,
+        0x00000001 | 0x00000002,
+        None,
+        3,
+        0x02000000 | 0x00200000,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    guard = _DirectoryGuard(resolved, identity)
+    if not _guard_matches(guard):
+        close_handle(handle)
+        raise ValueError("browser artifact parent changed while opening")
+    try:
+        yield guard
+    finally:
+        close_handle(handle)
+
+
+def _copy_artifact(source: int, destination: int, limit: int) -> tuple[int, str]:
+    os.lseek(source, 0, os.SEEK_SET)
+    os.ftruncate(destination, 0)
+    os.lseek(destination, 0, os.SEEK_SET)
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    size = 0
+    while True:
+        chunk = os.read(source, 1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            raise BrowserOutputLimitError("artifact", size, limit)
+        digest.update(chunk)
+        remaining = memoryview(chunk)
+        while remaining:
+            written = os.write(destination, remaining)
+            if written < 1:
+                raise OSError("browser artifact copy made no progress")
+            remaining = remaining[written:]
+    os.fsync(destination)
+    return size, digest.hexdigest()
 
 
 def wrap_untrusted(value: str) -> str:
@@ -415,41 +525,171 @@ class A11yBrowserAdapter:
         *,
         context: BrowserContext | None,
     ) -> tuple[CommandResult, BrowserArtifact]:
-        if not target.parent.is_dir():
-            raise ValueError("browser artifact parent must already exist")
-        descriptor, temp_name = tempfile.mkstemp(
-            dir=target.parent,
-            prefix=f".{target.name}.",
-            suffix=".tmp",
-        )
-        os.close(descriptor)
-        temporary = Path(temp_name)
-        try:
+        if target.name in {"", ".", ".."}:
+            raise ValueError("browser artifact target must name a file")
+        with _guard_directory(target.parent) as parent:
+            staging_root = (
+                Path(context.artifact_staging_dir)
+                if context is not None and context.artifact_staging_dir is not None
+                else None
+            )
+            if staging_root is not None:
+                with _guard_directory(staging_root) as staging_guard:
+                    if staging_guard.path.is_relative_to(parent.path):
+                        raise ValueError(
+                            "browser artifact staging must be outside the target parent"
+                        )
+                    return self._stage_and_publish(
+                        command, target.name, parent, staging_guard.path, context
+                    )
+            return self._stage_and_publish(command, target.name, parent, None, context)
+
+    def _stage_and_publish(
+        self,
+        command: Sequence[str],
+        target_name: str,
+        parent: _DirectoryGuard,
+        staging_root: Path | None,
+        context: BrowserContext | None,
+    ) -> tuple[CommandResult, BrowserArtifact]:
+        with tempfile.TemporaryDirectory(
+            dir=staging_root,
+            prefix="causality-browser-artifact-",
+        ) as raw_staging:
+            staging = Path(raw_staging)
+            try:
+                staging.chmod(0o700)
+            except OSError:
+                pass
+            descriptor, raw_path = tempfile.mkstemp(
+                dir=staging,
+                prefix="driver-",
+                suffix=".tmp",
+            )
+            os.close(descriptor)
+            driver_output = Path(raw_path)
             result = self._run(
-                (*command, str(temporary)),
+                (*command, str(driver_output)),
                 context=context,
             )
-            status = temporary.lstat()
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(
+                os, "O_BINARY", 0
+            )
+            source = os.open(driver_output, flags)
+            try:
+                opened = os.fstat(source)
+                named = driver_output.lstat()
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink != 1
+                    or (opened.st_dev, opened.st_ino)
+                    != (named.st_dev, named.st_ino)
+                    or not driver_output.resolve().is_relative_to(staging.resolve())
+                ):
+                    raise ValueError("browser artifact must be a private regular file")
+                if opened.st_size > self.max_artifact_bytes:
+                    raise BrowserOutputLimitError(
+                        command[0], opened.st_size, self.max_artifact_bytes
+                    )
+                if not _guard_matches(parent):
+                    raise ValueError("browser artifact parent changed during driver output")
+                artifact = self._publish_artifact(source, target_name, parent)
+                return result, artifact
+            finally:
+                os.close(source)
+
+    def _publish_artifact(
+        self,
+        source: int,
+        target_name: str,
+        parent: _DirectoryGuard,
+    ) -> BrowserArtifact:
+        if parent.descriptor is None:
+            return self._publish_artifact_windows(source, target_name, parent)
+
+        temporary = f".causality-browser-{secrets.token_hex(12)}.tmp"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        destination = os.open(temporary, flags, 0o600, dir_fd=parent.descriptor)
+        published = False
+        try:
+            size, digest = _copy_artifact(
+                source, destination, self.max_artifact_bytes
+            )
+            status = os.fstat(destination)
             if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
-                raise ValueError("browser artifact must be a private regular file")
-            if status.st_size > self.max_artifact_bytes:
-                raise BrowserOutputLimitError(
-                    command[0], status.st_size, self.max_artifact_bytes
-                )
-            with temporary.open("r+b") as handle:
-                os.fsync(handle.fileno())
+                raise ValueError("browser publish target must be a private regular file")
+            if not _guard_matches(parent):
+                raise ValueError("browser artifact parent changed before publish")
+            os.replace(
+                temporary,
+                target_name,
+                src_dir_fd=parent.descriptor,
+                dst_dir_fd=parent.descriptor,
+            )
+            published = True
+            os.fsync(parent.descriptor)
+            if not _guard_matches(parent):
+                os.unlink(target_name, dir_fd=parent.descriptor)
+                raise ValueError("browser artifact parent changed during publish")
+            return BrowserArtifact(
+                path=str(parent.path / target_name),
+                bytes=size,
+                sha256=digest,
+            )
+        finally:
+            os.close(destination)
+            if not published:
+                try:
+                    os.unlink(temporary, dir_fd=parent.descriptor)
+                except FileNotFoundError:
+                    pass
+
+    def _publish_artifact_windows(
+        self,
+        source: int,
+        target_name: str,
+        parent: _DirectoryGuard,
+    ) -> BrowserArtifact:
+        descriptor, raw_temporary = tempfile.mkstemp(
+            dir=parent.path,
+            prefix=".causality-browser-",
+            suffix=".tmp",
+        )
+        temporary = Path(raw_temporary)
+        published = False
+        try:
+            size, digest = _copy_artifact(
+                source, descriptor, self.max_artifact_bytes
+            )
+            status = os.fstat(descriptor)
+            if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+                raise ValueError("browser publish target must be a private regular file")
+            os.close(descriptor)
+            descriptor = -1
+            if not _guard_matches(parent):
+                raise ValueError("browser artifact parent changed before publish")
+            target = parent.path / target_name
             os.replace(temporary, target)
+            published = True
             try:
                 target.chmod(0o600)
             except OSError:
                 pass
-            return result, BrowserArtifact(
-                path=str(target),
-                bytes=target.stat().st_size,
-                sha256=_sha256_file(target),
-            )
+            if not _guard_matches(parent):
+                target.unlink(missing_ok=True)
+                raise ValueError("browser artifact parent changed during publish")
+            return BrowserArtifact(path=str(target), bytes=size, sha256=digest)
         finally:
-            temporary.unlink(missing_ok=True)
+            if descriptor >= 0:
+                os.close(descriptor)
+            if not published:
+                temporary.unlink(missing_ok=True)
 
     def _run(
         self,

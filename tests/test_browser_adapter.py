@@ -203,6 +203,38 @@ class BrowserAdapterTests(unittest.TestCase):
             self.assertEqual(artifact.bytes, len(b"new-image"))
             self.assertEqual(artifact.sha256, hashlib.sha256(b"new-image").hexdigest())
 
+    def test_artifact_parent_swap_never_writes_outside_target_directory(self) -> None:
+        for operation in ("visual", "annotated-observe"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                parent = root / "artifacts"
+                moved = root / "moved-artifacts"
+                outside = root / "outside"
+                parent.mkdir()
+                outside.mkdir()
+                target = parent / "final.png"
+
+                def runner(
+                    command: Sequence[str], _environment: Mapping[str, str]
+                ) -> CommandResult:
+                    parent.rename(moved)
+                    try:
+                        parent.symlink_to(outside, target_is_directory=True)
+                    except OSError:
+                        moved.rename(parent)
+                        self.skipTest("directory symlinks are unavailable")
+                    Path(command[-1]).write_bytes(b"image")
+                    return CommandResult(0, "@e1 [button]", "")
+
+                adapter = A11yBrowserAdapter("browse", runner=runner)
+                with self.assertRaises((OSError, ValueError)):
+                    if operation == "visual":
+                        adapter.visual(target)
+                    else:
+                        adapter.observe(annotate_path=target)
+
+                self.assertEqual(list(outside.iterdir()), [])
+
     def test_compression_stats(self) -> None:
         stats = compression_stats("line\n" * 100, "@e1 [button]\n")
 

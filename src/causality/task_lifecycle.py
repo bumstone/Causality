@@ -1514,10 +1514,12 @@ class TaskLifecycle:
             (f"{str(self.project_root).casefold()}\0{task_id}").encode("utf-8")
         ).hexdigest()
         profile = self._browser_runtime_directory("sessions", session_id)
+        staging = self._browser_runtime_directory("staging", session_id)
         return BrowserContext(
             session_id,
             profile,
             tuple(contract.permissions.network_scope),
+            staging,
         )
 
     def _browser_runtime_directory(self, *parts: str) -> Path:
