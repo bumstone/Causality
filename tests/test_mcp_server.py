@@ -20,6 +20,12 @@ class MCPServerTests(unittest.TestCase):
             names = {tool["name"] for tool in response["result"]["tools"]}
             self.assertIn("causality_context", names)
             self.assertIn("causality_append_evidence", names)
+            init = next(
+                tool for tool in response["result"]["tools"] if tool["name"] == "causality_init"
+            )
+            self.assertIn("client", init["inputSchema"]["properties"])
+            self.assertIn("adopt", init["inputSchema"]["properties"])
+            self.assertIn("verify", init["inputSchema"]["properties"])
 
     def test_append_evidence_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -73,6 +79,32 @@ class MCPServerTests(unittest.TestCase):
             self.assertNotIn(sentinel, text)
             self.assertNotIn("payload", context["ledger_tail"][0])
             self.assertNotIn("contract_id", context["ledger_tail"][0])
+
+    def test_init_tool_forwards_activation_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = CausalityMCPServer(temp_dir)
+            response = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "causality_init",
+                        "arguments": {
+                            "client": "generic",
+                            "adopt": True,
+                            "verify": False,
+                        },
+                    },
+                }
+            )
+
+            result = json.loads(response["result"]["content"][0]["text"])
+            self.assertEqual(result["resolved_client"], "generic")
+            self.assertEqual(result["activation"], "pending")
+            self.assertTrue(
+                (Path(temp_dir) / ".causality" / "install-report.json").is_file()
+            )
 
 
 if __name__ == "__main__":

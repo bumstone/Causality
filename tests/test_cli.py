@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -33,7 +34,7 @@ class CLITests(unittest.TestCase):
 
             stdout = io.StringIO()
             argv = ["causality", "context", "--ledger", str(ledger_path), "--pretty"]
-            with patch.object(sys, "argv", argv), redirect_stdout(stdout):
+            with mock.patch.object(sys, "argv", argv), redirect_stdout(stdout):
                 self.assertEqual(main(), 0)
 
             output = stdout.getvalue()
@@ -44,6 +45,44 @@ class CLITests(unittest.TestCase):
             self.assertNotIn("payload", event)
             self.assertNotIn("contract_id", event)
             self.assertIn("contract_ref", event)
+
+    def test_install_agent_exit_contract(self) -> None:
+        for activation, expected in (("active", 0), ("pending", 0), ("broken", 1)):
+            with self.subTest(activation=activation):
+                result = SimpleNamespace(
+                    activation=activation,
+                    to_dict=lambda value=activation: {"activation": value},
+                )
+                output = io.StringIO()
+                with (
+                    mock.patch(
+                        "causality.cli.install_agent_files", return_value=result
+                    ) as installer,
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "causality",
+                            "install-agent",
+                            "--client",
+                            "generic",
+                            "--adopt",
+                            "--verify",
+                        ],
+                    ),
+                    redirect_stdout(output),
+                ):
+                    exit_code = main()
+
+                self.assertEqual(exit_code, expected)
+                self.assertEqual(json.loads(output.getvalue())["activation"], activation)
+                installer.assert_called_once_with(
+                    ".",
+                    force=False,
+                    client="generic",
+                    adopt=True,
+                    verify=True,
+                )
 
 
 if __name__ == "__main__":

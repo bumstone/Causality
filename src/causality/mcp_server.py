@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .agent_bootstrap import install_agent_files
+from .agent_bootstrap import SUPPORTED_CLIENTS, install_agent_files
 from .contracts import AuditEventType
 from .ledger import EvidenceLedger
 from .workflows import workflow_manifest
@@ -53,7 +53,16 @@ class CausalityMCPServer:
                 "description": "Install project-level Causality agent files.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"force": {"type": "boolean", "default": False}},
+                    "properties": {
+                        "force": {"type": "boolean", "default": False},
+                        "client": {
+                            "type": "string",
+                            "enum": list(SUPPORTED_CLIENTS),
+                            "default": "auto",
+                        },
+                        "adopt": {"type": "boolean", "default": False},
+                        "verify": {"type": "boolean", "default": False},
+                    },
                 },
             },
             {
@@ -86,7 +95,13 @@ class CausalityMCPServer:
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "causality_init":
-            result = install_agent_files(self.project, force=bool(arguments.get("force", False)))
+            result = install_agent_files(
+                self.project,
+                force=bool(arguments.get("force", False)),
+                client=str(arguments.get("client", "auto")),
+                adopt=bool(arguments.get("adopt", False)),
+                verify=bool(arguments.get("verify", False)),
+            )
             return _text_result(json.dumps(result.to_dict(), ensure_ascii=True, indent=2))
 
         if name == "causality_context":

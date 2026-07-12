@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .agent_bootstrap import install_agent_files
+from .agent_bootstrap import SUPPORTED_CLIENTS, install_agent_files
 from .contracts import AuditEventType
 from .doc_budget import (
     DEFAULT_DOC_MAX_CHARS,
@@ -47,6 +47,21 @@ def main() -> int:
     )
     install_parser.add_argument("--project", default=".")
     install_parser.add_argument("--force", action="store_true")
+    install_parser.add_argument(
+        "--client",
+        choices=SUPPORTED_CLIENTS,
+        default="auto",
+    )
+    install_parser.add_argument(
+        "--adopt",
+        action="store_true",
+        help="append an idempotent Causality pointer to an existing client entry file",
+    )
+    install_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="run an MCP handshake and check whether the selected client loads the config",
+    )
 
     review_parser = subparsers.add_parser(
         "review-plan",
@@ -120,9 +135,15 @@ def main() -> int:
         return 0
 
     if args.command == "install-agent":
-        result = install_agent_files(args.project, force=args.force)
+        result = install_agent_files(
+            args.project,
+            force=args.force,
+            client=args.client,
+            adopt=args.adopt,
+            verify=args.verify,
+        )
         print(json.dumps(result.to_dict(), ensure_ascii=True, indent=2))
-        return 0
+        return 1 if result.activation == "broken" else 0
 
     if args.command == "review-plan":
         if args.from_file == "-":
