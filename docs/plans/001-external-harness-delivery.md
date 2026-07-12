@@ -21,7 +21,8 @@ terminal state.
 5. [x] [Workflow and debug loop](../specs/005-workflow-debug-loop.md): persist phase
    state, route debugging, count failed hypotheses, and deduplicate failures.
 6. [ ] [Resume and skill operations](../specs/006-resume-and-skill-operations.md):
-   resume interrupted tasks and expose earned-skill outcome/promotion operations.
+   - [x] 006A: resume interrupted tasks and expose governed context without replaying effects.
+   - [ ] 006B: expose earned-skill outcome, recall, and HITL promotion operations.
 
 ## Boundaries
 

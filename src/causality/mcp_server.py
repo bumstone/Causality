@@ -902,9 +902,30 @@ class CausalityMCPServer:
         return dict(data), event_hash
 
     @staticmethod
-    def _terminal_result(session: TaskSession) -> dict[str, Any] | None:
+    def _terminal_result(
+        session: TaskSession,
+        events: list[Any],
+    ) -> dict[str, Any] | None:
         if not session.terminal:
             return None
+        terminal_transitions = [
+            event
+            for event in events
+            if event.event_type == "state_transition"
+            and event.payload.get("state") in {"verified", "rejected"}
+        ]
+        if not terminal_transitions:
+            raise TaskLifecycleError(
+                "invalid_task_event",
+                "terminal task has no durable terminal transition",
+            )
+        cause_hash = terminal_transitions[-1].payload.get("cause_event_hash")
+        if not isinstance(cause_hash, str) or not cause_hash.strip():
+            raise TaskLifecycleError(
+                "invalid_task_event",
+                "terminal transition has no cause event",
+                details={"event_hash": terminal_transitions[-1].entry_hash},
+            )
         positions = {
             event_hash: index for index, event_hash in enumerate(session.event_hashes)
         }
@@ -919,10 +940,17 @@ class CausalityMCPServer:
                 terminal = response.get("approved") is False
             elif session.state.value == "rejected" and record.operation == "resolve":
                 terminal = response.get("resolution") == "reject"
-            if terminal and record.event_hashes:
+            if terminal and record.event_hashes and cause_hash in record.event_hashes:
                 candidates.append(record)
         if not candidates:
-            return None
+            raise TaskLifecycleError(
+                "invalid_task_event",
+                "terminal transition lacks a recorded operation result",
+                details={
+                    "event_hash": terminal_transitions[-1].entry_hash,
+                    "cause_event_hash": cause_hash,
+                },
+            )
         record = max(
             candidates,
             key=lambda item: max(positions.get(value, -1) for value in item.event_hashes),
@@ -977,7 +1005,7 @@ class CausalityMCPServer:
                         }
                         for intent in session.unresolved_intents
                     ],
-                    "terminal_result": self._terminal_result(session),
+                    "terminal_result": self._terminal_result(session, events),
                     "reflection_result": reflection_result,
                 },
             }

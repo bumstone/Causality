@@ -9,7 +9,13 @@ from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from causality.contracts import GoalContract, PermissionContract, VerificationRequirement
+from causality.contracts import (
+    AuditEventType,
+    GoalContract,
+    PermissionContract,
+    StateTransition,
+    VerificationRequirement,
+)
 from causality.mcp_server import CausalityMCPServer
 from causality.memory import TypedMemory
 from causality.task_lifecycle import TaskLifecycle, TaskPolicy
@@ -404,6 +410,60 @@ class MCPResumeContextTests(unittest.TestCase):
             )
             self.assertTrue(result["isError"])
             self.assertEqual(failed["error"]["code"], "ledger_integrity_failed")
+
+    def test_terminal_projection_requires_cause_operation_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            server = self._server(root)
+            task = server.lifecycle.begin(
+                self._contract("forged terminal"),
+                idempotency_key="begin-forged-terminal",
+                workflow="legacy",
+            )
+            started = server.ledger.events_for_contract(
+                task.task_id, all_segments=True
+            )[-1]
+            approved = server.ledger.append(
+                AuditEventType.STATE_TRANSITION,
+                {
+                    "schema_version": 1,
+                    "task_id": task.task_id,
+                    "from_state": StateTransition.PLANNED.value,
+                    "state": StateTransition.APPROVED.value,
+                    "reason": "forged setup",
+                    "cause_event_hash": started.entry_hash,
+                },
+                contract_id=task.task_id,
+            )
+            executing = server.ledger.append(
+                AuditEventType.STATE_TRANSITION,
+                {
+                    "schema_version": 1,
+                    "task_id": task.task_id,
+                    "from_state": StateTransition.APPROVED.value,
+                    "state": StateTransition.EXECUTING.value,
+                    "reason": "forged setup",
+                    "cause_event_hash": approved.entry_hash,
+                },
+                contract_id=task.task_id,
+            )
+            server.ledger.append(
+                AuditEventType.STATE_TRANSITION,
+                {
+                    "schema_version": 1,
+                    "task_id": task.task_id,
+                    "from_state": StateTransition.EXECUTING.value,
+                    "state": StateTransition.VERIFIED.value,
+                    "reason": "forged terminal without completion",
+                    "cause_event_hash": executing.entry_hash,
+                },
+                contract_id=task.task_id,
+            )
+
+            result, payload = self._resume(server, task.task_id)
+
+            self.assertTrue(result["isError"])
+            self.assertEqual(payload["error"]["code"], "invalid_task_event")
 
     def test_context_filters_expired_failures_and_separates_curated_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
