@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import os
 import tempfile
 import threading
 import unittest
@@ -84,6 +86,26 @@ class _FailingOpen:
         raise urllib.error.URLError("transport-secret")
 
 
+class _StaticResponse(io.BytesIO):
+    def getcode(self) -> int:
+        return 200
+
+
+class _SwapArtifactOpen:
+    def __init__(self, artifact: Path, outside: Path) -> None:
+        self.artifact = artifact
+        self.outside = outside
+
+    def open(self, *_args: object, **_kwargs: object) -> object:
+        self.artifact.symlink_to(self.outside)
+        return _StaticResponse(b"safe-response")
+
+
+class _StaticOpen:
+    def open(self, *_args: object, **_kwargs: object) -> object:
+        return _StaticResponse(b"safe-response")
+
+
 class HttpOriginTests(unittest.TestCase):
     def test_scope_origin_is_canonical_and_default_ports_are_removed(self) -> None:
         self.assertEqual(
@@ -156,7 +178,7 @@ class HttpAdapterTests(unittest.TestCase):
             self.assertEqual(result.status, 201)
             self.assertEqual(result.method, "POST")
             self.assertEqual(result.origin, normalize_origin(request.url))
-            self.assertEqual(result.request_bytes, len(b"request-secret"))
+            self.assertGreater(result.request_bytes, len(b"request-secret"))
             self.assertEqual(result.response_bytes, len(b"response-secret"))
             self.assertFalse(result.artifact_written)
             self.assertEqual(
@@ -236,6 +258,25 @@ class HttpAdapterTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "request_too_large")
         self.assertEqual(opener.calls, 0)
 
+    def test_request_limit_includes_url_and_all_headers_before_transport(self) -> None:
+        opener = _NeverOpen()
+        adapter = HttpAdapter(opener=opener, max_request_bytes=64)
+        for request, credentials in (
+            (HttpRequest("GET", "https://api.example/" + "x" * 80), None),
+            (
+                HttpRequest("GET", "https://api.example", headers={"X-Public": "x" * 80}),
+                None,
+            ),
+            (
+                HttpRequest("GET", "https://api.example"),
+                {"Authorization": "Bearer " + "x" * 80},
+            ),
+        ):
+            with self.subTest(request=request), self.assertRaises(HttpTransportError) as caught:
+                adapter.send(request, credential_headers=credentials)
+            self.assertEqual(caught.exception.code, "request_too_large")
+        self.assertEqual(opener.calls, 0)
+
     def test_response_limit_fails_closed_without_writing_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, _Server() as server:
             artifact = Path(temp_dir).resolve() / "large.bin"
@@ -283,6 +324,37 @@ class HttpAdapterTests(unittest.TestCase):
             "transport-secret",
         ):
             self.assertNotIn(secret, rendered)
+
+    def test_artifact_link_swap_replaces_entry_without_writing_outside(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            outside = root / "outside.bin"
+            outside.write_bytes(b"outside-original")
+            probe = root / "symlink-probe"
+            try:
+                probe.symlink_to(outside)
+                probe.unlink()
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            artifact = root / "response.bin"
+            adapter = HttpAdapter(opener=_SwapArtifactOpen(artifact, outside))
+
+            result = adapter.send(
+                HttpRequest("GET", "https://api.example", artifact_path=artifact)
+            )
+
+            self.assertEqual(outside.read_bytes(), b"outside-original")
+            self.assertFalse(artifact.is_symlink())
+            self.assertEqual(artifact.read_bytes(), b"safe-response")
+            self.assertTrue(result.artifact_written)
+
+            hardlink = root / "hardlink-response.bin"
+            os.link(outside, hardlink)
+            HttpAdapter(opener=_StaticOpen()).send(
+                HttpRequest("GET", "https://api.example", artifact_path=hardlink)
+            )
+            self.assertEqual(outside.read_bytes(), b"outside-original")
+            self.assertEqual(hardlink.read_bytes(), b"safe-response")
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from typing import Any, Iterator
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 QUERY_SECRET = "query-secret-004a"
-HEADER_SECRET = "header-secret-004a"
+HEADER_VALUE = "header-value-004a"
 BODY_SECRET = b"body-secret-004a\n"
 CREDENTIAL_SECRET = "Bearer credential-secret-004a"
 APPROVAL_TOKEN = "approval-secret-004a"
@@ -52,7 +52,7 @@ def _http_endpoint() -> Iterator[tuple[str, list[dict[str, Any]]]]:
             requests.append(
                 {
                     "path": self.path,
-                    "request_secret": self.headers.get("X-Request-Secret"),
+                    "request_metadata": self.headers.get("X-Request-Metadata"),
                     "authorization": self.headers.get("Authorization"),
                     "body": self.rfile.read(length),
                 }
@@ -228,6 +228,7 @@ class ExternalHttpMCPTests(unittest.TestCase):
                 "CAUSALITY_VERIFICATION_PREFIXES_JSON",
                 "CAUSALITY_NETWORK_ORIGINS_JSON",
                 "CAUSALITY_AUTH_REFS_JSON",
+                "CAUSALITY_HTTP_HEADERS_JSON",
                 "CAUSALITY_HTTP_CREDENTIALS_JSON",
                 "CAUSALITY_APPROVAL_TOKEN",
             ):
@@ -237,6 +238,9 @@ class ExternalHttpMCPTests(unittest.TestCase):
                     "PYTHONDONTWRITEBYTECODE": "1",
                     "CAUSALITY_NETWORK_ORIGINS_JSON": json.dumps([origin]),
                     "CAUSALITY_AUTH_REFS_JSON": json.dumps(["external-api"]),
+                    "CAUSALITY_HTTP_HEADERS_JSON": json.dumps(
+                        ["Content-Type", "X-Request-Metadata"]
+                    ),
                     "CAUSALITY_HTTP_CREDENTIALS_JSON": json.dumps(
                         {"external-api": {"Authorization": CREDENTIAL_SECRET}}
                     ),
@@ -325,7 +329,7 @@ class ExternalHttpMCPTests(unittest.TestCase):
                 "url": f"{origin}/submit?token={QUERY_SECRET}",
                 "headers": {
                     "Content-Type": "application/octet-stream",
-                    "X-Request-Secret": HEADER_SECRET,
+                    "X-Request-Metadata": HEADER_VALUE,
                 },
                 "body_ref": "io/request.bin",
                 "timeout_seconds": 10,
@@ -376,7 +380,7 @@ class ExternalHttpMCPTests(unittest.TestCase):
                 [
                     {
                         "path": f"/submit?token={QUERY_SECRET}",
-                        "request_secret": HEADER_SECRET,
+                        "request_metadata": HEADER_VALUE,
                         "authorization": CREDENTIAL_SECRET,
                         "body": BODY_SECRET,
                     }
@@ -458,7 +462,7 @@ class ExternalHttpMCPTests(unittest.TestCase):
             ledger_text = ledger.read_text(encoding="utf-8")
             for secret in (
                 QUERY_SECRET,
-                HEADER_SECRET,
+                HEADER_VALUE,
                 BODY_SECRET.decode().strip(),
                 CREDENTIAL_SECRET,
                 APPROVAL_TOKEN,

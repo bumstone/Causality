@@ -51,7 +51,10 @@ class _RecordingHttpAdapter:
         request: Any,
         *,
         credential_headers: Any = None,
+        before_effect: Any = None,
     ) -> HttpResult:
+        if before_effect is not None:
+            before_effect()
         body = b"wire-response"
         if request.artifact_path is not None:
             request.artifact_path.write_bytes(body)
@@ -433,6 +436,7 @@ class MCPServerTests(unittest.TestCase):
                 ["https://API.EXAMPLE:443"]
             ),
             "CAUSALITY_AUTH_REFS_JSON": json.dumps(["service-token"]),
+            "CAUSALITY_HTTP_HEADERS_JSON": json.dumps(["X-Public"]),
             "CAUSALITY_HTTP_CREDENTIALS_JSON": json.dumps(
                 {"service-token": {"Authorization": "Bearer environment-secret"}}
             ),
@@ -449,6 +453,10 @@ class MCPServerTests(unittest.TestCase):
             self.assertEqual(
                 server.lifecycle.policy.allowed_auth_refs,
                 frozenset({"service-token"}),
+            )
+            self.assertEqual(
+                server.lifecycle.policy.allowed_http_headers,
+                frozenset({"x-public"}),
             )
             self.assertEqual(
                 dict(server.lifecycle.http_credentials["service-token"]),
@@ -482,6 +490,7 @@ class MCPServerTests(unittest.TestCase):
                 allowed_tools=frozenset({"http"}),
                 allowed_network_origins=frozenset({"https://api.example"}),
                 allowed_auth_refs=frozenset({"service-token"}),
+                allowed_http_headers=frozenset({"x-public"}),
                 verification_commands=(WIRE_COMMAND,),
             )
             credentials = {

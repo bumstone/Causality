@@ -52,6 +52,7 @@ _HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPT
 _CALLER_FORBIDDEN_HTTP_HEADERS = frozenset(
     {
         "authorization",
+        "api-key",
         "connection",
         "content-length",
         "cookie",
@@ -63,6 +64,10 @@ _CALLER_FORBIDDEN_HTTP_HEADERS = frozenset(
         "trailer",
         "transfer-encoding",
         "upgrade",
+        "x-access-token",
+        "x-api-key",
+        "x-auth-token",
+        "x-request-secret",
     }
 )
 
@@ -176,12 +181,13 @@ class TaskPolicy:
     """Server-owned ceiling; a task contract may only narrow it."""
 
     allowed_tools: frozenset[str] = frozenset({"shell", "file.read", "file.write"})
-    allowed_network_origins: frozenset[str] = frozenset()
-    allowed_auth_refs: frozenset[str] = frozenset()
     subprocess_argv_prefixes: tuple[tuple[str, ...], ...] = ()
     verification_commands: tuple[tuple[str, ...], ...] = ()
     verification_argv_prefixes: tuple[tuple[str, ...], ...] = ()
     max_timeout_seconds: float = 300.0
+    allowed_network_origins: frozenset[str] = frozenset()
+    allowed_auth_refs: frozenset[str] = frozenset()
+    allowed_http_headers: frozenset[str] = frozenset()
     max_http_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
     max_http_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
 
@@ -198,6 +204,20 @@ class TaskPolicy:
             for ref in self.allowed_auth_refs
         ):
             raise ValueError("allowed_auth_refs must contain non-blank credential aliases")
+        try:
+            header_names = tuple(self.allowed_http_headers)
+            HttpRequest(
+                "GET",
+                "https://header-validation.invalid",
+                headers={name: "value" for name in header_names},
+            )
+            normalized_headers = frozenset(name.casefold() for name in header_names)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("allowed_http_headers must contain valid header names") from exc
+        if len(normalized_headers) != len(header_names):
+            raise ValueError("allowed_http_headers contains duplicate header names")
+        if normalized_headers & _CALLER_FORBIDDEN_HTTP_HEADERS:
+            raise ValueError("credential headers cannot be caller-allowed")
         if (
             isinstance(self.max_http_request_bytes, bool)
             or not isinstance(self.max_http_request_bytes, int)
@@ -212,6 +232,7 @@ class TaskPolicy:
             raise ValueError("max_http_response_bytes must be a non-negative integer")
         object.__setattr__(self, "allowed_network_origins", origins)
         object.__setattr__(self, "allowed_auth_refs", frozenset(self.allowed_auth_refs))
+        object.__setattr__(self, "allowed_http_headers", normalized_headers)
 
     def allows_subprocess(self, argv: tuple[str, ...]) -> bool:
         return any(
@@ -1032,6 +1053,8 @@ class TaskLifecycle:
             "response_artifact",
             "auth_ref",
         }
+        if any(not isinstance(name, str) for name in action):
+            raise _error("validation_error", "HTTP action field names must be text")
         unknown = set(action) - allowed_fields
         if unknown:
             raise _error(
@@ -1065,6 +1088,15 @@ class TaskLifecycle:
                 "validation_error",
                 "authority and credential headers must be server-owned",
                 headers=forbidden,
+            )
+        denied_headers = {
+            name.casefold() for name in headers
+        } - self.policy.allowed_http_headers
+        if denied_headers:
+            raise _error(
+                "policy_denied",
+                "caller HTTP headers are outside server policy",
+                headers=sorted(denied_headers),
             )
 
         timeout = action.get("timeout_seconds", 30.0)
@@ -1116,6 +1148,11 @@ class TaskLifecycle:
                 raise _error(
                     "validation_error",
                     "response_artifact parent must already exist",
+                )
+            if artifact.exists() and not artifact.is_file():
+                raise _error(
+                    "validation_error",
+                    "response_artifact must name a file",
                 )
 
         auth_ref = action.get("auth_ref")
@@ -1171,13 +1208,12 @@ class TaskLifecycle:
         contract = self._contract(session)
         allowed = set(contract.permissions.allowed_tools) & self.policy.allowed_tools
         if kind == "http":
-            plan = self._normalize_http_action(contract, action)
-            if plan.tool not in allowed:
+            if "http" not in allowed:
                 raise _error(
                     "action_blocked",
-                    f"tool is outside effective policy: {plan.tool}",
+                    "tool is outside effective policy: http",
                 )
-            return plan
+            return self._normalize_http_action(contract, action)
         if kind == "file_read":
             path = self._resolve_project_path(action.get("path", ""), field_name="path")
             tool, action_kind = "file.read", "tool_call"
@@ -1237,6 +1273,20 @@ class TaskLifecycle:
             raise _error("action_blocked", f"tool is outside effective policy: {tool}")
         return _ActionPlan(descriptor, tool, action_kind, description)
 
+    def _enforce_current_http_policy(self, plan: _ActionPlan) -> None:
+        if plan.http_request is None:
+            return
+        if plan.network_origin not in self.policy.allowed_network_origins:
+            raise _error(
+                "policy_denied",
+                "HTTP origin is outside the current server policy",
+            )
+        if plan.auth_ref is not None and plan.auth_ref not in self.policy.allowed_auth_refs:
+            raise _error(
+                "policy_denied",
+                "credential alias is outside the current server policy",
+            )
+
     def action(
         self,
         task_id: str,
@@ -1264,6 +1314,7 @@ class TaskLifecycle:
                     )
                     return self.get(task_id)
                 return session
+            self._enforce_current_http_policy(plan)
             session = self._ensure_executing(session)
             operation_id = self._operation_id(task_id, "action", key, digest)
             intent: LedgerEvent | None = None
@@ -1307,10 +1358,10 @@ class TaskLifecycle:
                                     "validation_error",
                                     "caller headers conflict with server credentials",
                                 )
-                        before_effect()
                         response = self.http_adapter.send(
                             plan.http_request,
                             credential_headers=credential_headers,
+                            before_effect=before_effect,
                         )
                         return {
                             **response.to_metadata(),
@@ -1443,11 +1494,11 @@ class TaskLifecycle:
                         },
                         contract_id=task_id,
                     )
-                message = (
-                    f"HTTP action failed after intent: {type(exc).__name__}"
-                    if plan.http_request is not None
-                    else f"action failed: {type(exc).__name__}: {exc}"
-                )
+                if plan.http_request is not None:
+                    phase = "after intent" if intent is not None else "before effect"
+                    message = f"HTTP action failed {phase}: {type(exc).__name__}"
+                else:
+                    message = f"action failed: {type(exc).__name__}: {exc}"
                 raise _error("action_failed", message) from exc
 
             if intent is None or provenance is None:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -163,6 +165,32 @@ class ToolAdapterTests(unittest.TestCase):
             result = tool.run([sys.executable, "-c", "import os; print(os.getcwd())"])
             self.assertEqual(Path(result.stdout.strip()), workspace.resolve())
 
+    def test_subprocess_never_inherits_causality_server_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "CAUSALITY_HTTP_CREDENTIALS_JSON": "Bearer child-visible-secret-004a",
+                "CAUSALITY_APPROVAL_TOKEN": "approval-child-secret-004a",
+            },
+            clear=False,
+        ):
+            runtime, _, adapter = self._setup(temp_dir)
+            tool = ToolAdapter(runtime.ledger, adapter, root=Path(temp_dir))
+            result = tool.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os; "
+                    "print(os.getenv('CAUSALITY_HTTP_CREDENTIALS_JSON', 'missing')); "
+                    "print(os.getenv('CAUSALITY_APPROVAL_TOKEN', 'missing'))",
+                ]
+            )
+
+            self.assertEqual(result.stdout.splitlines(), ["missing", "missing"])
+            ledger_text = runtime.ledger.path.read_text(encoding="utf-8")
+            self.assertNotIn("child-visible-secret-004a", ledger_text)
+            self.assertNotIn("approval-child-secret-004a", ledger_text)
+
     def test_run_rejects_empty_command(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, _, adapter = self._setup(temp_dir)
@@ -213,8 +241,6 @@ class ToolAdapterTests(unittest.TestCase):
     def test_relative_root_resolved_at_construction_not_write_time(self) -> None:
         # codex r3448157732: a relative root must be resolved when the adapter is
         # built, so a later cwd change can't move the scope/target tree.
-        import os
-
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, _, adapter = self._setup(temp_dir)
             cwd = os.getcwd()

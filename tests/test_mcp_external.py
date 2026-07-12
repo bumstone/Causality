@@ -188,6 +188,11 @@ class ExternalMCPTests(unittest.TestCase):
                 "CAUSALITY_SUBPROCESS_PREFIXES_JSON",
                 "CAUSALITY_VERIFICATION_COMMANDS_JSON",
                 "CAUSALITY_VERIFICATION_PREFIXES_JSON",
+                "CAUSALITY_NETWORK_ORIGINS_JSON",
+                "CAUSALITY_AUTH_REFS_JSON",
+                "CAUSALITY_HTTP_HEADERS_JSON",
+                "CAUSALITY_HTTP_CREDENTIALS_JSON",
+                "CAUSALITY_APPROVAL_TOKEN",
             ):
                 clean_env.pop(name, None)
             clean_env["PYTHONDONTWRITEBYTECODE"] = "1"

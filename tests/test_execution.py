@@ -12,6 +12,7 @@ from causality.contracts import (
     AuditEventType,
     EvidenceKind,
     GateDecision,
+    GoalContract,
     PermissionContract,
     Risk,
     VerificationRequirement,
@@ -166,6 +167,36 @@ class AdapterUnitTests(unittest.TestCase):
             after = engine.runtime.ledger.find(AuditEventType.GATE_DECISION)
             self.assertEqual(len(after) - before, 1)
             self.assertEqual(after[-1].payload.get("decision"), GateDecision.STOP.value)
+
+    def test_anonymous_network_action_records_auth_gate_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            contract = engine.runtime.create_contract(
+                GoalContract(
+                    "anonymous HTTP",
+                    "record every scope gate",
+                    permissions=PermissionContract(
+                        allowed_tools=("http",),
+                        network_scope=("https://api.example",),
+                    ),
+                )
+            )
+            adapter = ExecutionAdapter(engine.runtime, contract)
+
+            adapter.execute(
+                tool="http",
+                action_kind="tool_call",
+                description="anonymous request",
+                network_origin="https://api.example",
+                auth_ref=None,
+                run=lambda: None,
+            )
+
+            reasons = [
+                " ".join(event.payload.get("reasons", []))
+                for event in engine.runtime.ledger.find(AuditEventType.GATE_DECISION)
+            ]
+            self.assertTrue(any("anonymous access is permitted" in item for item in reasons))
 
 
 class EngineGatingTests(unittest.TestCase):

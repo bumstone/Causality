@@ -140,7 +140,7 @@ class ExecutionAdapter:
                         network_origin,
                     )
                 )
-            if auth_ref is not None:
+            if network_origin is not None or auth_ref is not None:
                 checks.append(lambda: self.runtime.check_auth_scope(self.contract, auth_ref))
             checks.append(lambda: self.runtime.can_execute_action(self.contract, action_kind))
             for check in checks:

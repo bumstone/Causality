@@ -249,6 +249,7 @@ class HttpLifecycleActionTests(unittest.TestCase):
                 allowed_tools=frozenset({"http"}),
                 allowed_network_origins=frozenset({origin}),
                 allowed_auth_refs=frozenset({"service-token"}),
+                allowed_http_headers=frozenset({"x-public"}),
             ),
             approval_authorizer=lambda _who, _stage, proof: proof == "trusted",
             http_credentials=credentials
@@ -381,6 +382,16 @@ class HttpLifecycleActionTests(unittest.TestCase):
                     },
                 ),
                 (
+                    "raw-api-key",
+                    {
+                        "kind": "http",
+                        "method": "GET",
+                        "url": origin,
+                        "headers": {"X-Api-Key": "raw-secret"},
+                        "expected_statuses": [200],
+                    },
+                ),
+                (
                     "host-override",
                     {
                         "kind": "http",
@@ -486,6 +497,7 @@ class HttpLifecycleActionTests(unittest.TestCase):
             policy = TaskPolicy(
                 allowed_tools=frozenset({"http"}),
                 allowed_network_origins=frozenset({origin}),
+                allowed_http_headers=frozenset({"x-public"}),
             )
             lifecycle = TaskLifecycle(
                 root,
@@ -545,6 +557,96 @@ class HttpLifecycleActionTests(unittest.TestCase):
             ledger_text = lifecycle.ledger.path.read_text(encoding="utf-8")
             for secret in ("query-secret", "header-secret", "transport-secret"):
                 self.assertNotIn(secret, ledger_text)
+
+    def test_task_policy_preserves_legacy_positional_field_order(self) -> None:
+        policy = TaskPolicy(
+            frozenset({"shell"}),
+            (("python", "-c"),),
+            (("python", "-m", "unittest"),),
+            (("python", "-m"),),
+            12.0,
+        )
+
+        self.assertEqual(policy.subprocess_argv_prefixes, (("python", "-c"),))
+        self.assertEqual(
+            policy.verification_commands,
+            (("python", "-m", "unittest"),),
+        )
+        self.assertEqual(policy.verification_argv_prefixes, (("python", "-m"),))
+        self.assertEqual(policy.max_timeout_seconds, 12.0)
+        self.assertEqual(policy.allowed_network_origins, frozenset())
+        with self.assertRaisesRegex(ValueError, "credential headers"):
+            TaskPolicy(allowed_http_headers=frozenset({"Authorization"}))
+
+    def test_restart_enforces_current_network_ceiling_before_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "io").mkdir()
+            original = "https://a.example"
+            lifecycle = TaskLifecycle(
+                root,
+                policy=TaskPolicy(
+                    allowed_tools=frozenset({"http"}),
+                    allowed_network_origins=frozenset({original}),
+                ),
+                approval_authorizer=lambda _who, _stage, proof: proof == "trusted",
+            )
+            task = lifecycle.begin(
+                GoalContract(
+                    "policy restart",
+                    "do not retain widened server policy",
+                    permissions=PermissionContract(
+                        allowed_tools=("http",),
+                        write_scope=("io",),
+                        network_scope=(original,),
+                    ),
+                ),
+                idempotency_key="policy-restart-begin",
+            )
+            lifecycle.approve(
+                task.task_id,
+                stage="external_send",
+                approved=True,
+                approver="operator",
+                rationale="approval under original policy",
+                idempotency_key="policy-restart-approval",
+                proof="trusted",
+            )
+            opener = _FailingOpener()
+            restarted = TaskLifecycle(
+                root,
+                lifecycle.ledger.path,
+                policy=TaskPolicy(
+                    allowed_tools=frozenset({"http"}),
+                    allowed_network_origins=frozenset({"https://b.example"}),
+                ),
+                approval_authorizer=lambda _who, _stage, proof: proof == "trusted",
+                http_adapter=HttpAdapter(opener=opener),
+            )
+
+            with self.assertRaises(TaskLifecycleError) as caught:
+                restarted.action(
+                    task.task_id,
+                    {
+                        "kind": "http",
+                        "method": "GET",
+                        "url": original,
+                        "expected_statuses": [200],
+                    },
+                    idempotency_key="policy-restart-send",
+                )
+
+            self.assertEqual(caught.exception.code, "policy_denied")
+            self.assertEqual(opener.calls, 0)
+            self.assertFalse(
+                any(
+                    event.event_type == AuditEventType.TASK_ACTION_INTENT.value
+                    and event.payload.get("idempotency_key") == "policy-restart-send"
+                    for event in restarted.ledger.events_for_contract(
+                        task.task_id, all_segments=True
+                    )
+                )
+            )
 
 
 if __name__ == "__main__":

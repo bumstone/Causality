@@ -5,13 +5,15 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import math
+import os
 import re
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlsplit
 
 
@@ -152,7 +154,11 @@ class HttpRequest:
             raise ValueError("HTTP URL must be ASCII with escaped path/query values") from None
         if self.body is not None and not isinstance(self.body, bytes):
             raise TypeError("HTTP body must be bytes or None")
-        if not isinstance(self.timeout, (int, float)) or not math.isfinite(self.timeout):
+        if (
+            isinstance(self.timeout, bool)
+            or not isinstance(self.timeout, (int, float))
+            or not math.isfinite(self.timeout)
+        ):
             raise ValueError("HTTP timeout must be finite and positive")
         if self.timeout <= 0:
             raise ValueError("HTTP timeout must be finite and positive")
@@ -197,9 +203,17 @@ class HttpAdapter:
         max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
-        if not isinstance(max_request_bytes, int) or max_request_bytes < 0:
+        if (
+            isinstance(max_request_bytes, bool)
+            or not isinstance(max_request_bytes, int)
+            or max_request_bytes < 0
+        ):
             raise ValueError("max_request_bytes must be a non-negative integer")
-        if not isinstance(max_response_bytes, int) or max_response_bytes < 0:
+        if (
+            isinstance(max_response_bytes, bool)
+            or not isinstance(max_response_bytes, int)
+            or max_response_bytes < 0
+        ):
             raise ValueError("max_response_bytes must be a non-negative integer")
         self.max_request_bytes = max_request_bytes
         self.max_response_bytes = max_response_bytes
@@ -213,14 +227,9 @@ class HttpAdapter:
         request: HttpRequest,
         *,
         credential_headers: Mapping[str, str] | None = None,
+        before_effect: Callable[[], None] | None = None,
     ) -> HttpResult:
         origin = normalize_origin(request.url)
-        body = request.body or b""
-        if len(body) > self.max_request_bytes:
-            raise HttpTransportError(
-                "request_too_large",
-                "HTTP request body exceeds the configured byte limit",
-            )
         artifact = self._artifact_target(request.artifact_path)
         headers = dict(request.headers)
         credentials = _validated_headers(credential_headers or {})
@@ -238,6 +247,14 @@ class HttpAdapter:
             )
         except Exception:
             raise ValueError("HTTP request could not be encoded") from None
+        request_bytes = self._request_size(request, headers)
+        if request_bytes > self.max_request_bytes:
+            raise HttpTransportError(
+                "request_too_large",
+                "HTTP request exceeds the configured byte limit",
+            )
+        if before_effect is not None:
+            before_effect()
         try:
             response = self._opener.open(wire_request, timeout=float(request.timeout))
         except urllib.error.HTTPError as exc:
@@ -271,18 +288,12 @@ class HttpAdapter:
 
         digest = hashlib.sha256(response_body).hexdigest()
         if artifact is not None:
-            try:
-                artifact.write_bytes(response_body)
-            except OSError:
-                raise HttpTransportError(
-                    "artifact_write_failed",
-                    "HTTP response artifact could not be written",
-                ) from None
+            self._write_artifact(artifact, response_body)
         return HttpResult(
             method=request.method,
             origin=origin,
             status=status,
-            request_bytes=len(body),
+            request_bytes=request_bytes,
             response_bytes=len(response_body),
             response_sha256=digest,
             artifact_written=artifact is not None,
@@ -295,6 +306,44 @@ class HttpAdapter:
         if not artifact.is_absolute() or artifact != artifact.resolve():
             raise ValueError("artifact_path must be an absolute, pre-resolved path")
         return artifact
+
+    @staticmethod
+    def _request_size(request: HttpRequest, headers: Mapping[str, str]) -> int:
+        size = len(request.method.encode("ascii")) + len(request.url.encode("ascii")) + 3
+        size += len(request.body or b"")
+        return size + sum(
+            len(name.encode("ascii")) + len(value.encode("latin-1")) + 4
+            for name, value in headers.items()
+        )
+
+    @staticmethod
+    def _write_artifact(artifact: Path, body: bytes) -> None:
+        temporary: Path | None = None
+        try:
+            if artifact.parent.resolve() != artifact.parent:
+                raise OSError("artifact parent changed")
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=artifact.parent,
+                prefix=f".{artifact.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, artifact)
+        except OSError:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise HttpTransportError(
+                "artifact_write_failed",
+                "HTTP response artifact could not be written",
+            ) from None
 
     def _read_bounded(self, response: Any) -> bytes:
         chunks: list[bytes] = []

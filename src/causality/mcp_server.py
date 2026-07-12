@@ -132,6 +132,7 @@ def _command_policy_from_env() -> TaskPolicy:
         allowed_tools=allowed_tools,
         allowed_network_origins=origins,
         allowed_auth_refs=auth_refs,
+        allowed_http_headers=strings("CAUSALITY_HTTP_HEADERS_JSON"),
         subprocess_argv_prefixes=commands("CAUSALITY_SUBPROCESS_PREFIXES_JSON"),
         verification_commands=commands("CAUSALITY_VERIFICATION_COMMANDS_JSON"),
         verification_argv_prefixes=(
