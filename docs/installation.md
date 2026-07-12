@@ -68,8 +68,8 @@ $env:CAUSALITY_HTTP_CREDENTIALS_JSON='{"service-token":{"Authorization":"Bearer 
 $env:CAUSALITY_APPROVAL_TOKEN='operator-secret'
 ```
 
-Task subprocesses never inherit `CAUSALITY_*`. Browser support is also
-default-deny and requires an explicit wrapper command:
+Task subprocesses never inherit `CAUSALITY_*`. Browser support is
+default-deny and requires a wrapper command:
 
 ```powershell
 $env:CAUSALITY_BROWSER_COMMAND_JSON='["python","C:\\tools\\browser_wrapper.py"]'
@@ -77,8 +77,9 @@ $env:CAUSALITY_BROWSER_COMMAND_JSON='["python","C:\\tools\\browser_wrapper.py"]'
 $env:CAUSALITY_BROWSER_BIN='C:\tools\causality-browser.exe'
 ```
 
-There is no `PATH` discovery. Protocol v1 must advertise isolated sessions,
-network-scope enforcement, and observe/act/assert/inspect/visual. Causality
-supplies private task session/profile paths and exact origins; the wrapper
-enforces them. The package does not bundle/launch a browser, navigate URLs,
-reuse personal profiles, or inject browser credentials.
+No `PATH` discovery. `capabilities --json` must return protocol-v1 JSON
+proving isolation, exact-origin enforcement, and operations
+observe/act/assert/inspect/visual/console/network. Other operations return bounded
+plain stdout. Causality supplies private task session/profile paths and exact
+origins; the wrapper enforces them. No browser launch/navigation, personal-profile
+reuse, or credential injection is bundled.

@@ -21,10 +21,11 @@ inheritance are forbidden.
 
 ## Browser
 
-`A11yBrowserAdapter` speaks wrapper protocol v1 over bounded JSON subprocess
-calls. MCP enables it only through `CAUSALITY_BROWSER_COMMAND_JSON` or the legacy
-single binary setting. Handshake must prove isolated sessions, network-scope
-enforcement, and observe/act/assert/inspect/visual capabilities.
+`A11yBrowserAdapter` speaks wrapper protocol v1 over bounded argv subprocess
+calls. `capabilities --json` returns JSON; normal operations return bounded plain
+stdout. MCP requires an explicit command. Handshake must prove isolated sessions,
+network-scope enforcement, observe/act/assert/inspect/visual, and console/network
+diagnostics.
 
 Each task gets a private session/profile. Observe returns stable refs and a
 canonical state hash. Later operations reject stale task state; effects recheck
@@ -33,6 +34,7 @@ current origins, and every act requires `external_send` approval.
 Raw driver data stays in a hash-verified ignored cache and MCP returns it only as
 untrusted data. The ledger stores intent, state/snapshot hashes, diff and
 diagnostic hashes, and artifact refs. The adapter never writes the ledger.
+Driver artifacts stage privately, then publish under a guarded target parent.
 
 Browser launch/navigation, personal profiles, credential injection,
 selectors/JavaScript, and driver-specific compatibility remain host-wrapper
