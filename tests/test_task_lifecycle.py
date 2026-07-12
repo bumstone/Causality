@@ -827,10 +827,46 @@ class TaskLifecycleTests(unittest.TestCase):
                         "timeout",
                         idempotency_key="timeout-verify",
                     )
-            recovered = TaskLifecycle(
+            def lose_action_result(_action):
+                raise SimulatedProcessDeath("interleaved action result lost")
+
+            recovery = TaskLifecycle(
                 verify_root,
-                policy=TaskPolicy(verification_commands=(command,)),
-            ).verify(
+                policy=TaskPolicy(
+                    subprocess_argv_prefixes=((sys.executable, "-c"),),
+                    verification_commands=(command,),
+                ),
+                effect_runner=lose_action_result,
+                approval_authorizer=lambda *_args: True,
+            )
+            with self.assertRaises(SimulatedProcessDeath):
+                recovery.action(
+                    task.task_id,
+                    self._action("interleaved"),
+                    idempotency_key="interleaved-action",
+                )
+            orphaned = recovery.get(task.task_id)
+            self.assertEqual(orphaned.state, TaskState.BLOCKED)
+            self.assertEqual(len(orphaned.unresolved_intents), 1)
+            before = recovery.ledger.event_count()
+            replayed = recovery.verify(
+                task.task_id,
+                "timeout",
+                idempotency_key="timeout-verify",
+            )
+            self.assertEqual(replayed, orphaned)
+            self.assertEqual(recovery.ledger.event_count(), before)
+            reopened = recovery.resolve(
+                task.task_id,
+                operation_id=orphaned.unresolved_intents[0].operation_id,
+                resolution="not_applied",
+                approver="operator",
+                rationale="the interrupted action did not apply",
+                idempotency_key="interleaved-resolve",
+                proof="trusted",
+            )
+            self.assertEqual(reopened.state, TaskState.EXECUTING)
+            recovered = recovery.verify(
                 task.task_id,
                 "timeout",
                 idempotency_key="timeout-verify",

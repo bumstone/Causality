@@ -278,6 +278,27 @@ def _current_workflow_phase(phases: list[dict[str, Any]]) -> dict[str, Any] | No
     )
 
 
+def _verification_result_requires_phase_block(
+    event: LedgerEvent,
+    events_by_hash: Mapping[str, LedgerEvent],
+) -> bool:
+    if (
+        event.event_type != TASK_ACTION_RESULT
+        or event.payload.get("operation") != "verify"
+    ):
+        return False
+    result = event.payload.get("result")
+    provenance = event.payload.get("provenance_event_hashes")
+    if not isinstance(result, Mapping) or not isinstance(provenance, list):
+        return False
+    return result.get("status") in {"blocked", "timeout", "error"} or any(
+        events_by_hash.get(ref) is not None
+        and events_by_hash[ref].payload.get("mutates_task") is True
+        for ref in provenance
+        if isinstance(ref, str)
+    )
+
+
 def _within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -1071,25 +1092,33 @@ class TaskLifecycle:
         if not isinstance(workflow, str):
             raise _error("validation_error", "workflow must be text")
         workflow = workflow.strip()
-        phase_plan = _workflow_snapshot(contract, workflow)
+        if workflow not in {"legacy", "auto", "root-cause-protocol"}:
+            raise _error(
+                "validation_error",
+                "workflow must be legacy, auto, or root-cause-protocol",
+            )
         task_id = str(
             uuid5(
                 NAMESPACE_URL,
                 f"causality:{str(self.project_root).casefold()}:{key}",
             )
         )
-        request = (
-            _contract_request(contract)
-            if workflow == "legacy"
-            else _workflow_begin_request(contract, workflow, phase_plan)
-        )
-        digest = canonical_sha256(request)
         with self.runtime.execution_lock():
             if not self.ledger.verify_chain():
                 raise _error("ledger_integrity_failed", "ledger hash chain verification failed")
             for event in self.ledger.events(all_segments=True):
                 if event.event_type != TASK_STARTED or event.payload.get("idempotency_key") != key:
                     continue
+                if not event.contract_id:
+                    raise _error("invalid_task_event", "task_started has no contract scope")
+                session = self.get(event.contract_id)
+                frozen_plan = tuple(event.payload.get("phase_plan", ()))
+                request = (
+                    _contract_request(contract)
+                    if workflow == "legacy"
+                    else _workflow_begin_request(contract, workflow, frozen_plan)
+                )
+                digest = canonical_sha256(request)
                 prior = event.payload.get("request_sha256")
                 if prior != digest:
                     raise _error(
@@ -1097,9 +1126,15 @@ class TaskLifecycle:
                         "begin idempotency key is already bound to another request",
                         idempotency_key=key,
                     )
-                if not event.contract_id:
-                    raise _error("invalid_task_event", "task_started has no contract scope")
-                return self.get(event.contract_id)
+                return session
+
+            phase_plan = _workflow_snapshot(contract, workflow)
+            request = (
+                _contract_request(contract)
+                if workflow == "legacy"
+                else _workflow_begin_request(contract, workflow, phase_plan)
+            )
+            digest = canonical_sha256(request)
 
             snapshot = self.ledger.contract_snapshot(task_id)
             if snapshot is not None:
@@ -3076,26 +3111,34 @@ class TaskLifecycle:
 
     def _phase_block_event(self, session: TaskSession) -> LedgerEvent | None:
         current = session.current_phase_id
-        return next(
-            (
-                event
-                for event in reversed(
-                    self.ledger.events_for_contract(
-                        session.task_id,
-                        all_segments=True,
-                    )
-                )
-                if event.event_type == TASK_OPERATION
-                and event.payload.get("operation") == "phase"
-                and isinstance(event.payload.get("response"), Mapping)
-                and isinstance(event.payload["response"].get("phase"), Mapping)
-                and event.payload["response"]["phase"].get("phase_id") == current
-                and event.payload["response"]["phase"].get("status") == "blocked"
-            ),
-            None,
+        events = self.ledger.events_for_contract(
+            session.task_id,
+            all_segments=True,
         )
+        events_by_hash = {event.entry_hash: event for event in events}
+        for event in reversed(events):
+            response = event.payload.get("response")
+            phase = response.get("phase") if isinstance(response, Mapping) else None
+            if (
+                event.event_type == TASK_OPERATION
+                and event.payload.get("operation") == "phase"
+                and isinstance(phase, Mapping)
+                and phase.get("phase_id") == current
+            ):
+                if phase.get("status") == "blocked":
+                    return event
+                if phase.get("status") == "running":
+                    return None
+            if _verification_result_requires_phase_block(event, events_by_hash):
+                return event
+        return None
 
-    def _reconcile_phase_block(self, session: TaskSession) -> TaskSession:
+    def _reconcile_phase_block(
+        self,
+        session: TaskSession,
+        *,
+        expected_event_hash: str,
+    ) -> TaskSession:
         if session.terminal:
             return session
         current = next(
@@ -3110,6 +3153,8 @@ class TaskLifecycle:
             return session
         hypothesis = self._hypothesis_block_record(session)
         if hypothesis is not None:
+            if hypothesis.event_hashes[-1] != expected_event_hash:
+                return session
             return self._reconcile_hypothesis_block(session)
         durable_state = self._durable_state(session.task_id)
         if durable_state is TaskState.BLOCKED:
@@ -3117,6 +3162,8 @@ class TaskLifecycle:
         cause = self._phase_block_event(session)
         if cause is None or durable_state is not TaskState.EXECUTING:
             raise _error("invalid_task_event", "blocked phase has no durable cause")
+        if cause.entry_hash != expected_event_hash:
+            return session
         self._append_transition(
             replace(session, state=durable_state),
             TaskState.BLOCKED,
@@ -3196,8 +3243,12 @@ class TaskLifecycle:
         digest = canonical_sha256(request)
         with self.runtime.execution_lock():
             session = self.get(task_id)
-            if self._existing(session, "phase", key, digest) is not None:
-                return self._reconcile_phase_block(session)
+            prior = self._existing(session, "phase", key, digest)
+            if prior is not None:
+                return self._reconcile_phase_block(
+                    session,
+                    expected_event_hash=prior.event_hashes[-1],
+                )
             if not session.workflow_phases:
                 raise _error("phase_not_configured", "task has no workflow phase plan")
             current = next(
@@ -3242,7 +3293,7 @@ class TaskLifecycle:
                     "attempt": current.attempt,
                     "evidence_hashes": list(evidence),
                 }
-            self._append_operation(
+            operation = self._append_operation(
                 session,
                 "phase",
                 key,
@@ -3252,7 +3303,10 @@ class TaskLifecycle:
             )
             if status == "blocked":
                 session = self.get(task_id)
-                return self._reconcile_phase_block(session)
+                return self._reconcile_phase_block(
+                    session,
+                    expected_event_hash=operation.entry_hash,
+                )
             return self.get(task_id)
 
     def hypothesis(
@@ -3290,8 +3344,12 @@ class TaskLifecycle:
         digest = canonical_sha256(request)
         with self.runtime.execution_lock():
             session = self.get(task_id)
-            if self._existing(session, "hypothesis", key, digest) is not None:
-                return self._reconcile_phase_block(session)
+            prior = self._existing(session, "hypothesis", key, digest)
+            if prior is not None:
+                return self._reconcile_phase_block(
+                    session,
+                    expected_event_hash=prior.event_hashes[-1],
+                )
             phase = self._require_running_workflow_phase(session, "hypothesis")
             session = self._ensure_executing(session)
             if session.unresolved_intents:
@@ -3314,7 +3372,7 @@ class TaskLifecycle:
             failed_hypotheses = self._failed_hypotheses(session) + int(
                 status == "rejected"
             )
-            self._append_operation(
+            operation = self._append_operation(
                 session,
                 "hypothesis",
                 key,
@@ -3329,7 +3387,10 @@ class TaskLifecycle:
                 },
             )
             session = self.get(task_id)
-            return self._reconcile_phase_block(session)
+            return self._reconcile_phase_block(
+                session,
+                expected_event_hash=operation.entry_hash,
+            )
 
     def approve(
         self,
@@ -3670,14 +3731,26 @@ class TaskLifecycle:
                     evidence_event
                     and evidence_event.payload.get("mutates_task") is True
                 )
-                if must_block and session.state is TaskState.EXECUTING:
-                    self._append_transition(
-                        session,
-                        TaskState.BLOCKED,
-                        reason=f"verification ended with {response.get('status')}",
-                        cause_event_hash=prior.event_hashes[-1],
-                    )
-                    return self.get(task_id)
+                if must_block:
+                    if (
+                        session.workflow_phases
+                        and self._durable_state(task_id) is TaskState.EXECUTING
+                    ):
+                        return self._reconcile_phase_block(
+                            session,
+                            expected_event_hash=prior.event_hashes[-1],
+                        )
+                    if (
+                        not session.workflow_phases
+                        and session.state is TaskState.EXECUTING
+                    ):
+                        self._append_transition(
+                            session,
+                            TaskState.BLOCKED,
+                            reason=f"verification ended with {response.get('status')}",
+                            cause_event_hash=prior.event_hashes[-1],
+                        )
+                        return self.get(task_id)
                 return session
             self._require_running_workflow_phase(session, "verification")
             session = self._ensure_executing(session)
@@ -3805,8 +3878,14 @@ class TaskLifecycle:
             )
             unsafe = bool(evidence_event and evidence_event.payload.get("mutates_task") is True)
             if result.status in {"blocked", "timeout", "error"} or unsafe:
+                blocked = self.get(task_id)
+                if blocked.workflow_phases:
+                    return self._reconcile_phase_block(
+                        blocked,
+                        expected_event_hash=result_event.entry_hash,
+                    )
                 self._append_transition(
-                    self.get(task_id),
+                    blocked,
                     TaskState.BLOCKED,
                     reason=f"verification ended with {result.status}",
                     cause_event_hash=result_event.entry_hash,
@@ -4403,10 +4482,7 @@ class TaskLifecycle:
         if workflow == "legacy":
             valid_workflow = not workflow_phases
         else:
-            expected_plan = _workflow_snapshot(
-                GoalContract.from_mapping(contract),
-                workflow,
-            )
+            expected_plan = tuple(_thaw(phase_plan_value))
             expected_request = _workflow_begin_request(
                 GoalContract.from_mapping(contract),
                 workflow,
@@ -4419,7 +4495,7 @@ class TaskLifecycle:
                 "phase_plan": list(expected_plan),
             }
             valid_workflow = bool(
-                _thaw(phase_plan_value) == list(expected_plan)
+                (workflow == "auto" or workflow_phases)
                 and _thaw(begin_request) == expected_request
                 and _thaw(begin_response) == expected_response
             )
@@ -4478,8 +4554,8 @@ class TaskLifecycle:
         terminal_hash: str | None = None
         reflection: Mapping[str, Any] | None = None
         reflection_intent: PendingIntent | None = None
-        seen_hashes: set[str] = set()
         seen_positions: dict[str, int] = {}
+        seen_events: dict[str, LedgerEvent] = {}
         rejected_hypothesis_hashes: list[str] = []
         hypothesis_gate_hash: str | None = None
         phase_block_hash: str | None = None
@@ -4487,7 +4563,7 @@ class TaskLifecycle:
 
         for event in scoped:
             seen_positions[event.entry_hash] = len(seen_positions)
-            seen_hashes.add(event.entry_hash)
+            seen_events[event.entry_hash] = event
             if event is start_event:
                 started_seen = True
                 continue
@@ -4539,7 +4615,7 @@ class TaskLifecycle:
                         f"illegal task state edge {source.value}->{target.value}",
                         event_hash=event.entry_hash,
                     )
-                if cause not in seen_hashes - {event.entry_hash}:
+                if cause == event.entry_hash or cause not in seen_events:
                     raise _error(
                         "invalid_task_transition",
                         "cause_event_hash does not cite an earlier task event",
@@ -4791,7 +4867,8 @@ class TaskLifecycle:
                         or not isinstance(evidence_hashes, (list, tuple))
                         or any(
                             not isinstance(item, str)
-                            or item not in seen_hashes - {event.entry_hash}
+                            or item == event.entry_hash
+                            or item not in seen_events
                             or (
                                 status_value != "running"
                                 and seen_positions[item] <= expected["start_position"]
@@ -5045,7 +5122,7 @@ class TaskLifecycle:
                             or any(
                                 not isinstance(ref, str)
                                 or not _SHA256.fullmatch(ref)
-                                or ref not in seen_hashes
+                                or ref not in seen_events
                                 for ref in refs
                             )
                             or len(refs) != len(set(refs))
@@ -5259,7 +5336,9 @@ class TaskLifecycle:
                     )
                 provenance = payload.get("provenance_event_hashes")
                 if not isinstance(provenance, list) or not provenance or any(
-                    not isinstance(item, str) or item not in seen_hashes - {event.entry_hash}
+                    not isinstance(item, str)
+                    or item == event.entry_hash
+                    or item not in seen_events
                     for item in provenance
                 ):
                     raise _error(
@@ -5274,6 +5353,15 @@ class TaskLifecycle:
                         "task_action_result.result is required",
                         event_hash=event.entry_hash,
                     )
+                if operation == "verify" and not isinstance(
+                    payload["result"], Mapping
+                ):
+                    raise _error(
+                        "invalid_task_event",
+                        "verification action result must be an object",
+                        event_hash=event.entry_hash,
+                        operation_id=operation_id,
+                    )
                 scope = (operation, key)
                 original = idempotency[scope]
                 idempotency[scope] = replace(
@@ -5283,6 +5371,29 @@ class TaskLifecycle:
                     event_hashes=original.event_hashes + (event.entry_hash,),
                 )
                 pending.pop(operation_id)
+                if (
+                    workflow_phases
+                    and _verification_result_requires_phase_block(
+                        event,
+                        seen_events,
+                    )
+                ):
+                    current = _current_workflow_phase(workflow_phases)
+                    if current is None or current["status"] != "running":
+                        raise _error(
+                            "invalid_task_event",
+                            "blocking verification requires a running workflow phase",
+                            event_hash=event.entry_hash,
+                        )
+                    current.update(
+                        {
+                            "status": "blocked",
+                            "evidence_hashes": tuple(
+                                dict.fromkeys((*provenance, event.entry_hash))
+                            ),
+                        }
+                    )
+                    phase_block_hash = event.entry_hash
                 continue
 
             if event.event_type == TASK_REFLECTION_INTENT:
@@ -5494,11 +5605,17 @@ class TaskLifecycle:
                 ),
             )
             if state is not TaskState.BLOCKED:
-                recovery = (
-                    "hypothesis"
-                    if self._hypothesis_block_record(session) is not None
-                    else "phase_finish"
-                )
+                if self._hypothesis_block_record(session) is not None:
+                    recovery = "hypothesis"
+                else:
+                    cause = self._phase_block_event(session)
+                    recovery = (
+                        "verify"
+                        if cause is not None
+                        and cause.event_type == TASK_ACTION_RESULT
+                        and cause.payload.get("operation") == "verify"
+                        else "phase_finish"
+                    )
                 session = replace(session, allowed_next=(recovery, "reject"))
         return session
 

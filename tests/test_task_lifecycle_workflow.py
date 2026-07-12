@@ -182,10 +182,23 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 task.allowed_next,
                 ("approve", "phase_start", "reject"),
             )
-            self.assertEqual(
-                self._lifecycle(root).get(task.task_id).to_dict(),
-                task.to_dict(),
-            )
+            with patch(
+                "causality.task_lifecycle._workflow_snapshot",
+                side_effect=AssertionError("persisted tasks must not re-resolve playbooks"),
+            ):
+                restarted = self._lifecycle(root)
+                self.assertEqual(
+                    restarted.get(task.task_id).to_dict(),
+                    task.to_dict(),
+                )
+                self.assertEqual(
+                    restarted.begin(
+                        self._contract(),
+                        idempotency_key="workflow-begin",
+                        workflow="root-cause-protocol",
+                    ),
+                    task,
+                )
 
     def test_begin_workflow_is_idempotent_and_conflicts_with_other_selection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -206,12 +219,12 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.code, "idempotency_conflict")
 
-    def test_projection_rejects_empty_auto_plan_for_nontrivial_contract(self) -> None:
+    def test_projection_rejects_empty_explicit_workflow_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             lifecycle = self._lifecycle(root)
             contract = self._contract()
-            key = "forged-auto"
+            key = "forged-explicit"
             task_id = str(
                 uuid5(
                     NAMESPACE_URL,
@@ -230,7 +243,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 "approval_required",
             ):
                 request.pop(name, None)
-            request.update({"workflow": "auto", "phase_plan": []})
+            request.update({"workflow": "root-cause-protocol", "phase_plan": []})
             lifecycle.ledger.append(
                 AuditEventType.TASK_STARTED,
                 {
@@ -239,12 +252,12 @@ class WorkflowLifecycleTests(unittest.TestCase):
                     "idempotency_key": key,
                     "request_sha256": canonical_sha256(request),
                     "request": request,
-                    "workflow": "auto",
+                    "workflow": "root-cause-protocol",
                     "phase_plan": [],
                     "response": {
                         "task_id": task_id,
                         "contract_id": task_id,
-                        "workflow": "auto",
+                        "workflow": "root-cause-protocol",
                         "phase_plan": [],
                     },
                 },
@@ -576,6 +589,108 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.code, "idempotency_conflict")
 
+    def test_phase_block_recovery_rejects_historical_finish_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            def build_lifecycle() -> TaskLifecycle:
+                return TaskLifecycle(
+                    root,
+                    policy=TaskPolicy(verification_commands=(COMMAND,)),
+                    effect_runner=lambda _action: {"status": "ok"},
+                    approval_authorizer=lambda *_args: True,
+                )
+
+            lifecycle = build_lifecycle()
+            task = lifecycle.begin(
+                self._contract(),
+                idempotency_key="phase-history-begin",
+                workflow="root-cause-protocol",
+            )
+            lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="start",
+                idempotency_key="phase-history-start-1",
+            )
+            old_refs = self._phase_evidence(lifecycle, task.task_id, "phase-old")
+            old_block = lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="finish",
+                status="blocked",
+                evidence_refs=old_refs,
+                idempotency_key="phase-block-old",
+            )
+            lifecycle.approve(
+                task.task_id,
+                stage="phase",
+                phase_id=REPRODUCE,
+                approved=True,
+                approver="operator",
+                rationale="reviewed the first phase block",
+                evidence_refs=old_block.approval_evidence_refs,
+                idempotency_key="phase-block-old-approval",
+                proof="trusted",
+            )
+            lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="start",
+                idempotency_key="phase-history-start-2",
+            )
+            current_refs = self._phase_evidence(
+                lifecycle,
+                task.task_id,
+                "phase-current",
+            )
+            original_transition = lifecycle._append_transition
+
+            def crash_before_block(session, target, **kwargs):
+                if target is TaskState.BLOCKED:
+                    raise RuntimeError("phase block transition lost")
+                return original_transition(session, target, **kwargs)
+
+            with patch.object(
+                lifecycle,
+                "_append_transition",
+                side_effect=crash_before_block,
+            ), self.assertRaisesRegex(RuntimeError, "transition lost"):
+                lifecycle.phase(
+                    task.task_id,
+                    phase_id=REPRODUCE,
+                    action="finish",
+                    status="blocked",
+                    evidence_refs=current_refs,
+                    idempotency_key="phase-block-current",
+                )
+
+            recovered = build_lifecycle()
+            pending = recovered.get(task.task_id)
+            self.assertEqual(pending.allowed_next, ("phase_finish", "reject"))
+            before = recovered.ledger.event_count()
+            historical = recovered.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="finish",
+                status="blocked",
+                evidence_refs=old_refs,
+                idempotency_key="phase-block-old",
+            )
+            self.assertEqual(historical, pending)
+            self.assertEqual(recovered.ledger.event_count(), before)
+            blocked = recovered.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="finish",
+                status="blocked",
+                evidence_refs=current_refs,
+                idempotency_key="phase-block-current",
+            )
+            self.assertEqual(blocked.state, TaskState.BLOCKED)
+            self.assertEqual(blocked.allowed_next, ("approve",))
+            self.assertEqual(recovered.ledger.event_count(), before + 1)
+
     def test_phase_enabled_task_blocks_effect_before_phase_start(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -619,6 +734,193 @@ class WorkflowLifecycleTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "phase_not_running")
             self.assertEqual(calls, [])
             self.assertEqual(lifecycle.ledger.event_count(), before)
+
+    def test_blocking_verification_requires_exact_replay_before_phase_approval(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            command = (sys.executable, "-c", "import time; time.sleep(1)")
+
+            def build_lifecycle() -> TaskLifecycle:
+                return TaskLifecycle(
+                    root,
+                    policy=TaskPolicy(verification_commands=(command,)),
+                    approval_authorizer=lambda *_args: True,
+                )
+
+            lifecycle = build_lifecycle()
+            task = lifecycle.begin(
+                GoalContract(
+                    title="recover timed out workflow verification",
+                    summary="block the phase until exact replay and review",
+                    permissions=PermissionContract(allowed_tools=("shell",)),
+                    verification_requirements=(
+                        VerificationRequirement(
+                            id="timeout",
+                            argv=command,
+                            timeout_seconds=0.05,
+                        ),
+                    ),
+                ),
+                idempotency_key="verify-block-begin",
+                workflow="root-cause-protocol",
+            )
+            lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="start",
+                idempotency_key="verify-block-phase",
+            )
+            first_block = lifecycle.verify(
+                task.task_id,
+                "timeout",
+                idempotency_key="verify-block-old",
+            )
+            lifecycle.approve(
+                task.task_id,
+                stage="phase",
+                phase_id=REPRODUCE,
+                approved=True,
+                approver="operator",
+                rationale="reviewed the first timed out verification",
+                evidence_refs=first_block.approval_evidence_refs,
+                idempotency_key="verify-old-approval",
+                proof="trusted",
+            )
+            lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="start",
+                idempotency_key="verify-block-phase-2",
+            )
+            original_transition = lifecycle._append_transition
+
+            def crash_before_block(session, target, **kwargs):
+                if target is TaskState.BLOCKED:
+                    raise RuntimeError("verification result durable, transition lost")
+                return original_transition(session, target, **kwargs)
+
+            with patch.object(
+                lifecycle,
+                "_append_transition",
+                side_effect=crash_before_block,
+            ), self.assertRaisesRegex(RuntimeError, "transition lost"):
+                lifecycle.verify(
+                    task.task_id,
+                    "timeout",
+                    idempotency_key="verify-block",
+                )
+
+            recovered = build_lifecycle()
+            pending = recovered.get(task.task_id)
+            self.assertEqual(pending.state, TaskState.BLOCKED)
+            self.assertEqual(pending.workflow_phases[0].status, "blocked")
+            self.assertEqual(pending.allowed_next, ("verify", "reject"))
+            self.assertEqual(
+                pending.blocked_reason,
+                "workflow recovery requires an exact operation replay",
+            )
+            before = recovered.ledger.event_count()
+            historical = recovered.verify(
+                task.task_id,
+                "timeout",
+                idempotency_key="verify-block-old",
+            )
+            self.assertEqual(historical, pending)
+            self.assertEqual(recovered.ledger.event_count(), before)
+            with self.assertRaises(TaskLifecycleError) as wrong_replay:
+                recovered.verify(
+                    task.task_id,
+                    "timeout",
+                    idempotency_key="different-verify-key",
+                )
+            self.assertEqual(wrong_replay.exception.code, "phase_not_running")
+            self.assertEqual(recovered.ledger.event_count(), before)
+            with self.assertRaises(TaskLifecycleError) as premature:
+                recovered.approve(
+                    task.task_id,
+                    stage="phase",
+                    phase_id=REPRODUCE,
+                    approved=True,
+                    approver="operator",
+                    rationale="must replay the interrupted verification first",
+                    evidence_refs=pending.approval_evidence_refs,
+                    idempotency_key="premature-verify-approval",
+                    proof="trusted",
+                )
+            self.assertEqual(premature.exception.code, "recovery_required")
+            self.assertEqual(recovered.ledger.event_count(), before)
+
+            blocked = recovered.verify(
+                task.task_id,
+                "timeout",
+                idempotency_key="verify-block",
+            )
+            self.assertEqual(blocked.state, TaskState.BLOCKED)
+            self.assertEqual(blocked.workflow_phases[0].status, "blocked")
+            self.assertEqual(blocked.allowed_next, ("approve",))
+            self.assertEqual(len(blocked.approval_evidence_refs), 1)
+            approved = recovered.approve(
+                task.task_id,
+                stage="phase",
+                phase_id=REPRODUCE,
+                approved=True,
+                approver="operator",
+                rationale="reviewed the timed out verification",
+                evidence_refs=blocked.approval_evidence_refs,
+                idempotency_key="verify-phase-approval",
+                proof="trusted",
+            )
+            self.assertEqual(approved.state, TaskState.EXECUTING)
+            self.assertEqual(approved.workflow_phases[0].status, "failed")
+            self.assertEqual(approved.allowed_next, ("phase_start", "reject"))
+
+    def test_mutating_verification_blocks_the_running_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            command = (
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('unexpected.txt').write_text('x')",
+            )
+            lifecycle = TaskLifecycle(
+                root,
+                policy=TaskPolicy(verification_commands=(command,)),
+            )
+            task = lifecycle.begin(
+                GoalContract(
+                    title="detect mutating verification",
+                    summary="a passing check must still be read-only",
+                    permissions=PermissionContract(allowed_tools=("shell",)),
+                    verification_requirements=(
+                        VerificationRequirement(id="mutating", argv=command),
+                    ),
+                ),
+                idempotency_key="mutating-verify-begin",
+                workflow="root-cause-protocol",
+            )
+            lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="start",
+                idempotency_key="mutating-verify-phase",
+            )
+
+            blocked = lifecycle.verify(
+                task.task_id,
+                "mutating",
+                idempotency_key="mutating-verify",
+            )
+
+            self.assertEqual(blocked.state, TaskState.BLOCKED)
+            self.assertEqual(blocked.workflow_phases[0].status, "blocked")
+            self.assertEqual(blocked.allowed_next, ("approve",))
+            self.assertEqual(len(blocked.approval_evidence_refs), 1)
+            self.assertEqual(
+                blocked.requirement_results["mutating"]["status"],
+                "fail",
+            )
 
     def test_hypothesis_outcomes_count_only_rejections_and_replay_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -871,6 +1173,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
             root = Path(temp_dir)
             lifecycle, task = self._begin(root)
             task = self._start_hypothesis(lifecycle, task, "crash")
+            earlier_evidence = {}
             for index in range(1, 3):
                 suffix = f"crash-{index}"
                 evidence = self._hypothesis_evidence(
@@ -878,6 +1181,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
                     task.task_id,
                     suffix,
                 )
+                earlier_evidence[suffix] = evidence
                 task = self._record_hypothesis(
                     lifecycle,
                     task.task_id,
@@ -913,6 +1217,15 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 "workflow recovery requires an exact operation replay",
             )
             before = fresh.ledger.event_count()
+            historical = self._record_hypothesis(
+                fresh,
+                task.task_id,
+                suffix="crash-1",
+                status="rejected",
+                evidence_ref=earlier_evidence["crash-1"],
+            )
+            self.assertEqual(historical, blocked)
+            self.assertEqual(fresh.ledger.event_count(), before)
             with self.assertRaises(TaskLifecycleError) as premature:
                 fresh.approve(
                     task.task_id,
