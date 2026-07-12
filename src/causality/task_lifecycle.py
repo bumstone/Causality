@@ -21,6 +21,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from .agent_harness import AgentHarness
 from .contracts import (
     AuditEventType,
     EvidenceKind,
@@ -53,6 +54,7 @@ from .http_adapter import (
 from .ledger import EvidenceLedger, LedgerEvent, sha256_file, sha256_text
 from .orchestrator import Causality
 from .memory import TypedMemory
+from .playbooks import build_phase_plan, resolve_playbooks
 from .reflect import reflect_on_contract
 from .tool_adapter import ToolAdapter, utf8_size
 
@@ -162,6 +164,120 @@ def _contract_request(contract: GoalContract) -> dict[str, Any]:
     return value
 
 
+def _workflow_begin_request(
+    contract: GoalContract,
+    workflow: str,
+    phase_plan: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    request = _contract_request(contract)
+    permissions = request.get("permissions")
+    if isinstance(permissions, Mapping):
+        normalized = dict(permissions)
+        try:
+            normalized["network_scope"] = [
+                normalize_origin(origin, scope=True)
+                for origin in normalized.get("network_scope", ())
+            ]
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                "validation_error",
+                "network_scope must contain exact HTTP origins",
+            ) from exc
+        request["permissions"] = normalized
+    request.update({"workflow": workflow, "phase_plan": list(phase_plan)})
+    return request
+
+
+_PHASE_PLAN_FIELDS = frozenset(
+    {
+        "phase_id",
+        "playbook",
+        "name",
+        "steps",
+        "requires_action",
+        "requires_verification",
+        "requires_verdicts",
+    }
+)
+
+
+def _workflow_snapshot(
+    contract: GoalContract,
+    workflow: str,
+) -> tuple[dict[str, Any], ...]:
+    if workflow == "legacy":
+        return ()
+    if workflow == "root-cause-protocol":
+        playbooks = resolve_playbooks((workflow,))
+    elif workflow == "auto":
+        harness = AgentHarness()
+        dispatch = harness.route(
+            harness.classify(f"{contract.title}\n{contract.summary}")
+        )
+        playbooks = harness.playbooks(dispatch)
+    else:
+        raise _error(
+            "validation_error",
+            "workflow must be legacy, auto, or root-cause-protocol",
+        )
+    return build_phase_plan(playbooks)
+
+
+def _initial_workflow_phases(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        raise _error("invalid_task_event", "task_started.phase_plan must be an array")
+    phases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != _PHASE_PLAN_FIELDS:
+            raise _error("invalid_task_event", "workflow phase snapshot is invalid")
+        phase_id = raw.get("phase_id")
+        playbook = raw.get("playbook")
+        name = raw.get("name")
+        steps = raw.get("steps")
+        action = raw.get("requires_action")
+        verification = raw.get("requires_verification")
+        verdicts = raw.get("requires_verdicts")
+        if (
+            not isinstance(phase_id, str)
+            or not phase_id.strip()
+            or not isinstance(playbook, str)
+            or not playbook.strip()
+            or not isinstance(name, str)
+            or not name.strip()
+            or phase_id != f"{playbook}/{name}"
+            or phase_id in seen
+            or not isinstance(steps, (list, tuple))
+            or not steps
+            or any(not isinstance(step, str) or not step.strip() for step in steps)
+            or not isinstance(action, bool)
+            or not isinstance(verification, bool)
+            or isinstance(verdicts, bool)
+            or not isinstance(verdicts, int)
+            or verdicts < 1
+        ):
+            raise _error("invalid_task_event", "workflow phase snapshot is invalid")
+        seen.add(phase_id)
+        phases.append(
+            {
+                **dict(raw),
+                "steps": tuple(steps),
+                "status": "pending",
+                "attempt": 0,
+                "evidence_hashes": (),
+                "start_position": -1,
+            }
+        )
+    return phases
+
+
+def _current_workflow_phase(phases: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next(
+        (phase for phase in phases if phase["status"] == "running"),
+        next((phase for phase in phases if phase["status"] != "passed"), None),
+    )
+
+
 def _within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -199,6 +315,34 @@ class TaskState(str, Enum):
     BLOCKED = "blocked"
     VERIFIED = "verified"
     REJECTED = "rejected"
+
+
+@dataclass(frozen=True)
+class WorkflowPhase:
+    phase_id: str
+    playbook: str
+    name: str
+    steps: tuple[str, ...]
+    requires_action: bool
+    requires_verification: bool
+    requires_verdicts: int
+    status: str = "pending"
+    attempt: int = 0
+    evidence_hashes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "phase_id": self.phase_id,
+            "playbook": self.playbook,
+            "name": self.name,
+            "steps": list(self.steps),
+            "requires_action": self.requires_action,
+            "requires_verification": self.requires_verification,
+            "requires_verdicts": self.requires_verdicts,
+            "status": self.status,
+            "attempt": self.attempt,
+            "evidence_hashes": list(self.evidence_hashes),
+        }
 
 
 @dataclass(frozen=True)
@@ -365,6 +509,9 @@ class TaskSession:
     allowed_next: tuple[str, ...]
     hypothesis_count: int = 0
     blocked_reason: str | None = None
+    workflow: str = "legacy"
+    workflow_phases: tuple[WorkflowPhase, ...] = ()
+    current_phase_id: str | None = None
 
     @property
     def pending_intent(self) -> PendingIntent | None:
@@ -395,6 +542,9 @@ class TaskSession:
             "latest_event_hash": self.latest_event_hash,
             "terminal": self.terminal,
             "allowed_next": list(self.allowed_next),
+            "workflow": self.workflow,
+            "workflow_phases": [phase.to_dict() for phase in self.workflow_phases],
+            "current_phase_id": self.current_phase_id,
         }
 
 
@@ -418,6 +568,145 @@ def _error(
     **details: Any,
 ) -> TaskLifecycleError:
     return TaskLifecycleError(code, message, retryable, details)
+
+
+def _validate_phase_evidence_events(
+    events: list[LedgerEvent],
+    phase: WorkflowPhase,
+    refs: tuple[str, ...],
+    *,
+    start_index: int,
+    status: str,
+) -> tuple[str, ...]:
+    if not refs:
+        raise _error(
+            "phase_evidence_incomplete",
+            "phase finish requires task-scoped evidence",
+        )
+    if len(refs) != len(set(refs)):
+        raise _error(
+            "phase_evidence_incomplete",
+            "phase evidence references must be unique",
+        )
+    indexed = {event.entry_hash: (index, event) for index, event in enumerate(events)}
+    if any(ref not in indexed for ref in refs):
+        raise _error(
+            "evidence_scope_mismatch",
+            "phase evidence reference is not in this task",
+        )
+
+    action = False
+    work_evidence = False
+    positive_evidence_refs: dict[str, int] = {}
+    latest_mutation_index = max(
+        (
+            index
+            for index, event in enumerate(events)
+            if index > start_index and event.payload.get("mutates_task") is True
+        ),
+        default=-1,
+    )
+    verdicts: list[tuple[str, tuple[str, ...], int]] = []
+    for ref in refs:
+        index, event = indexed[ref]
+        if index <= start_index:
+            raise _error(
+                "phase_evidence_stale",
+                "phase evidence must follow the current phase start",
+                evidence_ref=ref,
+            )
+        positive = True
+        recognized = True
+        if event.event_type == TASK_ACTION_RESULT:
+            completed = event.payload.get("outcome") == "completed"
+            action = action or completed
+            work_evidence = work_evidence or completed
+            positive = completed
+        elif event.event_type == AuditEventType.EVIDENCE.value:
+            evidence_status = event.payload.get("status")
+            positive = evidence_status not in {"fail", "blocked", "timeout", "error"}
+            if positive:
+                positive_evidence_refs[ref] = index
+            work_evidence = work_evidence or positive
+        elif event.event_type == AuditEventType.VERIFIER_DECISION.value:
+            positive = event.payload.get("status") == "pass"
+            verifier = event.payload.get("verifier")
+            citations = event.payload.get("evidence_refs")
+            if (
+                positive
+                and isinstance(verifier, str)
+                and verifier.strip()
+                and isinstance(citations, (list, tuple))
+            ):
+                verdicts.append(
+                    (verifier.strip().casefold(), tuple(citations), index)
+                )
+        elif event.event_type == TASK_OPERATION:
+            response = event.payload.get("response")
+            if event.payload.get("operation") == "hypothesis" and isinstance(
+                response, Mapping
+            ):
+                positive = response.get("status") == "supported"
+                work_evidence = work_evidence or positive
+            else:
+                recognized = False
+        else:
+            recognized = False
+        if not recognized:
+            raise _error(
+                "phase_evidence_incomplete",
+                "phase evidence type is not supported",
+                evidence_ref=ref,
+            )
+        if status == "passed" and not positive:
+            raise _error(
+                "phase_evidence_incomplete",
+                "passed phase cites non-passing or unsupported evidence",
+                evidence_ref=ref,
+            )
+
+    cited_refs = set(refs)
+    fresh_evidence_refs = {
+        ref
+        for ref, index in positive_evidence_refs.items()
+        if index > latest_mutation_index
+    }
+    fresh_verification_refs = {
+        ref
+        for ref in fresh_evidence_refs
+        if events[positive_evidence_refs[ref]].payload.get("kind")
+        == EvidenceKind.VERIFICATION_RESULT.value
+        and events[positive_evidence_refs[ref]].payload.get("status") == "pass"
+    }
+    verdict_evidence_refs = (
+        fresh_verification_refs if phase.requires_verification else fresh_evidence_refs
+    )
+    passing_verifiers = {
+        verifier
+        for verifier, citations, verdict_index in verdicts
+        if citations
+        and set(citations) <= cited_refs
+        and any(
+            verdict_index > positive_evidence_refs[ref]
+            for ref in set(citations) & verdict_evidence_refs
+        )
+    }
+    verification = bool(fresh_verification_refs)
+    if status == "passed" and (
+        not work_evidence
+        or (phase.requires_action and not action)
+        or (phase.requires_verification and not verification)
+        or len(passing_verifiers) < phase.requires_verdicts
+    ):
+        raise _error(
+            "phase_evidence_incomplete",
+            "phase evidence does not satisfy its action, verification, and verdict requirements",
+            requires_action=phase.requires_action,
+            requires_verification=phase.requires_verification,
+            requires_verdicts=phase.requires_verdicts,
+            passing_verdicts=len(passing_verifiers),
+        )
+    return refs
 
 
 def _required_text(payload: Mapping[str, Any], name: str, event: LedgerEvent) -> str:
@@ -563,6 +852,33 @@ def _allowed_next(
     if reflection is None:
         return ("reflect",)
     return ()
+
+
+def _workflow_allowed_next(
+    state: TaskState,
+    unresolved: tuple[PendingIntent, ...],
+    reflection: Mapping[str, Any] | None,
+    phases: tuple[WorkflowPhase, ...],
+    current: WorkflowPhase | None,
+) -> tuple[str, ...]:
+    if not phases or unresolved or state in {TaskState.VERIFIED, TaskState.REJECTED}:
+        return _allowed_next(state, unresolved, reflection)
+    if state is TaskState.BLOCKED or (current and current.status == "blocked"):
+        return ("approve",)
+    if current is None:
+        return ("verify", "verdict", "append_evidence", "complete")
+    if current.status == "running":
+        return (
+            "action",
+            "verify",
+            "verdict",
+            "append_evidence",
+            "phase_finish",
+            "reject",
+        )
+    if state is TaskState.PLANNED:
+        return ("approve", "phase_start", "reject")
+    return ("phase_start", "reject")
 
 
 class TaskLifecycle:
@@ -729,18 +1045,32 @@ class TaskLifecycle:
             ),
         )
 
-    def begin(self, contract: GoalContract, *, idempotency_key: str) -> TaskSession:
+    def begin(
+        self,
+        contract: GoalContract,
+        *,
+        idempotency_key: str,
+        workflow: str = "legacy",
+    ) -> TaskSession:
         key = _idempotency_key(idempotency_key)
         if not isinstance(contract, GoalContract):
             raise _error("invalid_request", "begin requires a GoalContract")
-        request = _contract_request(contract)
-        digest = canonical_sha256(request)
+        if not isinstance(workflow, str):
+            raise _error("validation_error", "workflow must be text")
+        workflow = workflow.strip()
+        phase_plan = _workflow_snapshot(contract, workflow)
         task_id = str(
             uuid5(
                 NAMESPACE_URL,
                 f"causality:{str(self.project_root).casefold()}:{key}",
             )
         )
+        request = (
+            _contract_request(contract)
+            if workflow == "legacy"
+            else _workflow_begin_request(contract, workflow, phase_plan)
+        )
+        digest = canonical_sha256(request)
         with self.runtime.execution_lock():
             if not self.ledger.verify_chain():
                 raise _error("ledger_integrity_failed", "ledger hash chain verification failed")
@@ -760,9 +1090,16 @@ class TaskLifecycle:
 
             snapshot = self.ledger.contract_snapshot(task_id)
             if snapshot is not None:
-                if canonical_sha256(
-                    _contract_request(GoalContract.from_mapping(snapshot))
-                ) != digest:
+                existing_request = _contract_request(
+                    GoalContract.from_mapping(snapshot)
+                )
+                if workflow != "legacy":
+                    existing_request = _workflow_begin_request(
+                        GoalContract.from_mapping(snapshot),
+                        workflow,
+                        phase_plan,
+                    )
+                if canonical_sha256(existing_request) != digest:
                     raise _error(
                         "idempotency_conflict",
                         "deterministic task identity is bound to another request",
@@ -781,7 +1118,14 @@ class TaskLifecycle:
                     "idempotency_key": key,
                     "request_sha256": digest,
                     "request": request,
-                    "response": {"task_id": task_id, "contract_id": task_id},
+                    "workflow": workflow,
+                    "phase_plan": list(phase_plan),
+                    "response": {
+                        "task_id": task_id,
+                        "contract_id": task_id,
+                        "workflow": workflow,
+                        "phase_plan": list(phase_plan),
+                    },
                 },
                 contract_id=bound.goal_id,
             )
@@ -2044,6 +2388,7 @@ class TaskLifecycle:
                         else {}
                     )
                     return TaskActionReceipt(session, response, ephemeral, replayed=True)
+            self._require_running_workflow_phase(session, "action")
             self._enforce_current_http_policy(plan)
             if plan.browser is not None:
                 contract = self._contract(session)
@@ -2541,6 +2886,154 @@ class TaskLifecycle:
             )
         return tuple(sorted(hashes))
 
+    @staticmethod
+    def _running_workflow_phase(session: TaskSession) -> WorkflowPhase | None:
+        return next(
+            (phase for phase in session.workflow_phases if phase.status == "running"),
+            None,
+        )
+
+    def _require_running_workflow_phase(
+        self,
+        session: TaskSession,
+        operation: str,
+    ) -> WorkflowPhase | None:
+        if not session.workflow_phases:
+            return None
+        phase = self._running_workflow_phase(session)
+        if phase is None and operation in {"verification", "verdict", "evidence"}:
+            if all(item.status == "passed" for item in session.workflow_phases):
+                return None
+        if phase is None:
+            raise _error(
+                "phase_not_running",
+                f"workflow phase must be running before {operation}",
+            )
+        return phase
+
+    def _phase_evidence(
+        self,
+        session: TaskSession,
+        phase: WorkflowPhase,
+        refs: tuple[str, ...],
+        status: str,
+    ) -> tuple[str, ...]:
+        events = self.ledger.events_for_contract(
+            session.task_id,
+            all_segments=True,
+        )
+        start_index = -1
+        for index, event in enumerate(events):
+            if event.event_type != TASK_OPERATION or event.payload.get("operation") != "phase":
+                continue
+            response = event.payload.get("response")
+            phase_value = response.get("phase") if isinstance(response, Mapping) else None
+            if (
+                isinstance(phase_value, Mapping)
+                and phase_value.get("phase_id") == phase.phase_id
+                and phase_value.get("status") == "running"
+                and phase_value.get("attempt") == phase.attempt
+            ):
+                start_index = index
+        if start_index < 0:
+            raise _error("invalid_task_event", "running phase has no start event")
+        return _validate_phase_evidence_events(
+            events,
+            phase,
+            refs,
+            start_index=start_index,
+            status=status,
+        )
+
+    def phase(
+        self,
+        task_id: str,
+        *,
+        phase_id: str,
+        action: str,
+        idempotency_key: str,
+        status: str | None = None,
+        evidence_refs: tuple[str, ...] = (),
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        if not isinstance(phase_id, str) or not phase_id.strip():
+            raise _error("validation_error", "phase_id must be non-blank")
+        phase_id = phase_id.strip()
+        if action not in {"start", "finish"}:
+            raise _error("validation_error", "phase action must be start or finish")
+        refs = tuple(evidence_refs)
+        request: dict[str, Any] = {"action": action, "phase_id": phase_id}
+        if action == "start":
+            if status is not None or refs:
+                raise _error(
+                    "validation_error",
+                    "phase start does not accept status or evidence_refs",
+                )
+        else:
+            if status not in {"passed", "failed", "blocked"}:
+                raise _error(
+                    "validation_error",
+                    "phase finish status must be passed, failed, or blocked",
+                )
+            request.update({"status": status, "evidence_refs": list(refs)})
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            if self._existing(session, "phase", key, digest) is not None:
+                return session
+            if not session.workflow_phases:
+                raise _error("phase_not_configured", "task has no workflow phase plan")
+            session = self._ensure_executing(session)
+            current = next(
+                (
+                    phase
+                    for phase in session.workflow_phases
+                    if phase.phase_id == session.current_phase_id
+                ),
+                None,
+            )
+            if current is None:
+                raise _error("workflow_complete", "all workflow phases already passed")
+            if current.phase_id != phase_id:
+                raise _error(
+                    "phase_mismatch",
+                    "phase_id does not match the current workflow phase",
+                    expected=current.phase_id,
+                    actual=phase_id,
+                )
+            if action == "start":
+                if self._running_workflow_phase(session) is not None:
+                    raise _error("phase_in_progress", "a workflow phase is already running")
+                if current.status not in {"pending", "failed"}:
+                    raise _error("phase_blocked", "current workflow phase cannot start")
+                phase_value = {
+                    "phase_id": current.phase_id,
+                    "from_status": current.status,
+                    "status": "running",
+                    "attempt": current.attempt + 1,
+                    "evidence_hashes": [],
+                }
+            else:
+                if current.status != "running":
+                    raise _error("phase_not_running", "current workflow phase is not running")
+                evidence = self._phase_evidence(session, current, refs, status or "")
+                phase_value = {
+                    "phase_id": current.phase_id,
+                    "from_status": current.status,
+                    "status": status,
+                    "attempt": current.attempt,
+                    "evidence_hashes": list(evidence),
+                }
+            self._append_operation(
+                session,
+                "phase",
+                key,
+                digest,
+                request,
+                {"phase": phase_value},
+            )
+            return self.get(task_id)
+
     def approve(
         self,
         task_id: str,
@@ -2797,6 +3290,7 @@ class TaskLifecycle:
                     )
                     return self.get(task_id)
                 return session
+            self._require_running_workflow_phase(session, "verification")
             session = self._ensure_executing(session)
             contract = self._contract(session)
             requirement = next(
@@ -2961,6 +3455,7 @@ class TaskLifecycle:
             session = self.get(task_id)
             if self._existing(session, "verdict", key, digest) is not None:
                 return session
+            self._require_running_workflow_phase(session, "verdict")
             session = self._ensure_executing(session)
             self._validate_evidence_refs(task_id, refs)
             decision = VerifierDecision(
@@ -3083,6 +3578,17 @@ class TaskLifecycle:
                 return session
             if session.terminal:
                 raise _error("task_terminal", "terminal task cannot complete again")
+            incomplete = [
+                phase.phase_id
+                for phase in session.workflow_phases
+                if phase.status != "passed"
+            ]
+            if incomplete:
+                raise _error(
+                    "workflow_incomplete",
+                    "all workflow phases must pass before completion",
+                    phases=incomplete,
+                )
             gate_event = self._authoritative_event(
                 task_id,
                 "complete",
@@ -3221,6 +3727,7 @@ class TaskLifecycle:
             session = self.get(task_id)
             if self._existing(session, "append_evidence", key, digest) is not None:
                 return session
+            self._require_running_workflow_phase(session, "evidence")
             session = self._ensure_executing(session)
             contract = self._contract(session)
             declared = {item.kind_value for item in contract.evidence_required}
@@ -3476,6 +3983,63 @@ class TaskLifecycle:
         begin_key = _required_text(started, "idempotency_key", start_event)
         begin_digest = _request_digest(started, start_event)
         begin_response = _response(started, start_event)
+        workflow = started.get("workflow", "legacy")
+        if workflow not in {"legacy", "auto", "root-cause-protocol"}:
+            raise _error(
+                "invalid_task_event",
+                "task_started.workflow is invalid",
+                event_hash=start_event.entry_hash,
+            )
+        phase_plan_value = started.get("phase_plan", ())
+        workflow_phases = _initial_workflow_phases(phase_plan_value)
+        begin_request = started.get("request")
+        if not isinstance(begin_request, Mapping) or canonical_sha256(
+            _thaw(begin_request)
+        ) != begin_digest:
+            raise _error(
+                "invalid_task_event",
+                "task_started request does not match request_sha256",
+                event_hash=start_event.entry_hash,
+            )
+        if (
+            not isinstance(begin_response, Mapping)
+            or begin_response.get("task_id") != task_id
+            or begin_response.get("contract_id") != task_id
+        ):
+            raise _error(
+                "invalid_task_event",
+                "task_started response identity is invalid",
+                event_hash=start_event.entry_hash,
+            )
+        if workflow == "legacy":
+            valid_workflow = not workflow_phases
+        else:
+            expected_plan = _workflow_snapshot(
+                GoalContract.from_mapping(contract),
+                workflow,
+            )
+            expected_request = _workflow_begin_request(
+                GoalContract.from_mapping(contract),
+                workflow,
+                expected_plan,
+            )
+            expected_response = {
+                "task_id": task_id,
+                "contract_id": task_id,
+                "workflow": workflow,
+                "phase_plan": list(expected_plan),
+            }
+            valid_workflow = bool(
+                _thaw(phase_plan_value) == list(expected_plan)
+                and _thaw(begin_request) == expected_request
+                and _thaw(begin_response) == expected_response
+            )
+        if not valid_workflow:
+            raise _error(
+                "invalid_task_event",
+                "task_started workflow and phase plan disagree",
+                event_hash=start_event.entry_hash,
+            )
 
         idempotency: dict[tuple[str, str], IdempotencyRecord] = {
             ("begin", begin_key): IdempotencyRecord(
@@ -3506,9 +4070,11 @@ class TaskLifecycle:
         reflection: Mapping[str, Any] | None = None
         reflection_intent: PendingIntent | None = None
         seen_hashes: set[str] = set()
+        seen_positions: dict[str, int] = {}
         started_seen = False
 
         for event in scoped:
+            seen_positions[event.entry_hash] = len(seen_positions)
             seen_hashes.add(event.entry_hash)
             if event is start_event:
                 started_seen = True
@@ -3708,7 +4274,138 @@ class TaskLifecycle:
                 idempotency[scope] = record
                 operation_ids[operation_id] = scope
 
-                if operation == "complete":
+                if operation == "phase":
+                    if state is not TaskState.EXECUTING or record.outcome != "completed":
+                        raise _error(
+                            "invalid_task_event",
+                            "phase operation requires executing state and completed outcome",
+                            event_hash=event.entry_hash,
+                        )
+                    phase_value = (
+                        response.get("phase")
+                        if isinstance(response, Mapping)
+                        else None
+                    )
+                    fields = {
+                        "phase_id",
+                        "from_status",
+                        "status",
+                        "attempt",
+                        "evidence_hashes",
+                    }
+                    if (
+                        not isinstance(response, Mapping)
+                        or set(response) != {"phase"}
+                        or not isinstance(phase_value, Mapping)
+                        or set(phase_value) != fields
+                    ):
+                        raise _error(
+                            "invalid_task_event",
+                            "phase operation response is invalid",
+                            event_hash=event.entry_hash,
+                        )
+                    expected = _current_workflow_phase(workflow_phases)
+                    phase_id = phase_value.get("phase_id")
+                    from_status = phase_value.get("from_status")
+                    status_value = phase_value.get("status")
+                    attempt = phase_value.get("attempt")
+                    evidence_hashes = phase_value.get("evidence_hashes")
+                    phase_request = payload.get("request")
+                    if (
+                        expected is None
+                        or phase_id != expected["phase_id"]
+                        or from_status != expected["status"]
+                        or isinstance(attempt, bool)
+                        or not isinstance(attempt, int)
+                        or not isinstance(evidence_hashes, (list, tuple))
+                        or any(
+                            not isinstance(item, str)
+                            or item not in seen_hashes - {event.entry_hash}
+                            or (
+                                status_value != "running"
+                                and seen_positions[item] <= expected["start_position"]
+                            )
+                            for item in evidence_hashes
+                        )
+                    ):
+                        raise _error(
+                            "invalid_task_event",
+                            "phase operation does not match current workflow state",
+                            event_hash=event.entry_hash,
+                        )
+                    if status_value == "running":
+                        expected_request = {
+                            "action": "start",
+                            "phase_id": phase_id,
+                        }
+                        valid = (
+                            from_status in {"pending", "failed"}
+                            and attempt == expected["attempt"] + 1
+                            and not evidence_hashes
+                            and not any(
+                                item["status"] == "running"
+                                for item in workflow_phases
+                                if item is not expected
+                            )
+                        )
+                    else:
+                        expected_request = {
+                            "action": "finish",
+                            "phase_id": phase_id,
+                            "status": status_value,
+                            "evidence_refs": list(evidence_hashes),
+                        }
+                        valid = (
+                            from_status == "running"
+                            and status_value in {"passed", "failed", "blocked"}
+                            and attempt == expected["attempt"]
+                            and bool(evidence_hashes)
+                        )
+                    valid = bool(
+                        valid
+                        and isinstance(phase_request, Mapping)
+                        and _thaw(phase_request) == expected_request
+                        and canonical_sha256(expected_request) == digest
+                    )
+                    if not valid:
+                        raise _error(
+                            "invalid_task_event",
+                            "workflow phase transition is invalid",
+                            event_hash=event.entry_hash,
+                        )
+                    if status_value != "running":
+                        phase = WorkflowPhase(
+                            phase_id=expected["phase_id"],
+                            playbook=expected["playbook"],
+                            name=expected["name"],
+                            steps=tuple(expected["steps"]),
+                            requires_action=expected["requires_action"],
+                            requires_verification=expected["requires_verification"],
+                            requires_verdicts=expected["requires_verdicts"],
+                            status=expected["status"],
+                            attempt=expected["attempt"],
+                            evidence_hashes=tuple(expected["evidence_hashes"]),
+                        )
+                        _validate_phase_evidence_events(
+                            scoped[: seen_positions[event.entry_hash]],
+                            phase,
+                            tuple(evidence_hashes),
+                            start_index=expected["start_position"],
+                            status=status_value,
+                        )
+                    expected.update(
+                        {
+                            "status": status_value,
+                            "attempt": attempt,
+                            "evidence_hashes": tuple(evidence_hashes),
+                            "start_position": (
+                                seen_positions[event.entry_hash]
+                                if status_value == "running"
+                                else expected["start_position"]
+                            ),
+                        }
+                    )
+                elif operation == "complete":
                     completion_intent = completion_intents.get(operation_id)
                     response_map = response if isinstance(response, Mapping) else {}
                     if completion_intent is not None:
@@ -4038,6 +4735,31 @@ class TaskLifecycle:
         frozen_idempotency = MappingProxyType(dict(idempotency))
         frozen_requirements = MappingProxyType(dict(requirement_results))
         frozen_contract = _freeze(dict(contract))
+        projected_workflow_phases = tuple(
+            WorkflowPhase(
+                phase_id=phase["phase_id"],
+                playbook=phase["playbook"],
+                name=phase["name"],
+                steps=tuple(phase["steps"]),
+                requires_action=phase["requires_action"],
+                requires_verification=phase["requires_verification"],
+                requires_verdicts=phase["requires_verdicts"],
+                status=phase["status"],
+                attempt=phase["attempt"],
+                evidence_hashes=tuple(phase["evidence_hashes"]),
+            )
+            for phase in workflow_phases
+        )
+        current_workflow_phase = _current_workflow_phase(workflow_phases)
+        projected_current_phase = next(
+            (
+                phase
+                for phase in projected_workflow_phases
+                if current_workflow_phase is not None
+                and phase.phase_id == current_workflow_phase["phase_id"]
+            ),
+            None,
+        )
         return TaskSession(
             schema_version=SCHEMA_VERSION,
             task_id=task_id,
@@ -4052,12 +4774,25 @@ class TaskLifecycle:
             reflection=reflection,
             event_hashes=tuple(event.entry_hash for event in scoped),
             terminal=projected_state in {TaskState.VERIFIED, TaskState.REJECTED},
-            allowed_next=_allowed_next(projected_state, unresolved, reflection),
+            allowed_next=_workflow_allowed_next(
+                projected_state,
+                unresolved,
+                reflection,
+                projected_workflow_phases,
+                projected_current_phase,
+            ),
             blocked_reason=(
                 "unresolved action intent"
                 if action_orphan
                 else "unfinished completion decision"
                 if completion_orphan
+                else None
+            ),
+            workflow=workflow,
+            workflow_phases=projected_workflow_phases,
+            current_phase_id=(
+                current_workflow_phase["phase_id"]
+                if current_workflow_phase is not None
                 else None
             ),
         )
@@ -4070,5 +4805,6 @@ __all__ = [
     "TaskLifecycleError",
     "TaskSession",
     "TaskState",
+    "WorkflowPhase",
     "canonical_sha256",
 ]

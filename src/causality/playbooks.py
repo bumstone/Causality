@@ -129,7 +129,12 @@ PLAYBOOKS: dict[str, Playbook] = {
         _phase("reproduce", ("Reproduce the failure deterministically",), action=True),
         _phase("hypothesis", ("Record and test one root-cause hypothesis",)),
         _phase("verify", ("Verify the supported root cause",), verification=True),
-        _phase("fix", ("Fix the verified root cause",), action=True),
+        _phase(
+            "fix",
+            ("Fix the verified root cause",),
+            action=True,
+            verification=True,
+        ),
     ),
     "contract-harness": _playbook(
         "contract-harness",

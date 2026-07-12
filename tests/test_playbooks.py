@@ -66,6 +66,7 @@ class PlaybookTests(unittest.TestCase):
         )
         self.assertTrue(plan[0]["requires_action"])
         self.assertTrue(plan[2]["requires_verification"])
+        self.assertTrue(plan[3]["requires_verification"])
         self.assertEqual(plan[3]["requires_verdicts"], 2)
 
         # Public playbook serialization remains backward compatible.
