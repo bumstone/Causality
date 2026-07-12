@@ -53,12 +53,6 @@ class AuditEventType(str, Enum):
     BROWSER_OBSERVATION = "browser_observation"
     BROWSER_ACTION = "browser_action"
     GATE_DECISION = "gate_decision"
-    TASK_STARTED = "task_started"
-    TASK_OPERATION = "task_operation"
-    TASK_ACTION_INTENT = "task_action_intent"
-    TASK_ACTION_RESULT = "task_action_result"
-    TASK_REFLECTION_INTENT = "task_reflection_intent"
-    TASK_REFLECTED = "task_reflected"
 
 
 class GateDecision(str, Enum):

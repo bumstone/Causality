@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dataclasses import FrozenInstanceError
 
+from causality import VerificationRequirement, VerificationResult
 from causality.contracts import (
     EvidenceKind,
     EvidenceRequirement,
@@ -19,6 +20,10 @@ from causality.contracts import (
 
 
 class ContractTests(unittest.TestCase):
+    def test_verification_models_are_public_package_exports(self) -> None:
+        self.assertEqual(VerificationRequirement.__name__, "VerificationRequirement")
+        self.assertEqual(VerificationResult.__name__, "VerificationResult")
+
     def test_high_risk_contract_requires_approval(self) -> None:
         contract = GoalContract(
             title="Deploy",

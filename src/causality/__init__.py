@@ -11,6 +11,8 @@ from .contracts import (
     Risk,
     StateTransition,
     TaskContract,
+    VerificationRequirement,
+    VerificationResult,
     VerifierDecision,
 )
 from .gates import GateResult, HITLGate
@@ -85,6 +87,8 @@ __all__ = [
     "TaskRun",
     "TaskType",
     "TypedMemory",
+    "VerificationRequirement",
+    "VerificationResult",
     "Verifier",
     "VerifierDecision",
     "check_docs",
