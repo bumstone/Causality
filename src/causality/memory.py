@@ -21,7 +21,7 @@ from typing import Any
 from uuid import uuid4
 
 from .contracts import utc_now
-from .durable import DurableJsonl
+from .durable import DurableJsonl, file_lock
 
 MEMORY_TYPES = (
     "decisions",
@@ -127,6 +127,69 @@ class TypedMemory:
             )
         return self._append(mem_type, summary, provenance, metadata)
 
+    def record_once(
+        self,
+        mem_type: str,
+        summary: str,
+        *,
+        entry_id: str,
+        created_at: str,
+        provenance: str | None = None,
+        **metadata: Any,
+    ) -> MemoryEntry:
+        """Append a caller-identified entry exactly once.
+
+        A retry with the same ``entry_id`` and canonical entry content returns
+        the entry already on disk. Reusing the id for different content fails
+        closed. The lookup and append share the type log's file lock, so separate
+        :class:`TypedMemory` instances and concurrent callers cannot both append
+        the same entry.
+
+        ``entry_id`` and ``created_at`` are caller-supplied so a durable workflow
+        can derive them before a crash and reproduce the identical write on
+        retry. As with :meth:`record`, decisions cannot bypass the promotion
+        gate.
+        """
+        if mem_type not in MEMORY_TYPES:
+            raise MemoryGovernanceError(f"unknown memory type: {mem_type!r}")
+        if mem_type == "decisions":
+            raise MemoryGovernanceError(
+                "decisions are write-only via promote_to_decision (evidence required)"
+            )
+        summary = summary.strip()
+        if not summary:
+            raise MemoryGovernanceError("summary is required")
+        if not isinstance(entry_id, str) or not entry_id.strip():
+            raise MemoryGovernanceError("entry_id is required")
+        if not isinstance(created_at, str) or not created_at.strip():
+            raise MemoryGovernanceError("created_at is required")
+
+        candidate = MemoryEntry(
+            type=mem_type,
+            summary=summary,
+            provenance=provenance,
+            metadata=dict(metadata),
+            created_at=created_at,
+            entry_id=entry_id,
+        )
+        expected = _canonical_content(candidate.to_dict())
+        path = self._log_path(mem_type)
+        store = DurableJsonl(path)
+        with file_lock(path):
+            matches = []
+            for line in store.read_lines():
+                value = json.loads(line)
+                if value.get("entry_id") == entry_id:
+                    matches.append(value)
+            if matches:
+                if any(_canonical_content(value) != expected for value in matches):
+                    raise MemoryGovernanceError(
+                        f"entry_id {entry_id!r} already exists with different content"
+                    )
+                return MemoryEntry.from_dict(matches[0])
+            store.append(json.dumps(candidate.to_dict(), ensure_ascii=True), lock=False)
+        return candidate
+
     def note_assumption(
         self,
         summary: str,
@@ -201,11 +264,13 @@ class TypedMemory:
         """
         if mem_type not in MEMORY_TYPES:
             raise MemoryGovernanceError(f"unknown memory type: {mem_type!r}")
-        records = self.entries(mem_type)
-        kept = [entry for entry in records if entry.entry_id != entry_id]
-        if len(kept) == len(records):
-            return False
-        self._rewrite(mem_type, kept)
+        path = self._log_path(mem_type)
+        with file_lock(path):
+            records = self.entries(mem_type)
+            kept = [entry for entry in records if entry.entry_id != entry_id]
+            if len(kept) == len(records):
+                return False
+            self._rewrite(mem_type, kept, lock=False)
         return True
 
     def sweep(self, mem_type: str, *, now: datetime | None = None) -> int:
@@ -213,16 +278,25 @@ class TypedMemory:
         if mem_type not in MEMORY_TYPES:
             raise MemoryGovernanceError(f"unknown memory type: {mem_type!r}")
         moment = now or datetime.now(timezone.utc)
-        records = self.entries(mem_type)
-        kept = [entry for entry in records if not entry.is_expired(moment)]
-        removed = len(records) - len(kept)
-        if removed:
-            self._rewrite(mem_type, kept)
+        path = self._log_path(mem_type)
+        with file_lock(path):
+            records = self.entries(mem_type)
+            kept = [entry for entry in records if not entry.is_expired(moment)]
+            removed = len(records) - len(kept)
+            if removed:
+                self._rewrite(mem_type, kept, lock=False)
         return removed
 
-    def _rewrite(self, mem_type: str, records: list[MemoryEntry]) -> None:
+    def _rewrite(
+        self,
+        mem_type: str,
+        records: list[MemoryEntry],
+        *,
+        lock: bool = True,
+    ) -> None:
         DurableJsonl(self._log_path(mem_type)).rewrite(
-            json.dumps(entry.to_dict(), ensure_ascii=True) for entry in records
+            (json.dumps(entry.to_dict(), ensure_ascii=True) for entry in records),
+            lock=lock,
         )
 
     def _append(
@@ -245,3 +319,12 @@ class TypedMemory:
             json.dumps(entry.to_dict(), ensure_ascii=True)
         )
         return entry
+
+
+def _canonical_content(value: dict[str, Any]) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )

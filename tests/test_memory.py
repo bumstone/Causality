@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import unittest
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality import MemoryGovernanceError, TypedMemory
+from causality.durable import DurableJsonl
 
 
 class TypedMemoryTests(unittest.TestCase):
@@ -67,8 +72,183 @@ class TypedMemoryTests(unittest.TestCase):
             snippets = again.entries("snippets")
             self.assertEqual(snippets[0].provenance, "ledger:deadbeef")
 
+    def test_record_once_reuses_identical_canonical_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mem = TypedMemory(Path(temp_dir))
+            first = mem.record_once(
+                "retrospectives",
+                "completed task",
+                entry_id="task-1-retrospective",
+                created_at="2026-07-11T00:00:00+00:00",
+                provenance="ledger:abc",
+                details={"b": 2, "a": 1},
+            )
+            retried = TypedMemory(Path(temp_dir)).record_once(
+                "retrospectives",
+                "completed task",
+                entry_id="task-1-retrospective",
+                created_at="2026-07-11T00:00:00+00:00",
+                provenance="ledger:abc",
+                details={"a": 1, "b": 2},
+            )
+
+            self.assertEqual(retried, first)
+            self.assertEqual(len(mem.entries("retrospectives")), 1)
+
+    def test_record_once_rejects_id_reuse_with_different_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mem = TypedMemory(Path(temp_dir))
+            mem.record_once(
+                "retrospectives",
+                "first result",
+                entry_id="stable-id",
+                created_at="2026-07-11T00:00:00+00:00",
+            )
+
+            with self.assertRaisesRegex(MemoryGovernanceError, "different content"):
+                mem.record_once(
+                    "retrospectives",
+                    "changed result",
+                    entry_id="stable-id",
+                    created_at="2026-07-11T00:00:00+00:00",
+                )
+            self.assertEqual(len(mem.entries("retrospectives")), 1)
+
+    def test_record_once_preserves_decision_governance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mem = TypedMemory(Path(temp_dir))
+            with self.assertRaises(MemoryGovernanceError):
+                mem.record_once(
+                    "decisions",
+                    "bypass promotion",
+                    entry_id="decision-id",
+                    created_at="2026-07-11T00:00:00+00:00",
+                    provenance="ledger:abc",
+                )
+
+    def test_record_once_is_atomic_across_concurrent_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            def write_once(_: int):
+                return TypedMemory(root).record_once(
+                    "retrospectives",
+                    "one durable reflection",
+                    entry_id="concurrent-id",
+                    created_at="2026-07-11T00:00:00+00:00",
+                    provenance="ledger:abc",
+                )
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(write_once, range(32)))
+
+            self.assertEqual({entry.entry_id for entry in results}, {"concurrent-id"})
+            self.assertEqual(len(TypedMemory(root).entries("retrospectives")), 1)
+
+    def test_record_once_concurrent_id_conflict_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            def compete(summary: str) -> str:
+                try:
+                    TypedMemory(root).record_once(
+                        "retrospectives",
+                        summary,
+                        entry_id="contested-id",
+                        created_at="2026-07-11T00:00:00+00:00",
+                    )
+                except MemoryGovernanceError:
+                    return "conflict"
+                return "written"
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = list(pool.map(compete, ("first", "second")))
+
+            self.assertCountEqual(outcomes, ["written", "conflict"])
+            self.assertEqual(len(TypedMemory(root).entries("retrospectives")), 1)
+
 
 class TtlEnforcementTests(unittest.TestCase):
+    def _assert_concurrent_record_once_survives(
+        self,
+        mem: TypedMemory,
+        mem_type: str,
+        rewrite: Callable[[], object],
+    ) -> None:
+        """Force record_once between a rewriter's read and replace."""
+        path = mem._log_path(mem_type)
+        read_complete = threading.Event()
+        writer_started = threading.Event()
+        writer_reached_append = threading.Event()
+        errors: list[BaseException] = []
+        original_read = DurableJsonl.read_lines
+        original_append = DurableJsonl.append
+
+        def controlled_read(store: DurableJsonl) -> list[str]:
+            lines = original_read(store)
+            if (
+                threading.current_thread().name == "memory-rewriter"
+                and store.path == path
+                and not read_complete.is_set()
+            ):
+                read_complete.set()
+                if not writer_started.wait(2):
+                    raise AssertionError("concurrent writer did not start")
+                # Without one lock around read-filter-rewrite, the writer reaches
+                # append here and its new record is then overwritten. With the
+                # lock, it cannot enter append until the rewrite has completed.
+                writer_reached_append.wait(0.5)
+            return lines
+
+        def controlled_append(
+            store: DurableJsonl,
+            line: str,
+            *,
+            lock: bool = True,
+        ) -> None:
+            if threading.current_thread().name == "memory-writer":
+                writer_reached_append.set()
+            original_append(store, line, lock=lock)
+
+        def run_rewrite() -> None:
+            try:
+                rewrite()
+            except BaseException as exc:
+                errors.append(exc)
+
+        def run_writer() -> None:
+            try:
+                if not read_complete.wait(2):
+                    raise AssertionError("rewriter did not read the log")
+                writer_started.set()
+                TypedMemory(mem.root).record_once(
+                    mem_type,
+                    "concurrent durable entry",
+                    entry_id=f"{mem_type}-concurrent",
+                    created_at="2026-07-11T00:00:00+00:00",
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with (
+            patch.object(DurableJsonl, "read_lines", controlled_read),
+            patch.object(DurableJsonl, "append", controlled_append),
+        ):
+            rewriter = threading.Thread(target=run_rewrite, name="memory-rewriter")
+            writer = threading.Thread(target=run_writer, name="memory-writer")
+            rewriter.start()
+            writer.start()
+            rewriter.join(5)
+            writer.join(5)
+
+        self.assertFalse(rewriter.is_alive(), "rewriter deadlocked")
+        self.assertFalse(writer.is_alive(), "writer deadlocked")
+        self.assertEqual(errors, [])
+        self.assertIn(
+            "concurrent durable entry",
+            [entry.summary for entry in mem.entries(mem_type)],
+        )
+
     def test_active_only_hides_expired_but_disk_keeps_it(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             mem = TypedMemory(Path(temp_dir))
@@ -105,6 +285,18 @@ class TtlEnforcementTests(unittest.TestCase):
             # Idempotent: nothing left to reclaim.
             self.assertEqual(mem.sweep("failures", now=after_expiry), 0)
 
+    def test_sweep_does_not_erase_concurrent_record_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mem = TypedMemory(Path(temp_dir))
+            expired = mem.record_failure("expired", scope="task:x", ttl_days=1)
+            after_expiry = datetime.fromisoformat(expired.created_at) + timedelta(days=2)
+
+            self._assert_concurrent_record_once_survives(
+                mem,
+                "failures",
+                lambda: mem.sweep("failures", now=after_expiry),
+            )
+
     def test_revoke_removes_entry_by_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             mem = TypedMemory(Path(temp_dir))
@@ -116,6 +308,17 @@ class TtlEnforcementTests(unittest.TestCase):
             self.assertEqual([e.summary for e in mem.entries("assumptions")], ["keep me"])
             # Unknown id is a no-op returning False.
             self.assertFalse(mem.revoke("assumptions", "no-such-id"))
+
+    def test_revoke_does_not_erase_concurrent_record_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mem = TypedMemory(Path(temp_dir))
+            target = mem.record("snippets", "revoke me")
+
+            self._assert_concurrent_record_once_survives(
+                mem,
+                "snippets",
+                lambda: mem.revoke("snippets", target.entry_id),
+            )
 
     def test_naive_now_is_treated_as_utc(self) -> None:
         # codex #15 P2: an injected naive `now` (e.g. datetime.utcnow()) must be
