@@ -29,8 +29,8 @@ The core control path is implemented and covered by the regression suite. See
 - Secret safety: skill distillation redacts sensitive keys, nested structures,
   common token shapes, and bearer/basic authorization values.
 
-Do not read this as “the product is finished.” Remaining work is executable
-playbook phases, durable resume/skill operations, and external automation setup.
+Do not read this as “the product is finished.” Remaining work is durable
+resume/skill MCP operations and external automation policy/setup.
 
 Canonical references:
 
