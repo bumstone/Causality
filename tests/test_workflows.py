@@ -23,11 +23,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("writing-plans", names)
         self.assertIn("verification-before-completion", names)
         self.assertIn("session-bootstrap", names)
+        self.assertIn("a11y-observe", names)
         tdd = next(item for item in manifest["workflows"] if item["name"] == "test-driven-development")
         self.assertEqual(
             tdd["notes"],
             ["Do not skip the failing check when a regression can be expressed"],
         )
+
+        browser = next(item for item in manifest["workflows"] if item["name"] == "a11y-observe")
+        self.assertEqual(browser["gate"], "browser_action_gate")
+        self.assertIn("current_state", browser["required_inputs"])
 
     def test_every_workflow_has_a_valid_control_layer(self) -> None:
         # ADR 0002: each workflow maps to one of the three control layers.
