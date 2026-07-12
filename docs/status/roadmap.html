@@ -311,9 +311,10 @@
       </div>
     </div>
     <div class="caveat">
-      <p><strong>과장하면 안 되는 부분:</strong> 이것은 범용 자동 운영 플랫폼의 완성 선언이 아니다. 남은 핵심은 API/browser 실행 어댑터, playbook phase의 자동 실행화, 외부 PR/autofix 운영 설정, 상태판 자동 생성 같은 제품화와 운영 품질이다.</p>
+      <p><strong>과장하면 안 되는 부분:</strong> 이것은 범용 자동 운영 플랫폼의 완성 선언이 아니다. 남은 핵심은 MCP task lifecycle, API/browser 실행 어댑터, playbook phase 자동 실행화, resume/skill 운영과 운영 품질이다.</p>
       <div class="tags">
         <span class="tag risk">API/browser 실행 미검증</span>
+        <span class="tag risk">MCP task lifecycle 미구현</span>
         <span class="tag risk">phase는 아직 지침</span>
         <span class="tag later">운영 자동화 설정 필요</span>
       </div>
@@ -514,17 +515,17 @@
         <tr>
           <td>01 · 설치 활성화 (완료)</td>
           <td>client-native MCP 설정, host 보존/adopt, venv interpreter 고정, handshake와 durable install report가 구현됐다. trust/approval은 우회하지 않고 pending으로 보고한다.</td>
-          <td><a href="../specs/001-install-activation.md">Spec 001</a> 수용 테스트 완료. 다음 구현은 02 검증 evidence다.</td>
+          <td><a href="../specs/001-install-activation.md">Spec 001</a> 수용 테스트 완료.</td>
         </tr>
         <tr>
-          <td>02 · 검증 evidence</td>
-          <td>현재 verification 문자열은 실제 명령 실행이 아니라 evidence kind 요구사항에 가깝다.</td>
-          <td><a href="../specs/002-verification-evidence.md">Spec 002</a>: requirement ID, argv, exit code, artifact hash를 completion에 결합.</td>
+          <td>02 · 검증 evidence (완료)</td>
+          <td>고정 requirement ID와 argv를 shell 없이 실행하고 exit, artifact, workspace digest, evidence hash를 completion에 결합한다.</td>
+          <td><a href="../specs/002-verification-evidence.md">Spec 002</a> 수용 테스트 완료. 다음 구현은 03 task lifecycle이다.</td>
         </tr>
         <tr>
           <td>03 · MCP task lifecycle</td>
           <td>MCP는 init/context/evidence/workflow 조회만 제공한다. 계약, action, verdict, completion, reflection은 Python API에만 있다.</td>
-          <td><a href="../specs/003-mcp-task-lifecycle.md">Spec 003</a>: durable task state와 gated lifecycle tools.</td>
+          <td><a href="../specs/003-mcp-task-lifecycle.md">Spec 003</a>: durable task state와 closed task tools.</td>
         </tr>
         <tr>
           <td>04 · API/browser adapters</td>
@@ -558,7 +559,7 @@
       </article>
       <article class="card wide risk-card">
         <h3><span class="tag risk">주의</span> 완성 선언 문서로는 부적합</h3>
-        <p>API/browser 실행, playbook phase 자동화, 운영 자동화 검증이 남아 있으므로 “프로젝트 완성”이라고 말하면 과장이다. 이 문서는 “코어 하네스는 닫혔고, 제품화/운영 품질이 남았다”는 판단에 맞춰 읽어야 한다.</p>
+        <p>API/browser 실행, playbook phase 자동화, resume/skill operations와 운영 검증이 남아 있으므로 “프로젝트 완성”이라고 말하면 과장이다.</p>
       </article>
       <article class="card wide later-card">
         <h3><span class="tag later">개선 여지</span> 자동 생성 가능성</h3>
