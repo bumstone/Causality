@@ -282,6 +282,11 @@ class MCPResumeContextTests(unittest.TestCase):
             _, payload = self._resume(self._server(root), task.task_id)
 
             self.assertEqual(payload["task"], reflected.to_dict())
+            self.assertEqual(
+                payload["data"]["unmet_verification"],
+                [],
+                "reflection runtime JSONL must not stale the verified workspace",
+            )
             self.assertEqual(payload["data"]["terminal_result"]["operation"], "complete")
             self.assertEqual(payload["data"]["terminal_result"]["data"]["decision"], "pass")
             self.assertEqual(
@@ -299,6 +304,32 @@ class MCPResumeContextTests(unittest.TestCase):
             _, replay = self._resume(self._server(root), task.task_id, request_id=2)
             self.assertEqual(replay, payload)
             self.assertEqual(server.ledger.event_count(), count)
+
+    def test_curated_markdown_stales_verification_but_runtime_jsonl_does_not(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            server = self._server(root)
+            task = server.lifecycle.begin(
+                self._contract(), idempotency_key="begin-knowledge", workflow="legacy"
+            )
+            server.lifecycle.verify(
+                task.task_id,
+                "resume-pass",
+                idempotency_key="verify-knowledge",
+            )
+            runtime = root / "skills" / "candidates" / "log.jsonl"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text('{"local":"runtime"}\n', encoding="utf-8")
+
+            _, runtime_only = self._resume(server, task.task_id)
+            self.assertEqual(runtime_only["data"]["unmet_verification"], [])
+
+            curated = root / "skills" / "curated.md"
+            curated.write_text("# Shared skill\n", encoding="utf-8")
+            _, curated_change = self._resume(server, task.task_id)
+            self.assertEqual(
+                curated_change["data"]["unmet_verification"], ["resume-pass"]
+            )
 
     def test_rejected_result_and_resume_errors_fail_closed_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -405,7 +436,8 @@ class MCPResumeContextTests(unittest.TestCase):
             self.assertEqual(
                 payload["knowledge"]["runtime_jsonl"],
                 {
-                    "tracked": False,
+                    "classification": "local_runtime",
+                    "repository_policy": "ignored",
                     "patterns": ["memory/**/*.jsonl", "skills/**/*.jsonl"],
                 },
             )

@@ -1380,7 +1380,8 @@ class CausalityMCPServer:
                                     "skills": markdown_paths("skills"),
                                 },
                                 "runtime_jsonl": {
-                                    "tracked": False,
+                                    "classification": "local_runtime",
+                                    "repository_policy": "ignored",
                                     "patterns": [
                                         "memory/**/*.jsonl",
                                         "skills/**/*.jsonl",

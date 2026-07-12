@@ -45,7 +45,27 @@ def resolve_allow_missing(path: Path) -> Path:
         return path.resolve()
 
 
-def _tree_digest(root: Path, visited: frozenset[Path]) -> str:
+def _runtime_knowledge_file(root: Path, path: Path) -> bool:
+    """Classify machine-written memory/skill JSONL without hiding curated Markdown."""
+
+    try:
+        relative = path.absolute().relative_to(root)
+    except ValueError:
+        return False
+    name = relative.name
+    return bool(
+        len(relative.parts) > 1
+        and relative.parts[0] in {"memory", "skills"}
+        and (name.endswith(".jsonl") or ".jsonl." in name)
+    )
+
+
+def _tree_digest(
+    root: Path,
+    visited: frozenset[Path],
+    *,
+    ignore_runtime_jsonl: bool = False,
+) -> str:
     """Digest a symlinked directory target without following nested links blindly."""
     resolved_root = root.resolve()
     if resolved_root in visited:
@@ -63,9 +83,12 @@ def _tree_digest(root: Path, visited: frozenset[Path]) -> str:
                 continue
             relative = path.relative_to(resolved_root).as_posix()
             if path.is_symlink():
-                rows.append(f"{relative}:{_path_signature(path, seen)}")
+                rows.append(
+                    f"{relative}:"
+                    f"{_path_signature(path, seen, ignore_runtime_jsonl=ignore_runtime_jsonl)}"
+                )
                 dirnames.remove(name)
-            else:
+            elif not ignore_runtime_jsonl:
                 try:
                     rows.append(
                         f"{relative}/:{stat.S_IMODE(path.lstat().st_mode):o}:directory"
@@ -73,13 +96,25 @@ def _tree_digest(root: Path, visited: frozenset[Path]) -> str:
                 except OSError as exc:
                     rows.append(f"{relative}/:unreadable:{type(exc).__name__}")
         for name in filenames:
+            if ignore_runtime_jsonl and (
+                name.endswith(".jsonl") or ".jsonl." in name
+            ):
+                continue
             path = base / name
             relative = path.relative_to(resolved_root).as_posix()
-            rows.append(f"{relative}:{_path_signature(path, seen)}")
+            rows.append(
+                f"{relative}:"
+                f"{_path_signature(path, seen, ignore_runtime_jsonl=ignore_runtime_jsonl)}"
+            )
     return sha256_text("\n".join(rows))
 
 
-def _path_signature(path: Path, visited: frozenset[Path] = frozenset()) -> str:
+def _path_signature(
+    path: Path,
+    visited: frozenset[Path] = frozenset(),
+    *,
+    ignore_runtime_jsonl: bool = False,
+) -> str:
     try:
         metadata = path.lstat()
         mode = stat.S_IMODE(metadata.st_mode)
@@ -93,7 +128,10 @@ def _path_signature(path: Path, visited: frozenset[Path] = frozenset()) -> str:
                         f"{sha256_file(resolved)}"
                     )
                 elif resolved.is_dir():
-                    target = f"directory:{_tree_digest(resolved, visited)}"
+                    target = (
+                        "directory:"
+                        f"{_tree_digest(resolved, visited, ignore_runtime_jsonl=ignore_runtime_jsonl)}"
+                    )
                 else:
                     target = "other"
             except (OSError, RuntimeError) as exc:
@@ -200,11 +238,21 @@ def workspace_fingerprint(
                 dirnames.remove(name)
                 continue
             relative = path.relative_to(root).as_posix()
-            fingerprint[f"{relative}/" if not path.is_symlink() else relative] = _path_signature(path)
+            relative_path = path.relative_to(root)
+            knowledge_tree = relative_path.parts[0] in {"memory", "skills"}
+            if path.is_symlink() or not knowledge_tree:
+                fingerprint[
+                    f"{relative}/" if not path.is_symlink() else relative
+                ] = _path_signature(
+                    path,
+                    ignore_runtime_jsonl=(path.is_symlink() and knowledge_tree),
+                )
             if path.is_symlink():
                 dirnames.remove(name)
         for name in filenames:
             path = base / name
+            if _runtime_knowledge_file(root, path):
+                continue
             if path.absolute() in allowed_artifacts:
                 continue
             if _is_ledger_runtime_path(path.absolute(), ledger):
