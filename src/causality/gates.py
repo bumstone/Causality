@@ -870,6 +870,52 @@ class HITLGate:
                 )
         return self._record(contract, GateDecision.PASS, "action does not hit a non-goal")
 
+    def check_network_scope(self, contract: GoalContract, origin: str) -> GateResult:
+        """Require an exact origin declared by the frozen contract."""
+        snapshot, binding_issue = self._durable_binding(contract)
+        if binding_issue is not None:
+            return binding_issue
+        assert snapshot is not None
+        if not isinstance(origin, str) or not origin.strip():
+            return self._record(
+                contract,
+                GateDecision.STOP,
+                "network origin must be non-blank",
+            )
+        if origin not in snapshot.permissions.network_scope:
+            return self._record(
+                contract,
+                GateDecision.STOP,
+                f"network origin is outside the contract scope: {origin}",
+            )
+        return self._record(contract, GateDecision.PASS, f"network origin is permitted: {origin}")
+
+    def check_auth_scope(
+        self,
+        contract: GoalContract,
+        auth_ref: str | None,
+    ) -> GateResult:
+        """Allow anonymous access or an exact server-owned credential alias."""
+        snapshot, binding_issue = self._durable_binding(contract)
+        if binding_issue is not None:
+            return binding_issue
+        assert snapshot is not None
+        if auth_ref is None:
+            return self._record(contract, GateDecision.PASS, "anonymous access is permitted")
+        if not isinstance(auth_ref, str) or not auth_ref.strip():
+            return self._record(
+                contract,
+                GateDecision.STOP,
+                "auth_ref must be non-blank when provided",
+            )
+        if auth_ref not in snapshot.permissions.auth_scope:
+            return self._record(
+                contract,
+                GateDecision.STOP,
+                f"credential alias is outside the contract scope: {auth_ref}",
+            )
+        return self._record(contract, GateDecision.PASS, f"credential alias is permitted: {auth_ref}")
+
     def should_stop(
         self,
         contract: GoalContract,

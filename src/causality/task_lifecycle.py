@@ -22,6 +22,7 @@ from .contracts import (
     EvidenceKind,
     GateDecision,
     GoalContract,
+    IRREVERSIBLE_ACTIONS,
     PermissionContract,
     StateTransition,
     VerifierDecision,
@@ -30,6 +31,13 @@ from .contracts import (
 from .durable import file_lock
 from .execution import ActionBlocked, ExecutionAdapter
 from .gates import GateResult
+from .http_adapter import (
+    DEFAULT_MAX_REQUEST_BYTES,
+    DEFAULT_MAX_RESPONSE_BYTES,
+    HttpAdapter,
+    HttpRequest,
+    normalize_origin,
+)
 from .ledger import EvidenceLedger, LedgerEvent, sha256_file, sha256_text
 from .orchestrator import Causality
 from .memory import TypedMemory
@@ -40,6 +48,23 @@ from .tool_adapter import ToolAdapter, utf8_size
 SCHEMA_VERSION = 1
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+_CALLER_FORBIDDEN_HTTP_HEADERS = frozenset(
+    {
+        "authorization",
+        "connection",
+        "content-length",
+        "cookie",
+        "host",
+        "proxy-authorization",
+        "proxy-connection",
+        "set-cookie",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
 
 TASK_STARTED = "task_started"
 TASK_OPERATION = "task_operation"
@@ -151,10 +176,42 @@ class TaskPolicy:
     """Server-owned ceiling; a task contract may only narrow it."""
 
     allowed_tools: frozenset[str] = frozenset({"shell", "file.read", "file.write"})
+    allowed_network_origins: frozenset[str] = frozenset()
+    allowed_auth_refs: frozenset[str] = frozenset()
     subprocess_argv_prefixes: tuple[tuple[str, ...], ...] = ()
     verification_commands: tuple[tuple[str, ...], ...] = ()
     verification_argv_prefixes: tuple[tuple[str, ...], ...] = ()
     max_timeout_seconds: float = 300.0
+    max_http_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
+    max_http_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+
+    def __post_init__(self) -> None:
+        try:
+            origins = frozenset(
+                normalize_origin(origin, scope=True)
+                for origin in self.allowed_network_origins
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("allowed_network_origins must contain exact HTTP origins") from exc
+        if any(
+            not isinstance(ref, str) or not _IDEMPOTENCY_KEY.fullmatch(ref)
+            for ref in self.allowed_auth_refs
+        ):
+            raise ValueError("allowed_auth_refs must contain non-blank credential aliases")
+        if (
+            isinstance(self.max_http_request_bytes, bool)
+            or not isinstance(self.max_http_request_bytes, int)
+            or self.max_http_request_bytes < 0
+        ):
+            raise ValueError("max_http_request_bytes must be a non-negative integer")
+        if (
+            isinstance(self.max_http_response_bytes, bool)
+            or not isinstance(self.max_http_response_bytes, int)
+            or self.max_http_response_bytes < 0
+        ):
+            raise ValueError("max_http_response_bytes must be a non-negative integer")
+        object.__setattr__(self, "allowed_network_origins", origins)
+        object.__setattr__(self, "allowed_auth_refs", frozenset(self.allowed_auth_refs))
 
     def allows_subprocess(self, argv: tuple[str, ...]) -> bool:
         return any(
@@ -171,6 +228,18 @@ class TaskPolicy:
 
 EffectRunner = Callable[[dict[str, Any]], Mapping[str, Any]]
 ApprovalAuthorizer = Callable[[str, str, str | None], bool]
+
+
+@dataclass(frozen=True)
+class _ActionPlan:
+    descriptor: dict[str, Any]
+    tool: str
+    action_kind: str
+    description: str
+    network_origin: str | None = None
+    auth_ref: str | None = None
+    http_request: HttpRequest | None = None
+    expected_statuses: tuple[int, ...] = ()
 
 
 _TRANSITIONS: Mapping[TaskState, frozenset[TaskState]] = MappingProxyType(
@@ -434,6 +503,8 @@ class TaskLifecycle:
         policy: TaskPolicy | None = None,
         approval_authorizer: ApprovalAuthorizer | None = None,
         effect_runner: EffectRunner | None = None,
+        http_adapter: HttpAdapter | None = None,
+        http_credentials: Mapping[str, Mapping[str, str]] | None = None,
     ):
         self.project_root = Path(project_root).resolve()
         self.ledger = EvidenceLedger(
@@ -451,6 +522,34 @@ class TaskLifecycle:
             lambda _approver, _stage, _proof: False
         )
         self.effect_runner = effect_runner
+        self.http_adapter = http_adapter or HttpAdapter(
+            max_request_bytes=self.policy.max_http_request_bytes,
+            max_response_bytes=self.policy.max_http_response_bytes,
+        )
+        if (
+            self.http_adapter.max_request_bytes > self.policy.max_http_request_bytes
+            or self.http_adapter.max_response_bytes > self.policy.max_http_response_bytes
+        ):
+            raise ValueError("http_adapter byte limits may not exceed TaskPolicy")
+        credentials: dict[str, Mapping[str, str]] = {}
+        for ref, headers in (http_credentials or {}).items():
+            if (
+                not isinstance(ref, str)
+                or not _IDEMPOTENCY_KEY.fullmatch(ref)
+                or not isinstance(headers, Mapping)
+                or not headers
+            ):
+                raise ValueError("http_credentials must map aliases to non-empty headers")
+            try:
+                validated = HttpRequest(
+                    "GET",
+                    "https://credential-validation.invalid",
+                    headers=headers,
+                ).headers
+            except (TypeError, ValueError) as exc:
+                raise ValueError("http credential headers are invalid") from exc
+            credentials[ref] = validated
+        self.http_credentials = MappingProxyType(credentials)
 
     def session(self, task_id: str, recover: bool = True) -> TaskSession:
         return self.get(task_id, recover=recover)
@@ -463,6 +562,41 @@ class TaskLifecycle:
                 "policy_denied",
                 "task requests tools outside server policy",
                 tools=sorted(denied),
+            )
+        try:
+            network_scope = tuple(
+                dict.fromkeys(
+                    normalize_origin(origin, scope=True)
+                    for origin in contract.permissions.network_scope
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                "validation_error",
+                "network_scope must contain exact HTTP origins",
+            ) from exc
+        denied_origins = set(network_scope) - self.policy.allowed_network_origins
+        if denied_origins:
+            raise _error(
+                "policy_denied",
+                "task requests network origins outside server policy",
+                origins=sorted(denied_origins),
+            )
+        auth_scope = tuple(dict.fromkeys(contract.permissions.auth_scope))
+        if any(
+            not isinstance(ref, str) or not _IDEMPOTENCY_KEY.fullmatch(ref)
+            for ref in auth_scope
+        ):
+            raise _error(
+                "validation_error",
+                "auth_scope must contain non-blank credential aliases",
+            )
+        denied_auth = set(auth_scope) - self.policy.allowed_auth_refs
+        if denied_auth:
+            raise _error(
+                "policy_denied",
+                "task requests credential aliases outside server policy",
+                auth_refs=sorted(denied_auth),
             )
         for entry in contract.permissions.write_scope:
             candidate = Path(entry)
@@ -507,8 +641,8 @@ class TaskLifecycle:
             permissions=PermissionContract(
                 allowed_tools=tuple(contract.permissions.allowed_tools),
                 write_scope=tuple(contract.permissions.write_scope),
-                network_scope=tuple(contract.permissions.network_scope),
-                auth_scope=tuple(contract.permissions.auth_scope),
+                network_scope=network_scope,
+                auth_scope=auth_scope,
             ),
         )
 
@@ -863,16 +997,187 @@ class TaskLifecycle:
             return "deploy"
         return "tool_call"
 
+    def _scoped_http_path(
+        self,
+        contract: GoalContract,
+        value: str,
+        *,
+        field_name: str,
+    ) -> Path:
+        path = self._resolve_project_path(value, field_name=field_name)
+        scopes = tuple(contract.permissions.write_scope)
+        if not scopes:
+            raise _error("action_blocked", "empty write_scope grants no HTTP file access")
+        resolved_scopes = tuple(
+            self._resolve_project_path(entry, field_name="write_scope")
+            for entry in scopes
+        )
+        if not any(_within(path, scope) for scope in resolved_scopes):
+            raise _error("action_blocked", f"{field_name} is outside write_scope")
+        return path
+
+    def _normalize_http_action(
+        self,
+        contract: GoalContract,
+        action: Mapping[str, Any],
+    ) -> _ActionPlan:
+        allowed_fields = {
+            "kind",
+            "method",
+            "url",
+            "headers",
+            "body_ref",
+            "timeout_seconds",
+            "expected_statuses",
+            "response_artifact",
+            "auth_ref",
+        }
+        unknown = set(action) - allowed_fields
+        if unknown:
+            raise _error(
+                "validation_error",
+                "HTTP action contains unknown fields",
+                fields=sorted(str(item) for item in unknown),
+            )
+        method = action.get("method")
+        if not isinstance(method, str) or method.upper() not in _HTTP_METHODS:
+            raise _error("validation_error", "HTTP method is not supported")
+        method = method.upper()
+        url = action.get("url")
+        if not isinstance(url, str):
+            raise _error("validation_error", "HTTP url must be text")
+        try:
+            origin = normalize_origin(url)
+        except ValueError as exc:
+            raise _error("validation_error", "HTTP url is invalid") from exc
+
+        raw_headers = action.get("headers", {})
+        if not isinstance(raw_headers, Mapping):
+            raise _error("validation_error", "HTTP headers must be an object")
+        headers = dict(raw_headers)
+        if any(not isinstance(name, str) for name in headers):
+            raise _error("validation_error", "HTTP header names must be text")
+        forbidden = sorted(
+            name for name in headers if name.casefold() in _CALLER_FORBIDDEN_HTTP_HEADERS
+        )
+        if forbidden:
+            raise _error(
+                "validation_error",
+                "authority and credential headers must be server-owned",
+                headers=forbidden,
+            )
+
+        timeout = action.get("timeout_seconds", 30.0)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise _error("validation_error", "HTTP timeout must be numeric")
+        timeout = float(timeout)
+        if timeout <= 0 or timeout > self.policy.max_timeout_seconds:
+            raise _error("validation_error", "HTTP timeout is outside server policy")
+
+        expected = action.get("expected_statuses")
+        if (
+            not isinstance(expected, (list, tuple))
+            or not expected
+            or any(type(status) is not int or not 100 <= status <= 599 for status in expected)
+        ):
+            raise _error(
+                "validation_error",
+                "expected_statuses must contain HTTP status integers",
+            )
+        expected_statuses = tuple(dict.fromkeys(expected))
+
+        body_ref = action.get("body_ref")
+        body_path: Path | None = None
+        body: bytes | None = None
+        if body_ref is not None:
+            body_path = self._scoped_http_path(
+                contract,
+                body_ref,
+                field_name="body_ref",
+            )
+            if not body_path.is_file():
+                raise _error("validation_error", "body_ref must name an existing file")
+            try:
+                body = body_path.read_bytes()
+            except OSError as exc:
+                raise _error("validation_error", "body_ref could not be read") from exc
+            if len(body) > self.policy.max_http_request_bytes:
+                raise _error("validation_error", "HTTP request body exceeds server policy")
+
+        artifact_ref = action.get("response_artifact")
+        artifact: Path | None = None
+        if artifact_ref is not None:
+            artifact = self._scoped_http_path(
+                contract,
+                artifact_ref,
+                field_name="response_artifact",
+            )
+            if not artifact.parent.is_dir():
+                raise _error(
+                    "validation_error",
+                    "response_artifact parent must already exist",
+                )
+
+        auth_ref = action.get("auth_ref")
+        if auth_ref is not None and (
+            not isinstance(auth_ref, str) or not _IDEMPOTENCY_KEY.fullmatch(auth_ref)
+        ):
+            raise _error("validation_error", "auth_ref must be a credential alias")
+        try:
+            request = HttpRequest(
+                method,
+                url,
+                headers=headers,
+                body=body,
+                timeout=timeout,
+                artifact_path=artifact,
+            )
+        except (TypeError, ValueError) as exc:
+            raise _error("validation_error", "HTTP request is invalid") from exc
+        descriptor = {
+            "kind": "http",
+            "method": method,
+            "origin": origin,
+            "url_sha256": sha256_text(url),
+            "header_names": sorted(name.casefold() for name in headers),
+            "headers_sha256": canonical_sha256(headers),
+            "body_ref": str(body_path) if body_path is not None else None,
+            "body_bytes": len(body or b""),
+            "body_sha256": hashlib.sha256(body or b"").hexdigest(),
+            "timeout_seconds": timeout,
+            "expected_statuses": list(expected_statuses),
+            "response_artifact": str(artifact) if artifact is not None else None,
+            "auth_ref": auth_ref,
+        }
+        return _ActionPlan(
+            descriptor=descriptor,
+            tool="http",
+            action_kind="external_send",
+            description=f"{method} request to {origin}",
+            network_origin=origin,
+            auth_ref=auth_ref,
+            http_request=request,
+            expected_statuses=expected_statuses,
+        )
+
     def _normalize_action(
         self,
         session: TaskSession,
         action: Mapping[str, Any],
-    ) -> tuple[dict[str, Any], str, str, str]:
+    ) -> _ActionPlan:
         if not isinstance(action, Mapping):
             raise _error("validation_error", "action must be an object")
         kind = action.get("kind", action.get("type"))
         contract = self._contract(session)
         allowed = set(contract.permissions.allowed_tools) & self.policy.allowed_tools
+        if kind == "http":
+            plan = self._normalize_http_action(contract, action)
+            if plan.tool not in allowed:
+                raise _error(
+                    "action_blocked",
+                    f"tool is outside effective policy: {plan.tool}",
+                )
+            return plan
         if kind == "file_read":
             path = self._resolve_project_path(action.get("path", ""), field_name="path")
             tool, action_kind = "file.read", "tool_call"
@@ -930,7 +1235,7 @@ class TaskLifecycle:
             raise _error("validation_error", "unknown action kind")
         if tool not in allowed:
             raise _error("action_blocked", f"tool is outside effective policy: {tool}")
-        return descriptor, tool, action_kind, description
+        return _ActionPlan(descriptor, tool, action_kind, description)
 
     def action(
         self,
@@ -942,7 +1247,11 @@ class TaskLifecycle:
         key = _idempotency_key(idempotency_key)
         with self.runtime.execution_lock():
             session = self.get(task_id)
-            descriptor, tool, action_kind, description = self._normalize_action(session, action)
+            plan = self._normalize_action(session, action)
+            descriptor = plan.descriptor
+            tool = plan.tool
+            action_kind = plan.action_kind
+            description = plan.description
             digest = canonical_sha256(descriptor)
             prior = self._existing(session, "action", key, digest)
             if prior is not None:
@@ -980,7 +1289,67 @@ class TaskLifecycle:
             execution = ExecutionAdapter(self.runtime, self._contract(session))
             provenance: str | None = None
             try:
-                if self.effect_runner is not None:
+                if plan.http_request is not None:
+                    def run_http() -> Mapping[str, Any]:
+                        credential_headers = None
+                        if plan.auth_ref is not None:
+                            credential_headers = self.http_credentials.get(plan.auth_ref)
+                            if credential_headers is None:
+                                raise _error(
+                                    "policy_denied",
+                                    "credential alias is not configured",
+                                )
+                            collisions = {
+                                name.casefold() for name in plan.http_request.headers
+                            } & {name.casefold() for name in credential_headers}
+                            if collisions:
+                                raise _error(
+                                    "validation_error",
+                                    "caller headers conflict with server credentials",
+                                )
+                        before_effect()
+                        response = self.http_adapter.send(
+                            plan.http_request,
+                            credential_headers=credential_headers,
+                        )
+                        return {
+                            **response.to_metadata(),
+                            "expected": response.status in plan.expected_statuses,
+                            "expected_statuses": list(plan.expected_statuses),
+                        }
+
+                    raw = execution.execute(
+                        tool=tool,
+                        action_kind=action_kind,
+                        description=description,
+                        network_origin=plan.network_origin,
+                        auth_ref=plan.auth_ref,
+                        run=run_http,
+                    )
+                    result = _thaw(_freeze(dict(raw)))
+                    artifact_paths = (
+                        (plan.http_request.artifact_path,)
+                        if plan.http_request.artifact_path is not None
+                        else ()
+                    )
+                    event = self.ledger.append(
+                        AuditEventType.TOOL_CALL,
+                        {
+                            "tool": tool,
+                            "action_kind": action_kind,
+                            "result_sha256": canonical_sha256(result),
+                            "status": result["status"],
+                            "expected": result["expected"],
+                            "request_bytes": result["request_bytes"],
+                            "response_bytes": result["response_bytes"],
+                            "response_sha256": result["response_sha256"],
+                            "mutates_task": True,
+                        },
+                        contract_id=task_id,
+                        artifact_paths=artifact_paths,
+                    )
+                    provenance = event.entry_hash
+                elif self.effect_runner is not None:
                     def run_injected() -> Mapping[str, Any]:
                         before_effect()
                         return self.effect_runner(_thaw(_freeze(descriptor)))
@@ -990,6 +1359,8 @@ class TaskLifecycle:
                         action_kind=action_kind,
                         description=description,
                         run=run_injected,
+                        network_origin=plan.network_origin,
+                        auth_ref=plan.auth_ref,
                     )
                     if not isinstance(raw, Mapping):
                         raise ValueError("effect_runner must return a mapping")
@@ -1052,6 +1423,8 @@ class TaskLifecycle:
                     else "action_blocked",
                     str(exc),
                 ) from exc
+            except TaskLifecycleError:
+                raise
             except Exception as exc:
                 if intent is not None:
                     self.ledger.append(
@@ -1070,7 +1443,12 @@ class TaskLifecycle:
                         },
                         contract_id=task_id,
                     )
-                raise _error("action_failed", f"action failed: {type(exc).__name__}: {exc}") from exc
+                message = (
+                    f"HTTP action failed after intent: {type(exc).__name__}"
+                    if plan.http_request is not None
+                    else f"action failed: {type(exc).__name__}: {exc}"
+                )
+                raise _error("action_failed", message) from exc
 
             if intent is None or provenance is None:
                 raise RuntimeError("action completed without durable intent/provenance")
@@ -1335,8 +1713,12 @@ class TaskLifecycle:
         proof: str | None = None,
     ) -> TaskSession:
         key = _idempotency_key(idempotency_key)
-        if stage not in {"plan", "final"}:
-            raise _error("validation_error", "approval stage must be plan or final")
+        action_stage = stage in IRREVERSIBLE_ACTIONS
+        if stage not in {"plan", "final"} and not action_stage:
+            raise _error(
+                "validation_error",
+                "approval stage must be plan, final, or an irreversible action kind",
+            )
         if not isinstance(approved, bool):
             raise _error("validation_error", "approved must be a boolean")
         if not isinstance(approver, str) or not approver.strip():
@@ -1357,6 +1739,8 @@ class TaskLifecycle:
             prior = self._existing(session, "approve", key, digest)
             if prior is not None:
                 if not approved:
+                    if action_stage:
+                        return session
                     if session.state is TaskState.REJECTED:
                         return session
                     stored_state = self._durable_state(task_id)
@@ -1457,7 +1841,7 @@ class TaskLifecycle:
                         rationale.strip(),
                         metadata=metadata,
                     )
-            if not approved:
+            if not approved and not action_stage:
                 self._append_transition(
                     session,
                     TaskState.REJECTED,
