@@ -8,7 +8,7 @@ python -m venv .venv
 pip install -e .
 ```
 
-Helpers install the venv, package, agent files, and doctor checks:
+Helpers install the package, agent files, and checks:
 
 ```powershell
 # Windows
@@ -35,8 +35,7 @@ causality install-agent --client codex --adopt --verify
 # or: --client claude / --client generic
 ```
 
-Installs host entrypoints, namespaced routing, local rules/ledger/MCP config,
-and on-demand workflow, checklist, skill, and memory files.
+Installs routing, local ledger/MCP config, and on-demand workflow/skill files.
 
 Host `AGENTS.md` and `CLAUDE.md` are never overwritten. `--force` refreshes
 other generated files; update helpers use it automatically for schema changes.
@@ -45,15 +44,12 @@ are CLI-only operator actions.
 
 `auto` needs exactly one existing Codex/Claude signal; otherwise it returns an
 explicit rerun command.
-`active` means routing, config, handshake, and applicable client probes passed;
-`pending` needs adoption/trust/approval; `broken` is a real config/runtime error.
+`active` passed probes; `pending` needs adoption/trust/approval; `broken` failed.
 
-## MCP and browser adapters
+## MCP and adapters
 
-Codex uses `.codex/config.toml`, Claude root `.mcp.json`, and generic clients
-`.causality/mcp.json`. Codex trust and Claude approval remain user gates.
-Generated native entries contain machine paths; keep them local unless the host
-uses a portable shared command. Manual stdio start:
+Codex uses `.codex/config.toml`, Claude `.mcp.json`, and generic clients
+`.causality/mcp.json`. Trust and approval remain user gates. Manual start:
 
 ```powershell
 python -I -m causality.mcp_server --project .
@@ -62,8 +58,16 @@ python -I -m causality.mcp_server --project .
 `.causality/.gitignore` hides raw runtime state. If a legacy private path is
 already tracked, install returns `broken` with untrack guidance.
 
-Set the browser driver executable when browser actions are needed:
+HTTP is default-deny. Set exact origins, aliases, allowed public headers, and
+approval proof in the MCP environment:
 
 ```powershell
-$env:CAUSALITY_BROWSER_BIN="C:\path\to\browser-driver.exe"
+$env:CAUSALITY_NETWORK_ORIGINS_JSON='["https://api.example.com"]'
+$env:CAUSALITY_AUTH_REFS_JSON='["service-token"]'
+$env:CAUSALITY_HTTP_HEADERS_JSON='["Content-Type"]'
+$env:CAUSALITY_HTTP_CREDENTIALS_JSON='{"service-token":{"Authorization":"Bearer ..."}}'
+$env:CAUSALITY_APPROVAL_TOKEN='operator-secret'
 ```
+
+Secrets stay in MCP only; task subprocesses do not inherit `CAUSALITY_*`.
+Browser lifecycle remains Spec 004B; primitives are not a completion claim.

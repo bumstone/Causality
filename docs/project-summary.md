@@ -4,8 +4,7 @@ Baseline: `453` tests pass; Git and ledger retain commit history.
 
 ## What It Is
 
-Causality is a local-first agent control harness. It binds a goal contract,
-gates execution, records evidence, and reflects verified outcomes.
+Local-first agent control: bind contract, gate action, record evidence, reflect.
 
 ## Current Truth
 
@@ -22,10 +21,11 @@ gates execution, records evidence, and reflects verified outcomes.
 | Redaction | Skill distillation masks sensitive keys, nested secrets, tokens, and auth headers. |
 | Install | Client-native MCP config, host-safe adoption, handshake/report; context omits raw ledger payloads and paths reject symlink escape. |
 | MCP lifecycle | Closed tools persist task actions, verification, completion, recovery, and reflection. |
+| HTTP | Exact origin/auth scopes, external-send approval, redacted evidence, artifacts, and restart replay are enforced. |
 
 ## Still Not Proven
 
-- API/browser execution through the file/subprocess contract path.
+- Browser execution through the task contract and evidence path.
 - Engine execution of vendored playbook phases; they currently guide the agent.
 - Durable MCP resume and earned-skill outcome/promotion operations.
 

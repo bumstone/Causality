@@ -1,5 +1,12 @@
 # Spec 004 — API and Browser Adapters
 
+## Delivery
+
+- [x] **004A HTTP:** exact origin/auth ceilings, external-send approval,
+  redacted intent/result, explicit response artifact, closed MCP tool, restart E2E.
+- [ ] **004B browser:** capability-gated driver, stable refs, state-bound actions,
+  A11y/diff evidence. No browser lifecycle claim before this slice passes.
+
 ## Contract
 
 API and browser actions use the task lifecycle and emit the same gated evidence
@@ -11,6 +18,8 @@ Use standard-library HTTP first. `causality_task_http` accepts method, URL,
 headers, body reference, timeout, expected status codes, and artifact paths.
 Before request, enforce allowed tool, action risk, `network_scope`, and
 `auth_scope`; extend the gate API where those scopes are currently inert.
+Caller headers need a server allowlist; credential headers come only from an
+`auth_ref` alias and never reach task subprocess environments.
 
 Record redacted request metadata, response status, byte counts, and artifact
 hashes. Never persist secret values; keep response bodies only when explicitly
