@@ -45,6 +45,26 @@ def resolve_allow_missing(path: Path) -> Path:
         return path.resolve()
 
 
+def _runtime_jsonl_name(name: str) -> bool:
+    if name.endswith(".jsonl"):
+        return True
+    marker = ".jsonl."
+    if marker not in name:
+        return False
+    suffix = name.split(marker, 1)[1]
+    if suffix in {"lock", "head", "head.lock", "idx", "idx.lock"}:
+        return True
+    parts = suffix.split(".")
+    if parts[0].isdigit() and parts[1:] in (
+        [],
+        ["lock"],
+        ["idx"],
+        ["idx", "lock"],
+    ):
+        return True
+    return name.startswith(".") and suffix.endswith(".tmp")
+
+
 def _runtime_knowledge_file(root: Path, path: Path) -> bool:
     """Classify machine-written memory/skill JSONL without hiding curated Markdown."""
 
@@ -52,11 +72,10 @@ def _runtime_knowledge_file(root: Path, path: Path) -> bool:
         relative = path.absolute().relative_to(root)
     except ValueError:
         return False
-    name = relative.name
     return bool(
         len(relative.parts) > 1
         and relative.parts[0] in {"memory", "skills"}
-        and (name.endswith(".jsonl") or ".jsonl." in name)
+        and _runtime_jsonl_name(relative.name)
     )
 
 
@@ -96,9 +115,7 @@ def _tree_digest(
                 except OSError as exc:
                     rows.append(f"{relative}/:unreadable:{type(exc).__name__}")
         for name in filenames:
-            if ignore_runtime_jsonl and (
-                name.endswith(".jsonl") or ".jsonl." in name
-            ):
+            if ignore_runtime_jsonl and _runtime_jsonl_name(name):
                 continue
             path = base / name
             relative = path.relative_to(resolved_root).as_posix()

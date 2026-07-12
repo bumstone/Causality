@@ -240,6 +240,16 @@ class MCPResumeContextTests(unittest.TestCase):
             self.assertNotIn("idempotency_key", serialized)
             self.assertEqual(len(effects), 1)
             self.assertEqual(server.ledger.event_count(), count)
+            _, context = self._call(
+                self._server(root), "causality_context", {"limit": 10}, request_id=2
+            )
+            context_text = json.dumps(context, sort_keys=True)
+            self.assertNotIn(secret_content, context_text)
+            self.assertNotIn("orphan-effect", context_text)
+            self.assertEqual(
+                set(context["ledger_tail"][0]),
+                {"event_id", "event_type", "timestamp"},
+            )
 
     def test_terminal_and_reflected_results_are_replayed_without_effects(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -324,7 +334,7 @@ class MCPResumeContextTests(unittest.TestCase):
             _, runtime_only = self._resume(server, task.task_id)
             self.assertEqual(runtime_only["data"]["unmet_verification"], [])
 
-            curated = root / "skills" / "curated.md"
+            curated = root / "skills" / "curated.jsonl.md"
             curated.write_text("# Shared skill\n", encoding="utf-8")
             _, curated_change = self._resume(server, task.task_id)
             self.assertEqual(
@@ -389,6 +399,11 @@ class MCPResumeContextTests(unittest.TestCase):
             self.assertTrue(result["isError"])
             self.assertEqual(failed["error"]["code"], "ledger_integrity_failed")
             self.assertEqual(server.ledger.path.stat().st_size, tampered_size)
+            result, failed = self._call(
+                server, "causality_context", {"limit": 5}, request_id=5
+            )
+            self.assertTrue(result["isError"])
+            self.assertEqual(failed["error"]["code"], "ledger_integrity_failed")
 
     def test_context_filters_expired_failures_and_separates_curated_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -424,6 +439,7 @@ class MCPResumeContextTests(unittest.TestCase):
             )
 
             self.assertFalse(result.get("isError", False))
+            self.assertTrue(payload["ok"])
             active_failures = payload["knowledge"]["active_failures"]
             self.assertEqual([item["entry_id"] for item in active_failures], [active.entry_id])
             self.assertEqual(
@@ -437,8 +453,10 @@ class MCPResumeContextTests(unittest.TestCase):
                 payload["knowledge"]["runtime_jsonl"],
                 {
                     "classification": "local_runtime",
-                    "repository_policy": "ignored",
-                    "patterns": ["memory/**/*.jsonl", "skills/**/*.jsonl"],
+                    "recommended_ignore_patterns": [
+                        "memory/**/*.jsonl",
+                        "skills/**/*.jsonl",
+                    ],
                 },
             )
             serialized = json.dumps(payload, sort_keys=True)

@@ -1365,11 +1365,20 @@ class CausalityMCPServer:
                         else []
                     )
 
+                with self.lifecycle.runtime.execution_lock():
+                    if not self.ledger.verify_chain():
+                        raise TaskLifecycleError(
+                            "ledger_integrity_failed",
+                            "ledger hash chain verification failed",
+                        )
+                    tail = self.ledger.context_tail(limit)
+
                 return _text_result(
                     json.dumps(
                         {
+                            "ok": True,
                             "project": str(self.project),
-                            "ledger_tail": self.ledger.context_tail(limit),
+                            "ledger_tail": tail,
                             "workflows": [item["name"] for item in workflow_manifest()["workflows"]],
                             "knowledge": {
                                 "active_failures": [
@@ -1381,8 +1390,7 @@ class CausalityMCPServer:
                                 },
                                 "runtime_jsonl": {
                                     "classification": "local_runtime",
-                                    "repository_policy": "ignored",
-                                    "patterns": [
+                                    "recommended_ignore_patterns": [
                                         "memory/**/*.jsonl",
                                         "skills/**/*.jsonl",
                                     ],
