@@ -33,7 +33,7 @@ git fetch origin
 git pull --ff-only origin "$BRANCH"
 
 if [[ ! -x "$VENV_PYTHON" ]]; then
-  "$PROJECT_ROOT/scripts/install.sh"
+  bash "$PROJECT_ROOT/scripts/install.sh"
 else
   "$VENV_PYTHON" -m pip install -e .
 fi
@@ -45,5 +45,5 @@ else
 fi
 
 if [[ "$SKIP_TESTS" -ne 1 ]]; then
-  "$PROJECT_ROOT/scripts/doctor.sh"
+  bash "$PROJECT_ROOT/scripts/doctor.sh"
 fi

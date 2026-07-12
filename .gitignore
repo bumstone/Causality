@@ -9,6 +9,11 @@ dist/
 .gstack/
 node_modules/
 
+# Local environment files may contain credentials. A redacted template is safe.
+.env
+.env.*
+!.env.example
+
 # Runtime / per-run development state -- not shared (see docs/adr/0008).
 # Rule: machine-written runtime artifacts stay local; source, design, and
 # curated *.md memory notes stay tracked. The ledger and installed automation
@@ -50,6 +55,10 @@ docs/code-review-*.md
 .codex/hooks.json
 .codex/*.local.*
 .claude/*.local.*
+
+# install-agent pins these client configs to this machine's interpreter/path.
+.codex/config.toml
+.mcp.json
 
 # OS / editor cruft -- machine-local, never shared.
 .DS_Store
