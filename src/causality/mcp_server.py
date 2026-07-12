@@ -19,9 +19,11 @@ from .contracts import (
     EvidenceKind,
     EvidenceRequirement,
     GoalContract,
+    IRREVERSIBLE_ACTIONS,
     PermissionContract,
     VerificationRequirement,
 )
+from .http_adapter import HttpAdapter
 from .ledger import EvidenceLedger
 from .task_lifecycle import (
     TaskLifecycle,
@@ -110,7 +112,26 @@ def _command_policy_from_env() -> TaskPolicy:
             raise ValueError(f"{name} must be a JSON array of non-empty argv arrays")
         return tuple(tuple(argv) for argv in value)
 
+    def strings(name: str) -> frozenset[str]:
+        raw = os.environ.get(name)
+        if not raw:
+            return frozenset()
+        value = json.loads(raw)
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or not item.strip() for item in value
+        ):
+            raise ValueError(f"{name} must be a JSON array of non-empty strings")
+        return frozenset(value)
+
+    origins = strings("CAUSALITY_NETWORK_ORIGINS_JSON")
+    auth_refs = strings("CAUSALITY_AUTH_REFS_JSON")
+    allowed_tools = frozenset({"shell", "file.read", "file.write"})
+    if origins:
+        allowed_tools |= {"http"}
     return TaskPolicy(
+        allowed_tools=allowed_tools,
+        allowed_network_origins=origins,
+        allowed_auth_refs=auth_refs,
         subprocess_argv_prefixes=commands("CAUSALITY_SUBPROCESS_PREFIXES_JSON"),
         verification_commands=commands("CAUSALITY_VERIFICATION_COMMANDS_JSON"),
         verification_argv_prefixes=(
@@ -119,6 +140,33 @@ def _command_policy_from_env() -> TaskPolicy:
             *commands("CAUSALITY_VERIFICATION_PREFIXES_JSON"),
         ),
     )
+
+
+def _http_credentials_from_env() -> dict[str, dict[str, str]]:
+    name = "CAUSALITY_HTTP_CREDENTIALS_JSON"
+    raw = os.environ.get(name)
+    if not raw:
+        return {}
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    credentials: dict[str, dict[str, str]] = {}
+    for alias, headers in value.items():
+        if (
+            not isinstance(alias, str)
+            or not alias.strip()
+            or not isinstance(headers, dict)
+            or not headers
+            or any(
+                not isinstance(header, str) or not isinstance(secret, str)
+                for header, secret in headers.items()
+            )
+        ):
+            raise ValueError(
+                f"{name} must map non-empty aliases to non-empty string header objects"
+            )
+        credentials[alias] = dict(headers)
+    return credentials
 
 
 class CausalityMCPServer:
@@ -130,6 +178,8 @@ class CausalityMCPServer:
         *,
         approval_token: str | None = None,
         policy: TaskPolicy | None = None,
+        http_credentials: Mapping[str, Mapping[str, str]] | None = None,
+        http_adapter: HttpAdapter | None = None,
     ):
         self.project = Path(project).resolve()
         tracking_issue = _private_tracking_issue(self.project)
@@ -147,11 +197,24 @@ class CausalityMCPServer:
         self._approval_token = approval_token or os.environ.get(
             "CAUSALITY_APPROVAL_TOKEN"
         )
+        effective_policy = policy or _command_policy_from_env()
+        credentials = (
+            _http_credentials_from_env()
+            if http_credentials is None
+            else dict(http_credentials)
+        )
+        unknown_credentials = set(credentials) - effective_policy.allowed_auth_refs
+        if unknown_credentials:
+            raise ValueError(
+                "HTTP credential aliases must be explicitly allowed by server policy"
+            )
         self.lifecycle = TaskLifecycle(
             self.project,
             self.ledger.path,
-            policy=policy or _command_policy_from_env(),
+            policy=effective_policy,
             approval_authorizer=self._authorize,
+            http_credentials=credentials,
+            http_adapter=http_adapter,
         )
 
     def _authorize(self, _principal: str, _stage: str, proof: str | None) -> bool:
@@ -295,7 +358,10 @@ class CausalityMCPServer:
                 _closed(
                     {
                         **_COMMON,
-                        "stage": {"type": "string", "enum": ["plan", "final"]},
+                        "stage": {
+                            "type": "string",
+                            "enum": ["plan", "final", *sorted(IRREVERSIBLE_ACTIONS)],
+                        },
                         "approved": {"type": "boolean"},
                         "approver": _TEXT,
                         "rationale": _TEXT,
@@ -309,6 +375,51 @@ class CausalityMCPServer:
                 "causality_task_action",
                 "Execute one typed, gated task action.",
                 _closed({**_COMMON, "action": actions}, (*common_required, "action")),
+            ),
+            _tool(
+                "causality_task_http",
+                "Execute one scoped, gated HTTP action without persisting secrets.",
+                _closed(
+                    {
+                        **_COMMON,
+                        "method": {
+                            "type": "string",
+                            "enum": [
+                                "GET",
+                                "HEAD",
+                                "POST",
+                                "PUT",
+                                "PATCH",
+                                "DELETE",
+                                "OPTIONS",
+                            ],
+                        },
+                        "url": _TEXT,
+                        "headers": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "body_ref": _TEXT,
+                        "timeout_seconds": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "maximum": 300,
+                        },
+                        "expected_statuses": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer",
+                                "minimum": 100,
+                                "maximum": 599,
+                            },
+                            "minItems": 1,
+                            "uniqueItems": True,
+                        },
+                        "response_artifact": _TEXT,
+                        "auth_ref": _KEY,
+                    },
+                    (*common_required, "method", "url", "expected_statuses"),
+                ),
             ),
             _tool(
                 "causality_task_verify",
@@ -558,6 +669,8 @@ class CausalityMCPServer:
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
         operation = name.removeprefix("causality_task_")
+        if name in {"causality_task_action", "causality_task_http"}:
+            operation = "action"
         if name == "causality_append_evidence":
             operation = "append_evidence"
         key = arguments.get("idempotency_key")
@@ -588,6 +701,27 @@ class CausalityMCPServer:
                     or any(not isinstance(item, str) for item in action["argv"])
                 ):
                     raise TaskLifecycleError("validation_error", "subprocess.argv must be a string array")
+                session = self.lifecycle.action(task_id, action, idempotency_key=key)
+            elif name == "causality_task_http":
+                fields = {
+                    "method",
+                    "url",
+                    "headers",
+                    "body_ref",
+                    "timeout_seconds",
+                    "expected_statuses",
+                    "response_artifact",
+                    "auth_ref",
+                }
+                self._strict(
+                    arguments,
+                    allowed=common | fields,
+                    required=common | {"method", "url", "expected_statuses"},
+                )
+                action = {
+                    "kind": "http",
+                    **{field: arguments[field] for field in fields if field in arguments},
+                }
                 session = self.lifecycle.action(task_id, action, idempotency_key=key)
             elif name == "causality_task_verify":
                 allowed = common | {"requirement_id", "mode", "evidence_hash", "approved", "approver", "rationale", "proof"}
@@ -742,6 +876,7 @@ class CausalityMCPServer:
                 return _text_result(json.dumps(workflow_manifest(), ensure_ascii=True, indent=2))
             lifecycle_names = {
                 "causality_task_begin", "causality_task_approve", "causality_task_action",
+                "causality_task_http",
                 "causality_task_verify", "causality_task_verdict", "causality_task_complete",
                 "causality_task_resolve", "causality_task_reflect", "causality_append_evidence",
             }
