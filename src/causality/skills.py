@@ -25,7 +25,7 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from .contracts import GoalContract
-from .durable import DurableJsonl
+from .durable import DurableJsonl, file_lock
 from .ledger import EvidenceLedger, LedgerEvent
 
 
@@ -222,6 +222,9 @@ class SkillCandidate:
     provenance: str | None = None
     attempts: int = 0
     successes: int = 0
+    source_task_id: str = ""
+    outcomes: tuple[tuple[str, bool, tuple[str, ...]], ...] = ()
+    promotion_evidence_refs: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -238,6 +241,16 @@ class SkillCandidate:
             "provenance": self.provenance,
             "attempts": self.attempts,
             "successes": self.successes,
+            "source_task_id": self.source_task_id,
+            "outcomes": [
+                {
+                    "attempt_id": attempt_id,
+                    "success": success,
+                    "evidence_refs": list(evidence_refs),
+                }
+                for attempt_id, success, evidence_refs in self.outcomes
+            ],
+            "promotion_evidence_refs": list(self.promotion_evidence_refs),
         }
 
     @classmethod
@@ -249,6 +262,18 @@ class SkillCandidate:
             provenance=value.get("provenance"),
             attempts=int(value.get("attempts", 0)),
             successes=int(value.get("successes", 0)),
+            source_task_id=str(value.get("source_task_id", "")),
+            outcomes=tuple(
+                (
+                    str(item["attempt_id"]),
+                    bool(item["success"]),
+                    tuple(str(ref) for ref in item.get("evidence_refs", ())),
+                )
+                for item in value.get("outcomes", ())
+            ),
+            promotion_evidence_refs=tuple(
+                str(ref) for ref in value.get("promotion_evidence_refs", ())
+            ),
         )
 
 
@@ -289,37 +314,99 @@ class SkillStore:
             raise SkillPromotionError(
                 f"no ledger events for contract {contract.goal_id!r} to distill"
             )
-        steps = tuple(_distill_step(event) for event in matches)
         resolved_provenance = provenance if provenance is not None else matches[-1].entry_hash
-        candidate = SkillCandidate(
+        return self.distill_once(
+            ledger,
+            contract,
             skill_id=uuid4().hex,
+            provenance=resolved_provenance,
+        )
+
+    def distill_once(
+        self,
+        ledger: EvidenceLedger,
+        contract: GoalContract,
+        *,
+        skill_id: str,
+        provenance: str | None = None,
+        source_task_id: str | None = None,
+    ) -> SkillCandidate:
+        """Persist one deterministic candidate, returning an identical retry."""
+
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise SkillPromotionError("skill_id is required")
+        matches = ledger.events_for_contract(contract.goal_id, all_segments=True)
+        if not matches:
+            raise SkillPromotionError(
+                f"no ledger events for contract {contract.goal_id!r} to distill"
+            )
+        steps = tuple(_distill_step(event) for event in matches)
+        candidate = SkillCandidate(
+            skill_id=skill_id.strip(),
             objective=contract.title,
             steps=steps,
-            provenance=resolved_provenance,
+            provenance=provenance if provenance is not None else matches[-1].entry_hash,
             attempts=0,
             successes=0,
+            source_task_id=source_task_id or contract.goal_id,
         )
-        self._append(self._candidates_path(), candidate)
+        path = self._candidates_path()
+        with file_lock(path):
+            existing = self._latest_candidates().get(candidate.skill_id)
+            if existing is not None:
+                if existing.to_dict() != candidate.to_dict():
+                    raise SkillPromotionError(
+                        f"skill_id {candidate.skill_id!r} already has different content"
+                    )
+                return existing
+            self._append(path, candidate)
         return candidate
 
-    def record_outcome(self, skill_id: str, *, success: bool) -> SkillCandidate:
+    def record_outcome(
+        self,
+        skill_id: str,
+        *,
+        success: bool,
+        attempt_id: str | None = None,
+        evidence_refs: Sequence[str] = (),
+    ) -> SkillCandidate:
         """Record one reproducibility attempt for a candidate.
 
         Increments ``attempts`` (and ``successes`` when ``success``) and
         rewrites the candidates file with the updated authoritative state.
         """
-        candidates = self._latest_candidates()
-        if skill_id not in candidates:
-            raise SkillPromotionError(f"unknown skill_id: {skill_id!r}")
-        current = candidates[skill_id]
-        updated = replace(
-            current,
-            attempts=current.attempts + 1,
-            successes=current.successes + (1 if success else 0),
-        )
-        candidates[skill_id] = updated
-        self._rewrite(self._candidates_path(), candidates.values())
-        return updated
+        if not isinstance(success, bool):
+            raise SkillPromotionError("success must be boolean")
+        refs = tuple(str(ref) for ref in evidence_refs)
+        if len(refs) != len(set(refs)):
+            raise SkillPromotionError("evidence_refs must be unique")
+        if attempt_id is None:
+            attempt_id = f"legacy:{uuid4().hex}"
+        if not isinstance(attempt_id, str) or not attempt_id.strip():
+            raise SkillPromotionError("attempt_id is required")
+        attempt_id = attempt_id.strip()
+        path = self._candidates_path()
+        with file_lock(path):
+            candidates = self._latest_candidates()
+            if skill_id not in candidates:
+                raise SkillPromotionError(f"unknown skill_id: {skill_id!r}")
+            current = candidates[skill_id]
+            for existing_id, existing_success, existing_refs in current.outcomes:
+                if existing_id == attempt_id:
+                    if existing_success != success or existing_refs != refs:
+                        raise SkillPromotionError(
+                            f"attempt_id {attempt_id!r} conflicts with its prior outcome"
+                        )
+                    return current
+            updated = replace(
+                current,
+                attempts=current.attempts + 1,
+                successes=current.successes + (1 if success else 0),
+                outcomes=(*current.outcomes, (attempt_id, success, refs)),
+            )
+            candidates[skill_id] = updated
+            self._rewrite(path, candidates.values(), lock=False)
+            return updated
 
     def promote(
         self,
@@ -330,6 +417,7 @@ class SkillStore:
         min_successes: int = 2,
         min_attempts: int = 3,
         dedup_threshold: float = 0.6,
+        evidence_refs: Sequence[str] = (),
     ) -> SkillCandidate:
         """The HITL promotion gate (ADR 0005 §2.4).
 
@@ -337,23 +425,33 @@ class SkillStore:
         n-of-m reproducibility (``min_successes`` of ``min_attempts``), and no
         semantic duplication of an authored skill.
         """
-        candidates = self._latest_candidates()
-        if skill_id not in candidates:
-            raise SkillPromotionError(f"unknown skill_id: {skill_id!r}")
-        candidate = candidates[skill_id]
-        if not approved_by or not str(approved_by).strip():
-            raise SkillPromotionError("promotion requires a non-empty approved_by (HITL approval)")
-        if candidate.successes < min_successes:
-            raise SkillPromotionError(
-                f"reproducibility not met: {candidate.successes} successes < {min_successes}"
+        candidate_path = self._candidates_path()
+        promoted_path = self._promoted_path()
+        with file_lock(candidate_path), file_lock(promoted_path):
+            candidates = self._latest_candidates()
+            promoted = self._latest_by_id(promoted_path)
+            if skill_id in promoted:
+                return promoted[skill_id]
+            if skill_id not in candidates:
+                raise SkillPromotionError(f"unknown skill_id: {skill_id!r}")
+            candidate = candidates[skill_id]
+            if not approved_by or not str(approved_by).strip():
+                raise SkillPromotionError("promotion requires a non-empty approved_by (HITL approval)")
+            if candidate.successes < min_successes:
+                raise SkillPromotionError(
+                    f"reproducibility not met: {candidate.successes} successes < {min_successes}"
+                )
+            if candidate.attempts < min_attempts:
+                raise SkillPromotionError(
+                    f"reproducibility not met: {candidate.attempts} attempts < {min_attempts}"
+                )
+            self._reject_if_duplicates_authored(candidate, authored_names, dedup_threshold)
+            promoted_candidate = replace(
+                candidate,
+                promotion_evidence_refs=tuple(str(ref) for ref in evidence_refs),
             )
-        if candidate.attempts < min_attempts:
-            raise SkillPromotionError(
-                f"reproducibility not met: {candidate.attempts} attempts < {min_attempts}"
-            )
-        self._reject_if_duplicates_authored(candidate, authored_names, dedup_threshold)
-        self._append(self._promoted_path(), candidate)
-        return candidate
+            self._append(promoted_path, promoted_candidate)
+            return promoted_candidate
 
     @staticmethod
     def _reject_if_duplicates_authored(
@@ -457,7 +555,8 @@ class SkillStore:
     def _append(self, path: Path, candidate: SkillCandidate) -> None:
         DurableJsonl(path).append(json.dumps(candidate.to_dict(), ensure_ascii=True))
 
-    def _rewrite(self, path: Path, candidates: Any) -> None:
+    def _rewrite(self, path: Path, candidates: Any, *, lock: bool = True) -> None:
         DurableJsonl(path).rewrite(
-            json.dumps(candidate.to_dict(), ensure_ascii=True) for candidate in candidates
+            (json.dumps(candidate.to_dict(), ensure_ascii=True) for candidate in candidates),
+            lock=lock,
         )

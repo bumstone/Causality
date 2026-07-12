@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import os
@@ -27,6 +28,7 @@ from .contracts import (
 from .http_adapter import HttpAdapter
 from .ledger import EvidenceLedger
 from .memory import TypedMemory
+from .skills import SkillPromotionError, SkillStore
 from .task_lifecycle import (
     TaskLifecycle,
     TaskLifecycleError,
@@ -259,6 +261,7 @@ class CausalityMCPServer:
             http_adapter=http_adapter,
             browser_adapter=effective_browser,
         )
+        self.skills = SkillStore(self.project)
 
     def _authorize(self, _principal: str, _stage: str, proof: str | None) -> bool:
         return bool(
@@ -711,6 +714,23 @@ class CausalityMCPServer:
                 "causality_workflows",
                 "Return the available Causality workflow manifest.",
                 _closed({}),
+            ),
+            _tool(
+                "causality_skill_outcome",
+                "Record one task-bound reproducibility outcome for an earned skill.",
+                _closed({
+                    "task_id": _TEXT, "idempotency_key": _KEY, "skill_id": _TEXT,
+                    "success": {"type": "boolean"},
+                    "evidence_refs": {"type": "array", "items": _HASH},
+                }, ("task_id", "idempotency_key", "skill_id", "success", "evidence_refs")),
+            ),
+            _tool(
+                "causality_skill_promote",
+                "Promote an earned skill after fixed reproducibility and human approval gates.",
+                _closed({
+                    "skill_id": _TEXT, "idempotency_key": _KEY, "approved_by": _TEXT,
+                    "evidence_refs": {"type": "array", "items": _HASH}, "proof": _TEXT,
+                }, ("skill_id", "idempotency_key", "approved_by", "evidence_refs", "proof")),
             ),
         ]
         if self.lifecycle.policy.allowed_tools & _BROWSER_TOOLS:
@@ -1320,6 +1340,23 @@ class CausalityMCPServer:
             else preexisting_operation
         )
         data, event_hash = self._operation_data(session, operation, str(key))
+        if operation == "reflect" and session.state.value == "verified":
+            deterministic_id = hashlib.sha256(
+                f"{session.task_id}:{event_hash}:skill:v1".encode()
+            ).hexdigest()
+            try:
+                candidate = self.skills.distill_once(
+                    self.ledger,
+                    self.lifecycle._contract(session),
+                    skill_id=deterministic_id,
+                    provenance=event_hash,
+                    source_task_id=session.task_id,
+                )
+                data["skill"] = candidate.to_dict()
+            except SkillPromotionError as exc:
+                raise TaskLifecycleError("skill_distill_failed", str(exc)) from exc
+        elif operation == "reflect":
+            data["skill"] = None
         if ephemeral:
             data["untrusted"] = {
                 name: wrap_untrusted(value) for name, value in ephemeral.items()
@@ -1432,6 +1469,27 @@ class CausalityMCPServer:
             if name == "causality_workflows":
                 self._strict(arguments, allowed=set())
                 return _text_result(json.dumps(workflow_manifest(), ensure_ascii=True, indent=2))
+            if name == "causality_skill_outcome":
+                self._strict(arguments, allowed={"task_id", "idempotency_key", "skill_id", "success", "evidence_refs"}, required={"task_id", "idempotency_key", "skill_id", "success", "evidence_refs"})
+                task_id = arguments["task_id"]
+                session = self.lifecycle.get(task_id)
+                if not session.terminal or session.state.value != "verified":
+                    raise TaskLifecycleError("validation_error", "skill outcome requires a verified terminal task")
+                refs = self._string_array(arguments["evidence_refs"], "evidence_refs")
+                if len(refs) != len(set(refs)) or any(ref not in session.event_hashes for ref in refs):
+                    raise TaskLifecycleError("validation_error", "evidence_refs must reference task event hashes")
+                candidate = self.skills.record_outcome(arguments["skill_id"], success=arguments["success"], attempt_id=task_id, evidence_refs=refs)
+                return _text_result({"ok": True, "skill": candidate.to_dict(), "idempotency": {"key": arguments["idempotency_key"]}})
+            if name == "causality_skill_promote":
+                self._strict(arguments, allowed={"skill_id", "idempotency_key", "approved_by", "evidence_refs", "proof"}, required={"skill_id", "idempotency_key", "approved_by", "evidence_refs", "proof"})
+                refs = self._string_array(arguments["evidence_refs"], "evidence_refs")
+                if len(refs) != len(set(refs)) or any(not isinstance(ref, str) or len(ref) != 64 for ref in refs):
+                    raise TaskLifecycleError("validation_error", "evidence_refs must be unique SHA-256 hashes")
+                if not self._authorize(arguments["approved_by"], "skill", arguments["proof"]):
+                    raise TaskLifecycleError("approval_required", "skill promotion requires authenticated approval")
+                authored = [p.stem for root in (self.project / "skills", self.project / "workflow") if root.is_dir() for p in root.rglob("*.md") if p.name.lower() != "readme.md"]
+                candidate = self.skills.promote(arguments["skill_id"], approved_by=arguments["approved_by"], authored_names=authored, min_successes=2, min_attempts=3, dedup_threshold=0.6, evidence_refs=refs)
+                return _text_result({"ok": True, "skill": candidate.to_dict(), "idempotency": {"key": arguments["idempotency_key"]}, "gate": {"min_successes": 2, "min_attempts": 3, "dedup_threshold": 0.6}})
             if name == "causality_task_resume":
                 return self._resume(arguments)
             lifecycle_names = {
