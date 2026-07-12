@@ -1,6 +1,6 @@
 # Causality Project Summary
 
-Baseline: `549` tests pass; Git and ledger retain commit history.
+Baseline: `557` tests pass; Git and ledger retain commit history.
 
 ## What It Is
 
@@ -17,15 +17,13 @@ Local-first agent control: contract, gated execution, evidence, and reflection.
 | Completion | Fresh verification and two substantive independent passes are required. |
 | Ledger | Hash-chained JSONL supports repair, rotation, indexing, and restart replay. |
 | Reflection | Stable causes deduplicate while first time and provenance are retained. |
-| Skills | Local APIs distill, promote, dedupe, recall, and inject earned skills. |
+| Skills | Exact task evidence gates outcome recording, promotion, and authored-first recall. |
 | Install | Host-owned rules, native MCP config, safe adoption, handshake, and activation reports work. |
-| MCP | Closed tools cover phases, actions, HTTP/browser, verify, complete, and reflect. |
+| MCP | Closed tools cover lifecycle, resume/context, and audited skill evolution. |
 | HTTP/browser | Exact scopes, approvals, redaction, state binding, bounded secret transport, artifacts, and replay are enforced. |
 
 ## Still Not Proven
 
-- General `task_resume`/result lookup for interrupted and terminal tasks.
-- MCP skill outcome and HITL promotion operations; current skill APIs are local.
 - Automatic orchestration across install, workflow selection, recovery, verification,
   and reflection as one external-client-owned loop (planned as Spec 007).
 - External App, secret, repository-rule, and autofix operating configuration.

@@ -29,8 +29,9 @@ The core control path is implemented and covered by the regression suite. See
 - Secret safety: skill distillation redacts sensitive keys, nested structures,
   common token shapes, and bearer/basic authorization values.
 
-Do not read this as “the product is finished.” Remaining work is durable
-resume/skill MCP operations and external automation policy/setup.
+Do not read this as “the product is finished.” The numbered harness delivery
+is implemented; external App, secret, repository-rule, and autofix operating
+policy still depends on each host organization.
 
 Canonical references:
 
