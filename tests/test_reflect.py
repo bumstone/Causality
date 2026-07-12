@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.contracts import (
+    AuditEventType,
     EvidenceKind,
     EvidenceRequirement,
     GateDecision,
@@ -153,6 +154,133 @@ class ReflectTests(unittest.TestCase):
             self.assertIn("1 fail", reflection.retrospective.summary)
             self.assertIn("repair=1", reflection.retrospective.summary)
             self.assertEqual(len(reflection.failures), 2)
+
+    def test_normalized_duplicate_failure_is_recorded_once_and_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            memory = TypedMemory(Path(temp_dir))
+            contract = runtime.create_contract(GoalContract("Debug", "deduplicate"))
+            first = runtime.record_verifier(
+                contract,
+                VerifierDecision("Safety", "fail", "Unsafe   Path"),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision(" safety ", "fail", " unsafe path "),
+            )
+
+            initial = reflect_on_contract(
+                runtime.ledger,
+                memory,
+                contract,
+                failure_scope="family a",
+            )
+            replay = reflect_on_contract(
+                runtime.ledger,
+                memory,
+                contract,
+                failure_scope="family a",
+            )
+
+            failures = memory.entries("failures")
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(len(initial.failures), 1)
+            self.assertEqual(len(replay.failures), 1)
+            self.assertEqual(initial.failures[0], replay.failures[0])
+            self.assertEqual(failures[0].provenance, first.entry_hash)
+            self.assertEqual(failures[0].created_at, first.timestamp)
+            self.assertEqual(failures[0].metadata["scope"], "family a")
+
+    def test_phase_verifier_rationale_and_scope_are_cause_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            memory = TypedMemory(Path(temp_dir))
+            contract = runtime.create_contract(GoalContract("Debug", "dimensions"))
+
+            def phase(phase_id: str, status: str) -> None:
+                runtime.ledger.append(
+                    AuditEventType.TASK_OPERATION,
+                    {
+                        "operation": "phase",
+                        "response": {
+                            "phase": {
+                                "phase_id": phase_id,
+                                "status": status,
+                            }
+                        },
+                    },
+                    contract_id=contract.goal_id,
+                )
+
+            phase("debug/one", "running")
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("safety", "fail", "same cause"),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "fail", "same cause"),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("safety", "fail", "different cause"),
+            )
+            phase("debug/one", "failed")
+            phase("debug/two", "running")
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("safety", "fail", "same cause"),
+            )
+
+            first_scope = reflect_on_contract(
+                runtime.ledger,
+                memory,
+                contract,
+                failure_scope="family-a",
+            )
+            second_scope = reflect_on_contract(
+                runtime.ledger,
+                memory,
+                contract,
+                failure_scope="family-b",
+            )
+
+            self.assertEqual(len(first_scope.failures), 4)
+            self.assertEqual(len(second_scope.failures), 4)
+            self.assertEqual(len(memory.entries("failures")), 8)
+            self.assertEqual(
+                {entry.metadata["phase_id"] for entry in first_scope.failures},
+                {"debug/one", "debug/two"},
+            )
+
+    def test_repeated_repair_gate_deduplicates_but_hypothesis_does_not_reflect(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            memory = TypedMemory(Path(temp_dir))
+            contract = runtime.create_contract(GoalContract("Debug", "signals"))
+            for reason in ("Repair   Required", " repair required "):
+                runtime.ledger.append(
+                    AuditEventType.GATE_DECISION,
+                    {"decision": "repair", "reasons": [reason]},
+                    contract_id=contract.goal_id,
+                )
+            runtime.ledger.append(
+                AuditEventType.TASK_OPERATION,
+                {
+                    "operation": "hypothesis",
+                    "response": {
+                        "phase_id": "debug/hypothesis",
+                        "status": "rejected",
+                    },
+                },
+                contract_id=contract.goal_id,
+            )
+
+            reflection = reflect_on_contract(runtime.ledger, memory, contract)
+
+            self.assertEqual(len(reflection.failures), 1)
+            self.assertEqual(len(memory.entries("failures")), 1)
+            self.assertIn("repair gate decision", reflection.failures[0].summary)
 
 
 if __name__ == "__main__":
