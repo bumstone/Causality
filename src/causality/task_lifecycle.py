@@ -8,8 +8,11 @@ result is reported as blocked until a trusted caller records its resolution.
 from __future__ import annotations
 
 import hashlib
+import difflib
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -28,7 +31,15 @@ from .contracts import (
     VerifierDecision,
     utc_now,
 )
-from .durable import file_lock
+from .browser_adapter import (
+    A11yBrowserAdapter,
+    ASSERTION_PROPERTIES,
+    BrowserAction,
+    BrowserContext,
+    INSPECTION_KINDS,
+    REF_RE,
+)
+from .durable import file_lock, write_text_durably
 from .execution import ActionBlocked, ExecutionAdapter
 from .gates import GateResult
 from .http_adapter import (
@@ -49,6 +60,18 @@ SCHEMA_VERSION = 1
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+_BROWSER_TOOL_BY_OPERATION = MappingProxyType(
+    {
+        "observe": "browser.observe",
+        "act": "browser.act",
+        "assert": "browser.assert",
+        "inspect": "browser.inspect",
+        "visual": "browser.visual",
+    }
+)
+_BROWSER_TOOLS = frozenset(_BROWSER_TOOL_BY_OPERATION.values())
+_BROWSER_MODES = frozenset({"interactive", "compact", "full"})
+_MAX_BROWSER_CACHE_BYTES = 8 * 1024 * 1024
 _CALLER_FORBIDDEN_HTTP_HEADERS = frozenset(
     {
         "authorization",
@@ -261,6 +284,21 @@ class _ActionPlan:
     auth_ref: str | None = None
     http_request: HttpRequest | None = None
     expected_statuses: tuple[int, ...] = ()
+    browser: "_BrowserPlan | None" = None
+
+
+@dataclass(frozen=True)
+class _BrowserPlan:
+    operation: str
+    mode: str = "interactive"
+    scope: str | None = None
+    annotate: bool = False
+    action: str | None = None
+    ref: str | None = None
+    value: str | None = None
+    expected_state_hash: str | None = None
+    assertion: str | None = None
+    inspection: str | None = None
 
 
 _TRANSITIONS: Mapping[TaskState, frozenset[TaskState]] = MappingProxyType(
@@ -356,6 +394,18 @@ class TaskSession:
             "terminal": self.terminal,
             "allowed_next": list(self.allowed_next),
         }
+
+
+@dataclass(frozen=True)
+class TaskActionReceipt:
+    session: TaskSession
+    response: Mapping[str, Any]
+    ephemeral: Mapping[str, str] = field(default_factory=dict)
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "response", _freeze(self.response))
+        object.__setattr__(self, "ephemeral", _freeze(self.ephemeral))
 
 
 def _error(
@@ -526,6 +576,7 @@ class TaskLifecycle:
         effect_runner: EffectRunner | None = None,
         http_adapter: HttpAdapter | None = None,
         http_credentials: Mapping[str, Mapping[str, str]] | None = None,
+        browser_adapter: A11yBrowserAdapter | None = None,
     ):
         self.project_root = Path(project_root).resolve()
         self.ledger = EvidenceLedger(
@@ -543,6 +594,15 @@ class TaskLifecycle:
             lambda _approver, _stage, _proof: False
         )
         self.effect_runner = effect_runner
+        self.browser_adapter = browser_adapter
+        enabled_browser_tools = self.policy.allowed_tools & _BROWSER_TOOLS
+        if enabled_browser_tools and self.browser_adapter is None:
+            raise ValueError("browser tools require an explicitly configured driver")
+        if self.browser_adapter is not None:
+            if self.browser_adapter.timeout_seconds > self.policy.max_timeout_seconds:
+                raise ValueError("browser adapter timeout may not exceed TaskPolicy")
+            if enabled_browser_tools:
+                self.browser_adapter.capabilities()
         self.http_adapter = http_adapter or HttpAdapter(
             max_request_bytes=self.policy.max_http_request_bytes,
             max_response_bytes=self.policy.max_http_response_bytes,
@@ -1198,6 +1258,153 @@ class TaskLifecycle:
             expected_statuses=expected_statuses,
         )
 
+    @staticmethod
+    def _browser_ref(value: Any, field_name: str) -> str:
+        if not isinstance(value, str) or not REF_RE.fullmatch(value):
+            raise _error(
+                "validation_error",
+                f"{field_name} must be a stable browser ref (@eN or @cN)",
+            )
+        return value
+
+    @staticmethod
+    def _browser_state_hash(value: Any) -> str:
+        if not isinstance(value, str) or not _SHA256.fullmatch(value):
+            raise _error(
+                "validation_error",
+                "expected_state_hash must be a lowercase SHA-256",
+            )
+        return value
+
+    def _normalize_browser_action(self, action: Mapping[str, Any]) -> _ActionPlan:
+        if any(not isinstance(name, str) for name in action):
+            raise _error("validation_error", "browser action field names must be text")
+        operation = action.get("operation")
+        if operation not in _BROWSER_TOOL_BY_OPERATION:
+            raise _error("validation_error", "browser operation is not supported")
+        common = {"kind", "operation"}
+        fields = {
+            "observe": (common | {"mode", "scope", "annotate"}, common),
+            "act": (
+                common | {"action", "ref", "value", "expected_state_hash"},
+                common | {"action", "ref", "expected_state_hash"},
+            ),
+            "assert": (
+                common | {"property", "ref", "expected_state_hash"},
+                common | {"property", "ref", "expected_state_hash"},
+            ),
+            "inspect": (
+                common | {"inspection", "ref", "expected_state_hash"},
+                common | {"inspection", "ref", "expected_state_hash"},
+            ),
+            "visual": (
+                common | {"ref", "expected_state_hash"},
+                common | {"expected_state_hash"},
+            ),
+        }
+        allowed, required = fields[operation]
+        unknown = set(action) - allowed
+        missing = required - set(action)
+        if unknown or missing:
+            raise _error(
+                "validation_error",
+                "browser action fields do not match the operation",
+                unknown=sorted(unknown),
+                missing=sorted(missing),
+            )
+
+        mode = action.get("mode", "interactive")
+        scope = action.get("scope")
+        annotate = action.get("annotate", False)
+        browser_action = action.get("action")
+        ref = action.get("ref")
+        value = action.get("value")
+        expected = action.get("expected_state_hash")
+        assertion = action.get("property")
+        inspection = action.get("inspection")
+        if operation == "observe":
+            if mode not in _BROWSER_MODES:
+                raise _error("validation_error", "browser observe mode is invalid")
+            if scope is not None:
+                scope = self._browser_ref(scope, "scope")
+            if not isinstance(annotate, bool):
+                raise _error("validation_error", "browser annotate must be a boolean")
+        else:
+            expected = self._browser_state_hash(expected)
+            if operation in {"act", "assert", "inspect"}:
+                ref = self._browser_ref(ref, "ref")
+            elif ref is not None:
+                ref = self._browser_ref(ref, "ref")
+        if operation == "act":
+            if browser_action not in {"click", "fill", "hover", "press", "select"}:
+                raise _error("validation_error", "browser action type is invalid")
+            if browser_action in {"fill", "press", "select"} and not isinstance(
+                value, str
+            ):
+                raise _error(
+                    "validation_error", f"browser {browser_action} requires text value"
+                )
+            if browser_action in {"click", "hover"} and value is not None:
+                raise _error(
+                    "validation_error", f"browser {browser_action} rejects value"
+                )
+            if (
+                isinstance(value, str)
+                and self.browser_adapter is not None
+                and len(value.encode("utf-8"))
+                > self.browser_adapter.max_action_value_bytes
+            ):
+                raise _error(
+                    "validation_error",
+                    "browser action value exceeds the server limit",
+                )
+        if operation == "assert" and assertion not in ASSERTION_PROPERTIES:
+            raise _error("validation_error", "browser assertion property is invalid")
+        if operation == "inspect" and inspection not in INSPECTION_KINDS:
+            raise _error("validation_error", "browser inspection kind is invalid")
+
+        browser = _BrowserPlan(
+            operation=operation,
+            mode=mode,
+            scope=scope,
+            annotate=annotate,
+            action=browser_action,
+            ref=ref,
+            value=value,
+            expected_state_hash=expected,
+            assertion=assertion,
+            inspection=inspection,
+        )
+        descriptor: dict[str, Any] = {
+            "kind": "browser",
+            "operation": operation,
+        }
+        if operation == "observe":
+            descriptor.update({"mode": mode, "scope": scope, "annotate": annotate})
+        else:
+            descriptor.update({"ref": ref, "expected_state_hash": expected})
+        if operation == "act":
+            encoded = (value or "").encode("utf-8")
+            descriptor.update(
+                {
+                    "action": browser_action,
+                    "value_bytes": len(encoded),
+                    "value_sha256": hashlib.sha256(encoded).hexdigest(),
+                }
+            )
+        elif operation == "assert":
+            descriptor["property"] = assertion
+        elif operation == "inspect":
+            descriptor["inspection"] = inspection
+        tool = _BROWSER_TOOL_BY_OPERATION[operation]
+        return _ActionPlan(
+            descriptor=descriptor,
+            tool=tool,
+            action_kind="external_send" if operation == "act" else "tool_call",
+            description=f"browser {operation}",
+            browser=browser,
+        )
+
     def _normalize_action(
         self,
         session: TaskSession,
@@ -1208,6 +1415,14 @@ class TaskLifecycle:
         kind = action.get("kind", action.get("type"))
         contract = self._contract(session)
         allowed = set(contract.permissions.allowed_tools) & self.policy.allowed_tools
+        if kind == "browser":
+            plan = self._normalize_browser_action(action)
+            if plan.tool not in allowed:
+                raise _error(
+                    "action_blocked",
+                    f"tool is outside effective policy: {plan.tool}",
+                )
+            return plan
         if kind == "http":
             if "http" not in allowed:
                 raise _error(
@@ -1288,6 +1503,421 @@ class TaskLifecycle:
                 "credential alias is outside the current server policy",
             )
 
+    def _browser_context(
+        self,
+        task_id: str,
+        contract: GoalContract,
+    ) -> BrowserContext:
+        session_id = hashlib.sha256(
+            (f"{str(self.project_root).casefold()}\0{task_id}").encode("utf-8")
+        ).hexdigest()
+        profile = self._browser_runtime_directory("sessions", session_id)
+        return BrowserContext(
+            session_id,
+            profile,
+            tuple(contract.permissions.network_scope),
+        )
+
+    def _browser_runtime_directory(self, *parts: str) -> Path:
+        directory = self.project_root / ".causality"
+        for part in (None, "browser", *parts):
+            if part is not None:
+                directory /= part
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                status = directory.lstat()
+                if not stat.S_ISDIR(status.st_mode) or not _within(
+                    directory.resolve(), self.project_root
+                ):
+                    raise _error(
+                        "browser_runtime_invalid",
+                        "browser runtime directory escapes the project",
+                    )
+            except OSError as exc:
+                raise _error(
+                    "browser_runtime_invalid",
+                    "browser runtime directory is unavailable",
+                ) from exc
+            try:
+                directory.chmod(0o700)
+            except OSError:
+                pass
+        return directory
+
+    def _browser_internal_path(
+        self,
+        category: str,
+        context: BrowserContext,
+        operation_id: str,
+        suffix: str,
+    ) -> Path:
+        directory = self._browser_runtime_directory(category, context.session_id)
+        return directory / f"{operation_id}{suffix}"
+
+    def _write_browser_cache(
+        self,
+        context: BrowserContext,
+        operation_id: str,
+        payload: Mapping[str, str],
+    ) -> dict[str, object]:
+        encoded = json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        size = len(encoded.encode("utf-8"))
+        if size > _MAX_BROWSER_CACHE_BYTES:
+            raise _error(
+                "browser_output_too_large",
+                "browser replay cache exceeds the server limit",
+            )
+        path = self._browser_internal_path(
+            "observations", context, operation_id, ".json"
+        )
+        write_text_durably(path, encoded)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return {"path": str(path), "bytes": size, "sha256": sha256_file(path)}
+
+    def _read_browser_cache(self, response: Mapping[str, Any]) -> dict[str, str]:
+        cache = response.get("cache")
+        if cache is None:
+            return {}
+        if not isinstance(cache, Mapping):
+            raise _error("browser_cache_invalid", "browser replay cache metadata is invalid")
+        raw_path = cache.get("path")
+        expected_size = cache.get("bytes")
+        expected_hash = cache.get("sha256")
+        if (
+            not isinstance(raw_path, str)
+            or isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+            or not isinstance(expected_hash, str)
+            or not _SHA256.fullmatch(expected_hash)
+        ):
+            raise _error("browser_cache_invalid", "browser replay cache metadata is invalid")
+        path = Path(raw_path)
+        root = self.project_root / ".causality" / "browser" / "observations"
+        try:
+            if not _within(root.resolve(), self.project_root):
+                raise _error(
+                    "browser_cache_invalid", "browser replay root escapes the project"
+                )
+            if not _within(path.resolve(), root.resolve()):
+                raise _error(
+                    "browser_cache_invalid", "browser replay cache escapes runtime state"
+                )
+            status = path.lstat()
+            if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+                raise _error(
+                    "browser_cache_invalid", "browser replay cache is not a private file"
+                )
+            if status.st_size != expected_size or status.st_size > _MAX_BROWSER_CACHE_BYTES:
+                raise _error(
+                    "browser_cache_invalid", "browser replay cache size changed"
+                )
+            with path.open("rb") as handle:
+                opened = os.fstat(handle.fileno())
+                if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                    raise _error(
+                        "browser_cache_invalid",
+                        "browser replay cache changed while opening",
+                    )
+                raw = handle.read(_MAX_BROWSER_CACHE_BYTES + 1)
+        except FileNotFoundError as exc:
+            raise _error(
+                "browser_cache_invalid",
+                "browser replay cache is missing; use a new idempotency key",
+            ) from exc
+        except OSError as exc:
+            raise _error(
+                "browser_cache_invalid", "browser replay cache cannot be read"
+            ) from exc
+        if len(raw) != expected_size or hashlib.sha256(raw).hexdigest() != expected_hash:
+            raise _error("browser_cache_invalid", "browser replay cache hash changed")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _error("browser_cache_invalid", "browser replay cache is invalid JSON") from exc
+        if not isinstance(value, dict) or any(
+            not isinstance(name, str) or not isinstance(item, str)
+            for name, item in value.items()
+        ):
+            raise _error("browser_cache_invalid", "browser replay cache payload is invalid")
+        return value
+
+    def _latest_browser_state_hash(self, task_id: str) -> str | None:
+        for event in reversed(
+            self.ledger.events_for_contract(task_id, all_segments=True)
+        ):
+            if event.event_type != TASK_ACTION_RESULT:
+                continue
+            descriptor = event.payload.get("descriptor")
+            response = event.payload.get("response")
+            if (
+                not isinstance(descriptor, Mapping)
+                or descriptor.get("kind") != "browser"
+                or not isinstance(response, Mapping)
+            ):
+                continue
+            for field_name in ("after_state_hash", "state_hash"):
+                value = response.get(field_name)
+                if isinstance(value, str) and _SHA256.fullmatch(value):
+                    return value
+        return None
+
+    @staticmethod
+    def _browser_text_diff(before: str, after: str) -> str:
+        return "\n".join(
+            difflib.unified_diff(
+                before.splitlines(),
+                after.splitlines(),
+                fromfile="before",
+                tofile="after",
+                lineterm="",
+            )
+        )
+
+    def _current_browser_observation(
+        self,
+        task_id: str,
+        plan: _BrowserPlan,
+        context: BrowserContext,
+    ):
+        assert self.browser_adapter is not None
+        latest = self._latest_browser_state_hash(task_id)
+        if latest is None or latest != plan.expected_state_hash:
+            raise _error(
+                "browser_state_mismatch",
+                "expected_state_hash is not the latest task browser observation",
+            )
+        current = self.browser_adapter.observe("interactive", context=context)
+        if current.state_hash != plan.expected_state_hash:
+            raise _error(
+                "browser_state_mismatch",
+                "browser state changed; observe again with a new idempotency key",
+            )
+        if plan.ref is not None and plan.ref not in set(REF_RE.findall(current.snapshot)):
+            raise _error(
+                "browser_state_mismatch",
+                "stable ref is absent from the current browser observation",
+            )
+        return current
+
+    def _execute_browser_action(
+        self,
+        task_id: str,
+        operation_id: str,
+        plan: _BrowserPlan,
+        contract: GoalContract,
+        before_effect: Callable[[], None],
+    ) -> tuple[dict[str, Any], dict[str, str], tuple[Path, ...]]:
+        adapter = self.browser_adapter
+        if adapter is None:
+            raise _error("policy_denied", "browser driver is not configured")
+        context = self._browser_context(task_id, contract)
+        operation = plan.operation
+        artifact_paths: list[Path] = []
+        ephemeral: dict[str, str] = {}
+
+        if operation == "observe":
+            annotated = (
+                self._browser_internal_path(
+                    "artifacts", context, operation_id, ".annotated.png"
+                )
+                if plan.annotate
+                else None
+            )
+            before_effect()
+            observation = adapter.observe(
+                plan.mode,
+                scope=plan.scope,
+                annotate_path=annotated,
+                context=context,
+            )
+            canonical = (
+                observation
+                if plan.mode == "interactive" and plan.scope is None
+                else adapter.observe("interactive", context=context)
+            )
+            ephemeral = {"snapshot": observation.snapshot}
+            cache = self._write_browser_cache(context, operation_id, ephemeral)
+            artifact_paths.append(Path(str(cache["path"])))
+            artifact_paths.extend(Path(item.path) for item in observation.artifacts)
+            metadata = observation.to_metadata()
+            metadata.update(
+                {
+                    "snapshot_hash": observation.state_hash,
+                    "state_hash": canonical.state_hash,
+                    "state_line_count": canonical.line_count,
+                    "state_ref_count": canonical.ref_count,
+                }
+            )
+            result = {
+                "kind": "browser",
+                "operation": operation,
+                **metadata,
+                "cache": cache,
+            }
+            return result, ephemeral, tuple(artifact_paths)
+
+        current = self._current_browser_observation(task_id, plan, context)
+        if operation == "act":
+            before_diagnostics = adapter.diagnostics(context=context)
+            before_effect()
+            adapter.act(
+                BrowserAction(plan.ref or "", plan.action or "click", plan.value),
+                context=context,
+            )
+            after = adapter.observe("interactive", context=context)
+            after_diagnostics = adapter.diagnostics(context=context)
+            ephemeral = {
+                "after_snapshot": after.snapshot,
+                "diff": self._browser_text_diff(current.snapshot, after.snapshot),
+                "console_delta": self._browser_text_diff(
+                    before_diagnostics.console, after_diagnostics.console
+                ),
+                "network_delta": self._browser_text_diff(
+                    before_diagnostics.network, after_diagnostics.network
+                ),
+            }
+            cache = self._write_browser_cache(context, operation_id, ephemeral)
+            artifact_paths.append(Path(str(cache["path"])))
+            result = {
+                "kind": "browser",
+                "operation": operation,
+                "action": plan.action,
+                "ref": plan.ref,
+                "before_state_hash": current.state_hash,
+                "after_state_hash": after.state_hash,
+                "changed": current.state_hash != after.state_hash,
+                "after_line_count": after.line_count,
+                "after_ref_count": after.ref_count,
+                "diff_bytes": utf8_size(ephemeral["diff"]),
+                "diff_sha256": sha256_text(ephemeral["diff"]),
+                "console_delta_bytes": utf8_size(ephemeral["console_delta"]),
+                "console_delta_sha256": sha256_text(ephemeral["console_delta"]),
+                "network_delta_bytes": utf8_size(ephemeral["network_delta"]),
+                "network_delta_sha256": sha256_text(ephemeral["network_delta"]),
+                "cache": cache,
+            }
+            return result, ephemeral, tuple(artifact_paths)
+
+        before_effect()
+        if operation == "assert":
+            command = adapter.assert_state(
+                plan.assertion or "visible", plan.ref or "", context=context
+            )
+            ephemeral = {"assertion_output": command.stdout.strip()}
+            cache = self._write_browser_cache(context, operation_id, ephemeral)
+            artifact_paths.append(Path(str(cache["path"])))
+            result = {
+                "kind": "browser",
+                "operation": operation,
+                "property": plan.assertion,
+                "ref": plan.ref,
+                "state_hash": current.state_hash,
+                "passed": command.stdout.strip().casefold() in {"true", "1", "yes", "ok"},
+                "output_bytes": utf8_size(command.stdout),
+                "output_sha256": sha256_text(command.stdout),
+                "cache": cache,
+            }
+        elif operation == "inspect":
+            command = adapter.inspect(
+                plan.ref or "", plan.inspection or "attrs", context=context
+            )
+            ephemeral = {"inspection": command.stdout}
+            cache = self._write_browser_cache(context, operation_id, ephemeral)
+            artifact_paths.append(Path(str(cache["path"])))
+            result = {
+                "kind": "browser",
+                "operation": operation,
+                "inspection": plan.inspection,
+                "ref": plan.ref,
+                "state_hash": current.state_hash,
+                "output_bytes": utf8_size(command.stdout),
+                "output_sha256": sha256_text(command.stdout),
+                "cache": cache,
+            }
+        else:
+            artifact_path = self._browser_internal_path(
+                "artifacts", context, operation_id, ".png"
+            )
+            artifact = adapter.visual(
+                artifact_path,
+                target_ref=plan.ref,
+                context=context,
+            )
+            artifact_paths.append(Path(artifact.path))
+            result = {
+                "kind": "browser",
+                "operation": operation,
+                "ref": plan.ref,
+                "state_hash": current.state_hash,
+                "artifact": artifact.to_metadata(),
+            }
+        return result, ephemeral, tuple(artifact_paths)
+
+    def _record_browser_provenance(
+        self,
+        task_id: str,
+        operation_id: str,
+        plan: _ActionPlan,
+        contract: GoalContract,
+        result: Mapping[str, Any],
+        artifact_paths: tuple[Path, ...],
+    ) -> tuple[str, ...]:
+        assert plan.browser is not None
+        operation = plan.browser.operation
+        event = self.ledger.append(
+            (
+                AuditEventType.BROWSER_ACTION
+                if operation == "act"
+                else AuditEventType.BROWSER_OBSERVATION
+            ),
+            {
+                "schema_version": SCHEMA_VERSION,
+                "task_id": task_id,
+                "operation_id": operation_id,
+                "tool": plan.tool,
+                "action_kind": plan.action_kind,
+                "operation": operation,
+                "result_sha256": canonical_sha256(result),
+                "result": dict(result),
+                "mutates_task": operation == "act",
+            },
+            contract_id=task_id,
+            artifact_paths=artifact_paths,
+        )
+        kinds = {
+            "observe": (EvidenceKind.A11Y_REPORT,),
+            "act": (EvidenceKind.BROWSER_DIFF, EvidenceKind.A11Y_REPORT),
+            "assert": (EvidenceKind.A11Y_REPORT,),
+            "inspect": (EvidenceKind.A11Y_REPORT,),
+            "visual": (EvidenceKind.ARTIFACT_HASH,),
+        }[operation]
+        hashes = [event.entry_hash]
+        for kind in kinds:
+            evidence = self.runtime.record_evidence(
+                contract,
+                kind,
+                {
+                    "task_id": task_id,
+                    "operation_id": operation_id,
+                    "operation": operation,
+                    "result_sha256": canonical_sha256(result),
+                    "browser_event_hash": event.entry_hash,
+                },
+                artifact_paths,
+            )
+            hashes.append(evidence.entry_hash)
+        return tuple(hashes)
+
     def action(
         self,
         task_id: str,
@@ -1295,6 +1925,19 @@ class TaskLifecycle:
         *,
         idempotency_key: str,
     ) -> TaskSession:
+        return self.perform_action(
+            task_id,
+            action,
+            idempotency_key=idempotency_key,
+        ).session
+
+    def perform_action(
+        self,
+        task_id: str,
+        action: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> TaskActionReceipt:
         key = _idempotency_key(idempotency_key)
         with self.runtime.execution_lock():
             session = self.get(task_id)
@@ -1316,8 +1959,13 @@ class TaskLifecycle:
                             reason="action outcome is uncertain",
                             cause_event_hash=prior.event_hashes[-1],
                         )
-                        return self.get(task_id)
-                    return session
+                        session = self.get(task_id)
+                    response = (
+                        _thaw(prior.response)
+                        if isinstance(prior.response, Mapping)
+                        else {}
+                    )
+                    return TaskActionReceipt(session, response, replayed=True)
             plan = self._normalize_action(session, action)
             descriptor = plan.descriptor
             tool = plan.tool
@@ -1334,9 +1982,34 @@ class TaskLifecycle:
                             reason="action outcome is uncertain",
                             cause_event_hash=prior.event_hashes[-1],
                         )
-                        return self.get(task_id)
-                    return session
+                        session = self.get(task_id)
+                    response = (
+                        _thaw(prior.response)
+                        if isinstance(prior.response, Mapping)
+                        else {}
+                    )
+                    ephemeral = (
+                        self._read_browser_cache(response)
+                        if plan.browser is not None
+                        else {}
+                    )
+                    return TaskActionReceipt(session, response, ephemeral, replayed=True)
             self._enforce_current_http_policy(plan)
+            if plan.browser is not None:
+                contract = self._contract(session)
+                denied_origins = (
+                    set(contract.permissions.network_scope)
+                    - self.policy.allowed_network_origins
+                )
+                if (
+                    self.browser_adapter is None
+                    or plan.tool not in self.policy.allowed_tools
+                    or denied_origins
+                ):
+                    raise _error(
+                        "policy_denied",
+                        "browser capability or network scope is no longer available",
+                    )
             session = self._ensure_executing(session)
             operation_id = self._operation_id(task_id, "action", key, digest)
             intent: LedgerEvent | None = None
@@ -1359,8 +2032,11 @@ class TaskLifecycle:
                     contract_id=task_id,
                 )
 
-            execution = ExecutionAdapter(self.runtime, self._contract(session))
-            provenance: str | None = None
+            execution_contract = self._contract(session)
+            execution = ExecutionAdapter(self.runtime, execution_contract)
+            provenance: tuple[str, ...] = ()
+            ephemeral: dict[str, str] = {}
+            browser_artifact_paths: tuple[Path, ...] = ()
             try:
                 if plan.http_request is not None:
                     def run_http() -> Mapping[str, Any]:
@@ -1421,7 +2097,39 @@ class TaskLifecycle:
                         contract_id=task_id,
                         artifact_paths=artifact_paths,
                     )
-                    provenance = event.entry_hash
+                    provenance = (event.entry_hash,)
+                elif plan.browser is not None:
+                    browser_contract = execution_contract
+
+                    def run_browser() -> Mapping[str, Any]:
+                        nonlocal ephemeral, browser_artifact_paths
+                        result, ephemeral, browser_artifact_paths = self._execute_browser_action(
+                            task_id,
+                            operation_id,
+                            plan.browser,
+                            browser_contract,
+                            before_effect,
+                        )
+                        return result
+
+                    raw = execution.execute(
+                        tool=tool,
+                        action_kind=action_kind,
+                        description=description,
+                        network_origins=browser_contract.permissions.network_scope,
+                        run=run_browser,
+                    )
+                    if not isinstance(raw, Mapping):
+                        raise ValueError("browser adapter must return a mapping")
+                    result = _thaw(_freeze(dict(raw)))
+                    provenance = self._record_browser_provenance(
+                        task_id,
+                        operation_id,
+                        plan,
+                        browser_contract,
+                        result,
+                        browser_artifact_paths,
+                    )
                 elif self.effect_runner is not None:
                     def run_injected() -> Mapping[str, Any]:
                         before_effect()
@@ -1449,7 +2157,7 @@ class TaskLifecycle:
                         },
                         contract_id=task_id,
                     )
-                    provenance = event.entry_hash
+                    provenance = (event.entry_hash,)
                 else:
                     tools = ToolAdapter(self.ledger, execution, root=self.project_root)
                     if descriptor["kind"] == "file_read":
@@ -1488,7 +2196,9 @@ class TaskLifecycle:
                             "stdout_sha256": sha256_text(completed.stdout),
                             "stderr_sha256": sha256_text(completed.stderr),
                         }
-                    provenance = tools.last_event_hash
+                    provenance = (
+                        (tools.last_event_hash,) if tools.last_event_hash is not None else ()
+                    )
             except ActionBlocked as exc:
                 raise _error(
                     "approval_required"
@@ -1519,11 +2229,14 @@ class TaskLifecycle:
                 if plan.http_request is not None:
                     phase = "after intent" if intent is not None else "before effect"
                     message = f"HTTP action failed {phase}: {type(exc).__name__}"
+                elif plan.browser is not None:
+                    phase = "after intent" if intent is not None else "before effect"
+                    message = f"browser action failed {phase}: {type(exc).__name__}"
                 else:
                     message = f"action failed: {type(exc).__name__}: {exc}"
                 raise _error("action_failed", message) from exc
 
-            if intent is None or provenance is None:
+            if intent is None or not provenance:
                 raise RuntimeError("action completed without durable intent/provenance")
             self.ledger.append(
                 AuditEventType.TASK_ACTION_RESULT,
@@ -1538,11 +2251,16 @@ class TaskLifecycle:
                     "outcome": "completed",
                     "result": result,
                     "response": result,
-                    "provenance_event_hashes": [provenance],
+                    "provenance_event_hashes": list(provenance),
                 },
                 contract_id=task_id,
             )
-            return self.get(task_id)
+            return TaskActionReceipt(
+                self.get(task_id),
+                result,
+                ephemeral,
+                replayed=False,
+            )
 
     def _durable_state(self, task_id: str) -> TaskState:
         snapshot = self.ledger.contract_snapshot(task_id)

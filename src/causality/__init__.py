@@ -46,6 +46,7 @@ from .browser_adapter import A11yBrowserAdapter
 from .task_lifecycle import (
     IdempotencyRecord,
     PendingIntent,
+    TaskActionReceipt,
     TaskLifecycle,
     TaskLifecycleError,
     TaskPolicy,
@@ -95,6 +96,7 @@ __all__ = [
     "StepOutcome",
     "TaskContract",
     "TaskLifecycle",
+    "TaskActionReceipt",
     "TaskLifecycleError",
     "TaskPolicy",
     "TaskRun",
