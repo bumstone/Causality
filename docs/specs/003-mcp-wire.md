@@ -1,13 +1,15 @@
 # Spec 003 — MCP Wire Contract
 
-Status: implemented. `tools/list.inputSchema` is normative and closed;
-validation precedes ledger writes.
+Status: implemented.
 
 ## Inputs
 
-Mutations require nonblank `idempotency_key`; follow-ups require `task_id`.
-`begin` requires objective, risk, permissions, verification requirements, stop
-condition, and key.
+Mutations need a nonblank key; follow-ups need `task_id`. `begin` also needs
+objective, risk, permissions, verification requirements, and stop condition.
+
+Begin evidence kinds are `test_output|browser_diff|artifact_hash|tool_output|a11y_report|verification_result`.
+`append_evidence` produces the first five;
+`verify` produces the last.
 
 | Tool | Extra fields (`?` optional) |
 | --- | --- |
@@ -20,27 +22,27 @@ condition, and key.
 | reflect | scope?, ttl_days? |
 | append_evidence | kind, payload, artifact_paths? |
 
-Manual verify also requires evidence_hash, approved, approver, rationale, proof.
-Arrays are never string-coerced; text values are nonblank. Resolution is
+Manual verify needs evidence_hash, approved, approver, rationale, and proof.
+Arrays stay arrays; text is nonblank. Resolution is
 `applied|not_applied|reject`; only `not_applied` reopens.
 
 ## Outputs and state
 
-Success: `{ok,task,event_hash,idempotency:{key,replayed},data}`. Failure sets
-`isError`: `{ok:false,error:{code,message,retryable,details},task?}`. Same
-key+digest replays. Complete maps PASS→verified, REPAIR→executing,
+Success: `{ok,task,event_hash,idempotency:{key,replayed},data}`. Errors set
+`isError` and return `{ok:false,error:{code,message,retryable,details},task?}`.
+Same key+digest replays. Complete maps PASS→verified, REPAIR→executing, and
 ESCALATE/STOP→blocked. Terminal states never reopen.
 
 ## Error triggers
 
-- `validation_error`: shape/type/enum/blank failure; no write.
+- `validation_error`: invalid shape/type/enum/blank; no write.
 - `policy_denied`: request exceeds frozen policy.
 - `approval_required`: untrusted proof; default deny.
 - `task_blocked|unresolved_action_intent`: resolve uncertain work.
 - `recovery_in_progress`: another decision owns the effect.
 - `completion_snapshot_stale`: PASS snapshot has a later task event or current
-  workspace fingerprint differs; retry needs fresh evidence and a new key.
+  workspace differs; retry needs fresh evidence and a new key.
 - `task_terminal`: new work after terminal.
 
-Partial ESCALATE/STOP and rejection decisions block effects immediately.
-Bad stdio is recoverable; notifications have no response.
+Partial ESCALATE/STOP and rejection block effects. Bad stdio is recoverable;
+notifications have no response.

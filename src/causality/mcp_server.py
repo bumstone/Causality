@@ -78,6 +78,17 @@ _KEY = {
 }
 _HASH = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
 _COMMON = {"task_id": _TEXT, "idempotency_key": _KEY}
+_MCP_EVIDENCE_KINDS = tuple(
+    kind.value
+    for kind in (
+        EvidenceKind.TEST_OUTPUT,
+        EvidenceKind.BROWSER_DIFF,
+        EvidenceKind.ARTIFACT_HASH,
+        EvidenceKind.TOOL_OUTPUT,
+        EvidenceKind.A11Y_REPORT,
+        EvidenceKind.VERIFICATION_RESULT,
+    )
+)
 
 
 def _tool(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]:
@@ -265,7 +276,7 @@ class CausalityMCPServer:
                                 {
                                     "kind": {
                                         "type": "string",
-                                        "enum": [kind.value for kind in EvidenceKind],
+                                        "enum": list(_MCP_EVIDENCE_KINDS),
                                     },
                                     "description": _TEXT,
                                     "required": {"type": "boolean"},
@@ -489,11 +500,11 @@ class CausalityMCPServer:
                 if (
                     not isinstance(kind, str)
                     or not kind.strip()
-                    or kind not in {item.value for item in EvidenceKind}
+                    or kind not in _MCP_EVIDENCE_KINDS
                 ):
                     raise TaskLifecycleError(
                         "validation_error",
-                        "evidence kind must be a valid EvidenceKind string",
+                        "evidence kind cannot be produced by MCP task tools",
                     )
                 description = raw["description"]
                 if not isinstance(description, str) or not description.strip():

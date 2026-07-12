@@ -15,7 +15,6 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.mcp_server import CausalityMCPServer
-from causality.contracts import EvidenceKind
 from causality.task_lifecycle import TaskLifecycle
 
 
@@ -248,7 +247,14 @@ class MCPServerTests(unittest.TestCase):
             evidence_item = begin["properties"]["evidence_required"]["items"]
             self.assertEqual(
                 set(evidence_item["properties"]["kind"]["enum"]),
-                {kind.value for kind in EvidenceKind},
+                {
+                    "test_output",
+                    "browser_diff",
+                    "artifact_hash",
+                    "tool_output",
+                    "a11y_report",
+                    "verification_result",
+                },
             )
 
             for name in LIFECYCLE_TOOLS - {"causality_task_begin"}:
@@ -371,6 +377,8 @@ class MCPServerTests(unittest.TestCase):
         malformed = (
             {"kind": "", "description": "output", "required": True},
             {"kind": "not_evidence", "description": "output", "required": True},
+            {"kind": "human_approval", "description": "output", "required": True},
+            {"kind": "verifier_pass", "description": "output", "required": True},
             {"kind": 7, "description": "output", "required": True},
             {"kind": "tool_output", "description": " ", "required": True},
             {"kind": "tool_output", "description": 7, "required": True},
