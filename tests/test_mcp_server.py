@@ -15,7 +15,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.mcp_server import CausalityMCPServer
-from causality.task_lifecycle import TaskLifecycle
+from causality.task_lifecycle import TaskLifecycle, TaskPolicy
 
 
 LIFECYCLE_TOOLS = {
@@ -29,7 +29,7 @@ LIFECYCLE_TOOLS = {
     "causality_task_reflect",
 }
 
-WIRE_COMMAND = (sys.executable, "-m", "unittest")
+WIRE_COMMAND = (sys.executable, "-c", "print('wire-pass')")
 
 
 class SimulatedProcessDeath(BaseException):
@@ -67,8 +67,16 @@ class MCPServerTests(unittest.TestCase):
             self.assertFalse((Path(outside) / "ledger.jsonl").exists())
 
     @staticmethod
-    def _server(project: str | Path) -> CausalityMCPServer:
-        return CausalityMCPServer(project)
+    def _server(
+        project: str | Path,
+        *,
+        approval_token: str | None = None,
+    ) -> CausalityMCPServer:
+        return CausalityMCPServer(
+            project,
+            approval_token=approval_token,
+            policy=TaskPolicy(verification_commands=(WIRE_COMMAND,)),
+        )
 
     @staticmethod
     def _begin_arguments(
@@ -867,7 +875,7 @@ class MCPServerTests(unittest.TestCase):
 
     def test_optional_closed_fields_reject_wrong_shapes_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            server = CausalityMCPServer(temp_dir, approval_token="trusted")
+            server = self._server(temp_dir, approval_token="trusted")
             task_id, _ = self._begin(server, key="shape-begin", risk="high")
             rejected_result, rejected = self._call(
                 server,
