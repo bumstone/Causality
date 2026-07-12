@@ -822,7 +822,11 @@ class HITLGate:
         tool passes. When a restriction is declared, a tool outside it
         escalates so a human can decide whether to widen scope.
         """
-        allowed = contract.permissions.allowed_tools
+        snapshot, binding_issue = self._durable_binding(contract)
+        if binding_issue is not None:
+            return binding_issue
+        assert snapshot is not None
+        allowed = snapshot.permissions.allowed_tools
         if allowed and tool not in allowed:
             return self._record(
                 contract,
@@ -837,8 +841,12 @@ class HITLGate:
         A non-goal is a hard boundary, so a match stops the action rather than
         escalating: the contract has already declared this work out of scope.
         """
+        snapshot, binding_issue = self._durable_binding(contract)
+        if binding_issue is not None:
+            return binding_issue
+        assert snapshot is not None
         text = action_desc.lower()
-        for non_goal in contract.non_goals:
+        for non_goal in snapshot.non_goals:
             needle = non_goal.strip().lower()
             if needle and needle in text:
                 return self._record(
@@ -868,7 +876,11 @@ class HITLGate:
         the very trail Reflect later distills (a should_stop observer effect).
         Only a terminal STOP/ESCALATE is a material decision worth a record.
         """
-        policy = contract.stopping_policy
+        snapshot, binding_issue = self._durable_binding(contract)
+        if binding_issue is not None:
+            return binding_issue
+        assert snapshot is not None
+        policy = snapshot.stopping_policy
         iterations = int(iteration_state.get("iterations", 0))
         no_progress = int(iteration_state.get("no_progress_iterations", 0))
         failed = int(iteration_state.get("failed_hypotheses", 0))

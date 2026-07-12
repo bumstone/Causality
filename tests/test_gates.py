@@ -210,6 +210,39 @@ class GateTests(unittest.TestCase):
 
             self.assertEqual(runtime.check_tool_allowed(contract, "anything").decision, GateDecision.PASS)
 
+    def test_public_clause_gates_reject_live_contract_relaxation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            tool_contract = runtime.create_contract(
+                GoalContract(
+                    "Tool",
+                    "frozen allowlist",
+                    permissions=PermissionContract(allowed_tools=("git",)),
+                )
+            )
+            non_goal_contract = runtime.create_contract(
+                GoalContract("Scope", "frozen boundary", non_goals=("forbidden",))
+            )
+            stop_contract = runtime.create_contract(
+                GoalContract("Loop", "frozen limit", stopping_policy={"max_iterations": 1})
+            )
+
+            tool_contract.permissions = PermissionContract()
+            non_goal_contract.non_goals = ()
+            stop_contract.stopping_policy = {"max_iterations": 999}
+
+            for result in (
+                runtime.check_tool_allowed(tool_contract, "shell"),
+                runtime.check_non_goal(non_goal_contract, "forbidden operation"),
+                runtime.should_stop(stop_contract, {"iterations": 1}),
+            ):
+                with self.subTest(result=result):
+                    self.assertEqual(result.decision, GateDecision.REPAIR)
+                    self.assertIn(
+                        "live contract differs from durable contract snapshot",
+                        result.reasons,
+                    )
+
     def test_check_non_goal_stops_on_match(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime = Causality(Path(temp_dir) / "ledger.jsonl")

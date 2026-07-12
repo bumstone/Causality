@@ -1,6 +1,6 @@
 # Causality Project Summary
 
-Baseline: `363` tests pass; Git and ledger retain commit history.
+Baseline: `364` tests pass; Git and ledger retain commit history.
 
 ## What It Is
 
