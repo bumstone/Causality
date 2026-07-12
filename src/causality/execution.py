@@ -15,6 +15,7 @@ loop terminates with the gate's decision instead of silently proceeding.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, TypeVar
 
@@ -52,6 +53,8 @@ class _Gated(Protocol):
     imports the gates), avoiding an import cycle while staying type-checked.
     """
 
+    def frozen_contract(self, contract: GoalContract) -> GoalContract: ...
+    def execution_lock(self) -> AbstractContextManager[None]: ...
     def check_non_goal(self, contract: GoalContract, action_desc: str) -> GateResult: ...
     def check_tool_allowed(self, contract: GoalContract, tool: str) -> GateResult: ...
     def can_execute_action(self, contract: GoalContract, action_kind: str) -> GateResult: ...
@@ -94,6 +97,9 @@ class ExecutionAdapter:
     contract: GoalContract
     recalled_skills: tuple[SkillCandidate, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "contract", self.runtime.frozen_contract(self.contract))
+
     def execute(
         self,
         *,
@@ -112,15 +118,16 @@ class ExecutionAdapter:
         :class:`ActionBlocked`; otherwise ``run`` executes and its result is
         returned.
         """
-        checks = (
-            lambda: self.runtime.check_non_goal(self.contract, description),
-            lambda: self.runtime.check_tool_allowed(self.contract, tool),
-            lambda: self.runtime.can_execute_action(self.contract, action_kind),
-        )
-        for check in checks:
-            result = check()
-            if not result.allowed:
-                raise ActionBlocked(
-                    result, tool=tool, action_kind=action_kind, description=description
-                )
-        return run()
+        with self.runtime.execution_lock():
+            checks = (
+                lambda: self.runtime.check_non_goal(self.contract, description),
+                lambda: self.runtime.check_tool_allowed(self.contract, tool),
+                lambda: self.runtime.can_execute_action(self.contract, action_kind),
+            )
+            for check in checks:
+                result = check()
+                if not result.allowed:
+                    raise ActionBlocked(
+                        result, tool=tool, action_kind=action_kind, description=description
+                    )
+            return run()

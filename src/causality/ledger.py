@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import stat
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -40,6 +41,7 @@ class LedgerEvent:
     artifacts: list[dict[str, Any]]
     previous_hash: str | None
     entry_hash: str
+    anchor_version: int | None = None
 
 
 class EvidenceLedger:
@@ -74,9 +76,9 @@ class EvidenceLedger:
         # internal scans touch the cache directly. (Cross-process concurrency
         # still needs locking -- ADR 0011 R4.)
         self._cached_latest_hash: str | None = None
-        self._synced_size = -1
+        self._synced_token: tuple[object, ...] | None = None
         self._cached_events: list[LedgerEvent] | None = None
-        self._events_synced_size = -1
+        self._events_synced_token: tuple[object, ...] | None = None
         # All JSONL file moves go through one helper so R4b/R4c can add fsync,
         # atomic rewrite, and flock in a single place (ADR 0011 §2.2).
         self._store = DurableJsonl(self.path)
@@ -86,6 +88,24 @@ class EvidenceLedger:
             return self.path.stat().st_size
         except FileNotFoundError:
             return 0
+
+    @staticmethod
+    def _stat_token(path: Path) -> tuple[object, ...]:
+        try:
+            value = path.stat()
+        except FileNotFoundError:
+            return (False,)
+        return (
+            True,
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_ctime_ns,
+            value.st_mtime_ns,
+        )
+
+    def _cache_token(self) -> tuple[object, ...]:
+        return (self._stat_token(self.path), self._stat_token(self._head_path()))
 
     def append(
         self,
@@ -112,6 +132,7 @@ class EvidenceLedger:
                 "payload": payload,
                 "artifacts": artifacts,
                 "previous_hash": previous_hash,
+                "anchor_version": 1,
             }
             entry_hash = sha256_text(_stable_json(entry_without_hash))
             entry = dict(entry_without_hash)
@@ -122,17 +143,21 @@ class EvidenceLedger:
             # The exact JSON row persisted to disk; reused for the warm-cache
             # entry below so a warm read parses the same bytes a cold read would.
             serialized = json.dumps(entry, ensure_ascii=True, sort_keys=True)
-            pre_size = self._current_size()
+            pre_token = self._cache_token()
+            # Two-phase anchor: a crash before the row leaves a removable pending
+            # intent; a crash after the row can safely fast-forward to pending.
+            self._write_anchor(previous_hash, pending=entry_hash)
             self._store.append(serialized, lock=False)
+            self._write_anchor(entry_hash)
             # Resync to the row we just wrote so the next append is O(1) and the
             # size guard stays consistent with what is on disk.
             self._cached_latest_hash = entry_hash
-            new_size = self._current_size()
-            self._synced_size = new_size
+            new_token = self._cache_token()
+            self._synced_token = new_token
             # Keep the parsed-events cache warm across append-then-read, but only
             # when it reflected the file right before this append; otherwise drop
             # it so _load_events() rebuilds under the size guard.
-            if self._cached_events is not None and self._events_synced_size == pre_size:
+            if self._cached_events is not None and self._events_synced_token == pre_token:
                 # Build the cached event from the persisted JSON row, not the
                 # in-memory entry: json normalizes some payloads (tuple->array,
                 # non-str keys->strings), so parsing the row keeps warm reads
@@ -140,29 +165,29 @@ class EvidenceLedger:
                 # cache never aliases the caller's payload (codex r3445847631,
                 # r3445774529).
                 self._cached_events.append(LedgerEvent(**json.loads(serialized)))
-                self._events_synced_size = new_size
+                self._events_synced_token = new_token
             else:
                 self._cached_events = None
-                self._events_synced_size = -1
+                self._events_synced_token = None
         return LedgerEvent(**entry)
 
     def _load_events(self) -> list[LedgerEvent]:
-        # Size-guarded parsed-events cache (R4f). The append log only grows, so a
-        # size change is the same reliable "someone wrote" signal R2 uses for
-        # latest_hash. While the size is unchanged we reuse the parsed list
+        # Identity/metadata-guarded parsed-events cache (R4f). Rotation can
+        # replace the current segment with a same-size file, so size alone is not
+        # a valid generation token. While the token is unchanged we reuse events
         # instead of re-reading + re-parsing the whole file on every call. The
         # returned list is the SHARED cache: callers that may hand events out
         # must go through events()/_isolate(); only read-only internal scans use
         # it directly.
-        size = self._current_size()
-        if self._cached_events is None or size != self._events_synced_size:
+        token = self._cache_token()
+        if self._cached_events is None or token != self._events_synced_token:
             lines, torn = self._store.read_lines_with_torn()
             self._cached_events = [LedgerEvent(**json.loads(line)) for line in lines]
             # A torn tail means stat size counts bytes read_lines just dropped; a
             # later repair+append of the same length would leave the size
             # unchanged and hide the new event. Don't trust the size then --
             # force a re-read next call (codex r3445819560).
-            self._events_synced_size = -1 if torn else size
+            self._events_synced_token = None if torn else token
         return self._cached_events
 
     @staticmethod
@@ -217,8 +242,8 @@ class EvidenceLedger:
         return matches
 
     def latest_hash(self) -> str | None:
-        size = self._current_size()
-        if size != self._synced_size:
+        token = self._cache_token()
+        if token != self._synced_token:
             # First read, or another writer changed the file: recompute + resync.
             # A torn trailing line is ignored when picking the chain anchor, so
             # don't key the cache to a stat size that counts those dropped bytes
@@ -232,20 +257,42 @@ class EvidenceLedger:
                 # prior rotation (if any), so the chain continues across the seam
                 # instead of forking a new genesis (ADR 0011 R4f rotation).
                 self._cached_latest_hash = self._carry_over_head()
-            self._synced_size = -1 if torn else size
+            self._synced_token = None if torn else token
         return self._cached_latest_hash
 
-    def events_for_contract(self, contract_id: str | None) -> list[LedgerEvent]:
+    def events_for_contract(
+        self,
+        contract_id: str | None,
+        *,
+        all_segments: bool = False,
+    ) -> list[LedgerEvent]:
         """Return one contract's events, in order.
 
         Centralizes contract scoping so callers (Reflect, Skill distill) stop
         re-implementing ``event.contract_id == ...`` over a full ledger read.
         """
+        source = (
+            self._archived_events() + self._load_events()
+            if all_segments
+            else self._load_events()
+        )
         return [
             self._isolate(event)
-            for event in self._load_events()
+            for event in source
             if event.contract_id == contract_id
         ]
+
+    def contract_snapshot(self, contract_id: str) -> dict[str, Any] | None:
+        """Return the first durable GOAL_CONTRACT payload for ``contract_id``.
+
+        Completion and verification use this snapshot instead of trusting a
+        mutable in-memory GoalContract that a caller could narrow after binding.
+        Include sealed segments so ledger rotation cannot erase the contract.
+        """
+        for event in self.events_for_contract(contract_id, all_segments=True):
+            if event.event_type == AuditEventType.GOAL_CONTRACT.value:
+                return copy.deepcopy(event.payload)
+        return None
 
     def latest_hash_for_contract(self, contract_id: str | None) -> str | None:
         """Latest entry hash for one contract -- its provenance anchor.
@@ -254,15 +301,14 @@ class EvidenceLedger:
         interleaved multi-contract runs, the global latest hash belongs to a
         different contract and breaks the audit trail (codex review r3382219479).
         """
-        # entry_hash is an immutable str, so scan the shared cache directly
-        # rather than materializing isolated copies just to read one field.
-        latest = None
-        for event in self._load_events():
-            if event.contract_id == contract_id:
-                latest = event.entry_hash
-        return latest
+        events = self.events_for_contract(contract_id, all_segments=True)
+        return events[-1].entry_hash if events else None
 
     def verify_chain(self) -> bool:
+        with file_lock(self.path):
+            return self._verify_chain_locked()
+
+    def _verify_chain_locked(self) -> bool:
         # Integrity check: read straight from disk, NOT the size-guarded cache.
         # A same-length in-place edit (e.g. flipping a payload byte without
         # fixing entry_hash) leaves the file size unchanged, so a cached scan
@@ -273,24 +319,57 @@ class EvidenceLedger:
         # its first entry's previous_hash points at the sealed tail. So the seam
         # is checked, and a tampered archive fails verification too.
         previous_hash = None
-        for segment in self._archive_segments() + [self.path]:
-            for line in DurableJsonl(segment).read_lines():
-                event = LedgerEvent(**json.loads(line))
-                entry = {
-                    "event_id": event.event_id,
-                    "timestamp": event.timestamp,
-                    "event_type": event.event_type,
-                    "contract_id": event.contract_id,
-                    "payload": event.payload,
-                    "artifacts": event.artifacts,
-                    "previous_hash": event.previous_hash,
-                }
-                if event.previous_hash != previous_hash:
+        events: list[LedgerEvent] = []
+        try:
+            archives = self._archive_segments()
+            for segment in archives + [self.path]:
+                lines = DurableJsonl(segment).read_lines()
+                if segment != self.path and not lines:
                     return False
-                if sha256_text(_stable_json(entry)) != event.entry_hash:
-                    return False
-                previous_hash = event.entry_hash
-        return True
+                for line in lines:
+                    event = LedgerEvent(**json.loads(line))
+                    entry = {
+                        "event_id": event.event_id,
+                        "timestamp": event.timestamp,
+                        "event_type": event.event_type,
+                        "contract_id": event.contract_id,
+                        "payload": event.payload,
+                        "artifacts": event.artifacts,
+                        "previous_hash": event.previous_hash,
+                    }
+                    if event.anchor_version is not None:
+                        entry["anchor_version"] = event.anchor_version
+                    if event.previous_hash != previous_hash:
+                        return False
+                    if sha256_text(_stable_json(entry)) != event.entry_hash:
+                        return False
+                    previous_hash = event.entry_hash
+                    events.append(event)
+        except (OSError, TypeError, ValueError):
+            return False
+
+        anchor = self._anchor_state()
+        if anchor is None:
+            if archives or any(event.anchor_version is not None for event in events):
+                return False
+            return True  # legacy, unrotated ledger; next append migrates it
+        committed = anchor.get("committed")
+        pending = anchor.get("pending")
+        if anchor.get("version") == 0:
+            return not any(event.anchor_version is not None for event in events) and committed == previous_hash
+        if anchor.get("version") != 1:
+            return False
+        if pending is None:
+            return committed == previous_hash
+        if previous_hash == pending and events and events[-1].previous_hash == committed:
+            self._write_anchor(pending)
+            self._reset_caches()
+            return True
+        if previous_hash == committed and all(event.entry_hash != pending for event in events):
+            self._write_anchor(committed)
+            self._reset_caches()
+            return True
+        return False
 
     # --- Rotation (ADR 0011 §3): seal a large ledger into archive segments while
     # keeping the hash chain verifiable across the seam. The mechanism is opt-in
@@ -300,25 +379,52 @@ class EvidenceLedger:
     def _head_path(self) -> Path:
         return Path(str(self.path) + ".head")
 
-    def _carry_over_head(self) -> str | None:
-        """The sealed tail hash a fresh current segment must chain onto."""
+    def _anchor_state(self) -> dict[str, Any] | None:
         try:
             text = self._head_path().read_text(encoding="utf-8").strip()
         except FileNotFoundError:
             return None
-        return text or None
+        except (OSError, UnicodeError):
+            return {"version": -1, "committed": None, "pending": None}
+        if not text:
+            return {"version": -1, "committed": None, "pending": None}
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return {"version": 0, "committed": text, "pending": None}
+        return value if isinstance(value, dict) else {"version": -1}
+
+    def _write_anchor(self, committed: str | None, *, pending: str | None = None) -> None:
+        value = {"version": 1, "committed": committed, "pending": pending}
+        write_text_durably(
+            self._head_path(),
+            json.dumps(value, ensure_ascii=True, sort_keys=True) + "\n",
+            lock=False,
+        )
+
+    def _carry_over_head(self) -> str | None:
+        """The committed durable tail a fresh current segment chains onto."""
+        anchor = self._anchor_state()
+        return anchor.get("committed") if anchor else None
 
     def _archive_segments(self) -> list[Path]:
         """Sealed archives ``<path>.1``, ``<path>.2``, ... in chain order."""
-        segments: list[Path] = []
-        sequence = 1
-        while True:
-            segment = self.path.parent / f"{self.path.name}.{sequence}"
-            if not segment.exists():
-                break
-            segments.append(segment)
-            sequence += 1
-        return segments
+        prefix = f"{self.path.name}."
+        try:
+            numbered = sorted(
+                (
+                    int(path.name[len(prefix) :]),
+                    path,
+                )
+                for path in self.path.parent.iterdir()
+                if path.name.startswith(prefix)
+                and path.name[len(prefix) :].isdigit()
+            )
+        except FileNotFoundError:
+            return []
+        if [number for number, _ in numbered] != list(range(1, len(numbered) + 1)):
+            raise ValueError("ledger archive sequence has a gap")
+        return [path for _, path in numbered]
 
     def _archived_events(self) -> list[LedgerEvent]:
         events: list[LedgerEvent] = []
@@ -330,9 +436,9 @@ class EvidenceLedger:
 
     def _reset_caches(self) -> None:
         self._cached_latest_hash = None
-        self._synced_size = -1
+        self._synced_token = None
         self._cached_events = None
-        self._events_synced_size = -1
+        self._events_synced_token = None
 
     def rotate(self) -> Path | None:
         """Seal the current ledger into an archive segment and start a fresh one.
@@ -344,19 +450,24 @@ class EvidenceLedger:
         archive path, or ``None`` if the ledger is empty (nothing to seal).
         """
         with file_lock(self.path):
-            tail = self.latest_hash()
-            if tail is None:
+            if not self._verify_chain_locked():
+                raise RuntimeError("cannot rotate an invalid ledger chain")
+            lines, torn = self._store.read_lines_with_torn()
+            if torn:
+                raise RuntimeError("cannot rotate a torn current ledger segment")
+            if not lines:
                 return None
+            tail = json.loads(lines[-1])["entry_hash"]
             sequence = len(self._archive_segments()) + 1
             archive = self.path.parent / f"{self.path.name}.{sequence}"
+            # Upgrade a legacy no-head ledger before the rename. If the move or
+            # index build then fails, the durable tail still authenticates the
+            # archived/current bytes and a retry can recover the chain.
+            self._write_anchor(tail)
             os.replace(self.path, archive)
             # Build the offset index for the sealed segment so event_count() and
             # events_page() can count/seek it without re-parsing the whole file.
             self._build_index(archive)
-            # Persist the carry-over BEFORE returning so a crash right after the
-            # rename cannot lose the chain anchor (the next append would otherwise
-            # start a new genesis and fork the chain).
-            write_text_durably(self._head_path(), tail + "\n", lock=False)
             self._reset_caches()
         return archive
 
@@ -499,10 +610,20 @@ class EvidenceLedger:
     def _artifact_record(path: str | Path) -> dict[str, Any]:
         artifact = Path(path)
         record: dict[str, Any] = {"path": str(artifact)}
-        if artifact.is_file():
+        try:
+            metadata = artifact.lstat()
+        except OSError:
+            record.update({"sha256": None, "file_type": "missing", "missing": True})
+            return record
+        record["mode"] = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISLNK(metadata.st_mode):
+            record.update({"sha256": None, "file_type": "symlink"})
+        elif stat.S_ISREG(metadata.st_mode):
+            record["file_type"] = "file"
             record["sha256"] = sha256_file(artifact)
-            record["bytes"] = artifact.stat().st_size
+            record["bytes"] = metadata.st_size
+        elif stat.S_ISDIR(metadata.st_mode):
+            record.update({"sha256": None, "file_type": "directory"})
         else:
-            record["sha256"] = None
-            record["missing"] = True
+            record.update({"sha256": None, "file_type": "other"})
         return record

@@ -125,6 +125,14 @@ class DurabilityTests(unittest.TestCase):
 
             self.assertEqual(source.read_bytes(), b"")
 
+    def test_file_lock_is_reentrant_when_nested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            with file_lock(path):
+                with file_lock(path):
+                    path.write_text("locked", encoding="utf-8")
+            self.assertEqual(path.read_text(encoding="utf-8"), "locked")
+
     def test_atomic_replace_leaves_no_temp_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)

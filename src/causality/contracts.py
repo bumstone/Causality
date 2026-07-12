@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import math
+import re
+import shlex
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -36,6 +40,7 @@ class EvidenceKind(str, Enum):
     VERIFIER_PASS = "verifier_pass"
     TOOL_OUTPUT = "tool_output"
     A11Y_REPORT = "a11y_report"
+    VERIFICATION_RESULT = "verification_result"
 
 
 class AuditEventType(str, Enum):
@@ -48,6 +53,12 @@ class AuditEventType(str, Enum):
     BROWSER_OBSERVATION = "browser_observation"
     BROWSER_ACTION = "browser_action"
     GATE_DECISION = "gate_decision"
+    TASK_STARTED = "task_started"
+    TASK_OPERATION = "task_operation"
+    TASK_ACTION_INTENT = "task_action_intent"
+    TASK_ACTION_RESULT = "task_action_result"
+    TASK_REFLECTION_INTENT = "task_reflection_intent"
+    TASK_REFLECTED = "task_reflected"
 
 
 class GateDecision(str, Enum):
@@ -132,6 +143,156 @@ class EvidenceRequirement:
         )
 
 
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True)
+class VerificationRequirement:
+    """Executable or explicitly manual completion requirement.
+
+    ``artifact_paths`` maps project-relative paths to an expected SHA-256. A
+    ``None`` value requires only that the artifact exists. Keeping the expected
+    digest in the frozen contract is what makes a "wrong artifact" decidable;
+    hashing only the file produced by the command would merely describe it.
+    """
+
+    id: str
+    argv: tuple[str, ...]
+    expected_exit_codes: tuple[int, ...] = (0,)
+    timeout_seconds: float = 30.0
+    artifact_paths: Mapping[str, str | None] = field(default_factory=dict)
+    required: bool = True
+    manual: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str):
+            raise ValueError("verification requirement id must be a string")
+        if isinstance(self.argv, (str, bytes)) or any(
+            not isinstance(item, str) for item in self.argv
+        ):
+            raise ValueError("argv must be a sequence of strings")
+        if not isinstance(self.required, bool) or not isinstance(self.manual, bool):
+            raise ValueError("required and manual must be booleans")
+        requirement_id = self.id.strip()
+        if not requirement_id:
+            raise ValueError("verification requirement id must be non-blank")
+
+        argv = tuple(self.argv)
+        if self.manual:
+            if argv:
+                raise ValueError("manual verification requirements cannot declare argv")
+        elif not argv or any(not item for item in argv):
+            raise ValueError("executable verification requirements need non-empty argv")
+
+        exit_codes = tuple(self.expected_exit_codes)
+        if not exit_codes or any(
+            not isinstance(code, int) or isinstance(code, bool) for code in exit_codes
+        ):
+            raise ValueError("expected_exit_codes must contain at least one integer")
+
+        if not isinstance(self.timeout_seconds, (int, float)) or isinstance(
+            self.timeout_seconds,
+            bool,
+        ):
+            raise ValueError("timeout_seconds must be a finite number")
+        timeout = float(self.timeout_seconds)
+        if timeout <= 0 or not math.isfinite(timeout):
+            raise ValueError("timeout_seconds must be a finite positive number")
+
+        if not isinstance(self.artifact_paths, Mapping):
+            raise ValueError("artifact_paths must be a path-to-sha256 mapping")
+        artifacts: dict[str, str | None] = {}
+        for raw_path, raw_digest in self.artifact_paths.items():
+            if not isinstance(raw_path, str):
+                raise ValueError("artifact path keys must be strings")
+            path = raw_path.strip()
+            if not path:
+                raise ValueError("artifact path must be non-blank")
+            if raw_digest is not None and not isinstance(raw_digest, str):
+                raise ValueError(f"artifact '{path}' expected hash must be a string")
+            digest = None if raw_digest is None else raw_digest.strip().lower()
+            if digest is not None and not _SHA256_RE.fullmatch(digest):
+                raise ValueError(f"artifact '{path}' expected hash must be SHA-256")
+            artifacts[path] = digest
+        if self.manual and artifacts:
+            raise ValueError(
+                "manual verification requirements cite evidence artifacts; "
+                "they cannot declare artifact_paths"
+            )
+
+        object.__setattr__(self, "id", requirement_id)
+        object.__setattr__(self, "argv", argv)
+        object.__setattr__(self, "expected_exit_codes", tuple(dict.fromkeys(exit_codes)))
+        object.__setattr__(self, "timeout_seconds", timeout)
+        object.__setattr__(self, "artifact_paths", MappingProxyType(artifacts))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "argv": list(self.argv),
+            "expected_exit_codes": list(self.expected_exit_codes),
+            "timeout_seconds": self.timeout_seconds,
+            "artifact_paths": dict(self.artifact_paths),
+            "required": self.required,
+            "manual": self.manual,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "VerificationRequirement":
+        argv = value.get("argv", ())
+        if isinstance(argv, (str, bytes)):
+            raise ValueError("argv must be a sequence of strings")
+        return cls(
+            id=value["id"],
+            argv=tuple(argv),
+            expected_exit_codes=tuple(value.get("expected_exit_codes", (0,))),
+            timeout_seconds=value.get("timeout_seconds", 30.0),
+            artifact_paths=value.get("artifact_paths", {}),
+            required=value.get("required", True),
+            manual=value.get("manual", False),
+        )
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    """Result returned by a verification execution.
+
+    The ledger event cannot include its own entry hash without creating a
+    circular hash. ``event_hash`` is therefore attached to the returned result
+    after the evidence event is appended and is the value verifiers cite.
+    """
+
+    requirement_id: str
+    status: str
+    argv: tuple[str, ...]
+    expected_exit_codes: tuple[int, ...]
+    exit_code: int | None
+    stdout_bytes: int
+    stderr_bytes: int
+    artifact_hashes: Mapping[str, str | None]
+    completed_at: str
+    event_hash: str
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "artifact_hashes", MappingProxyType(dict(self.artifact_hashes)))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requirement_id": self.requirement_id,
+            "status": self.status,
+            "argv": list(self.argv),
+            "expected_exit_codes": list(self.expected_exit_codes),
+            "exit_code": self.exit_code,
+            "stdout_bytes": self.stdout_bytes,
+            "stderr_bytes": self.stderr_bytes,
+            "artifact_hashes": dict(self.artifact_hashes),
+            "completed_at": self.completed_at,
+            "event_hash": self.event_hash,
+            "reason": self.reason,
+        }
+
+
 @dataclass
 class GoalContract:
     title: str
@@ -150,6 +311,25 @@ class GoalContract:
     )
     goal_id: str = field(default_factory=lambda: str(uuid4()))
     created_at: str = field(default_factory=utc_now)
+    verification_requirements: tuple[VerificationRequirement, ...] = ()
+    workspace_root: str = ""
+
+    def __post_init__(self) -> None:
+        try:
+            self.risk = Risk(self.risk)
+        except (TypeError, ValueError) as exc:
+            allowed = ", ".join(item.value for item in Risk)
+            raise ValueError(f"risk must be one of: {allowed}") from exc
+        requirements = tuple(self.verification_requirements)
+        ids = [item.id for item in requirements]
+        duplicates = sorted(item for item, count in Counter(ids).items() if count > 1)
+        if duplicates:
+            raise ValueError(
+                "verification requirement ids must be unique: " + ", ".join(duplicates)
+            )
+        if requirements and not any(item.required for item in requirements):
+            raise ValueError("at least one structured verification requirement must be required")
+        self.verification_requirements = requirements
 
     @property
     def risk_value(self) -> str:
@@ -174,6 +354,10 @@ class GoalContract:
             "risk": self.risk_value,
             "permissions": self.permissions.to_dict(),
             "evidence_required": [item.to_dict() for item in self.evidence_required],
+            "verification_requirements": [
+                item.to_dict() for item in self.verification_requirements
+            ],
+            "workspace_root": self.workspace_root,
             "non_goals": list(self.non_goals),
             "state": self.state_value,
             "stopping_policy": dict(self.stopping_policy),
@@ -193,6 +377,11 @@ class GoalContract:
                 EvidenceRequirement.from_mapping(item)
                 for item in value.get("evidence_required", [])
             ],
+            verification_requirements=tuple(
+                VerificationRequirement.from_mapping(item)
+                for item in value.get("verification_requirements", [])
+            ),
+            workspace_root=str(value.get("workspace_root", "")),
             non_goals=tuple(value.get("non_goals", ())),
             state=value.get("state", StateTransition.PLANNED.value),
             stopping_policy=dict(value.get("stopping_policy", {})),
@@ -279,6 +468,8 @@ class TaskContract:
     verification: tuple[str, ...]
     escalation: tuple[str, ...]
     goal_id: str = ""
+    verification_requirements: tuple[VerificationRequirement, ...] = ()
+    workspace_root: str = ""
 
     @classmethod
     def of(cls, contract: "GoalContract") -> "TaskContract":
@@ -289,6 +480,11 @@ class TaskContract:
             for item in contract.evidence_required
             if item.required
         )
+        verification += tuple(
+            item.id if item.manual else shlex.join(item.argv)
+            for item in contract.verification_requirements
+            if item.required
+        )
         return cls(
             objective=objective,
             non_goals=tuple(contract.non_goals),
@@ -297,6 +493,8 @@ class TaskContract:
             verification=verification,
             escalation=_derive_escalation(contract),
             goal_id=contract.goal_id,
+            verification_requirements=tuple(contract.verification_requirements),
+            workspace_root=contract.workspace_root,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -308,4 +506,16 @@ class TaskContract:
             "verification": list(self.verification),
             "escalation": list(self.escalation),
             "goal_id": self.goal_id,
+            "verification_requirements": [
+                item.to_dict() for item in self.verification_requirements
+            ],
+            "workspace_root": self.workspace_root,
         }
+
+
+def contract_binding_payload(contract: GoalContract) -> dict[str, Any]:
+    """Immutable clauses whose durable snapshot must govern execution."""
+    value = contract.to_dict()
+    value.pop("state", None)
+    value.pop("approval_required", None)
+    return value

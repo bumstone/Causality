@@ -119,13 +119,65 @@ class GateTests(unittest.TestCase):
             runtime.approve(contract, "plan", "kbssk", "Plan reviewed")
             self.assertEqual(runtime.evaluate_plan(contract).decision, GateDecision.PASS)
 
-            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "passed"})
-            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "tests passed"))
-            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "evidence present"))
+            runtime.approve(contract, "final", "kbssk", "Too early")
+            evidence = runtime.record_evidence(
+                contract,
+                EvidenceKind.TEST_OUTPUT,
+                {"output": "passed"},
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision(
+                    "correctness",
+                    "pass",
+                    "tests passed",
+                    evidence_refs=refs,
+                ),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision(
+                    "evidence",
+                    "pass",
+                    "evidence present",
+                    evidence_refs=refs,
+                ),
+            )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.ESCALATE)
 
-            runtime.approve(contract, "final", "kbssk", "Raw evidence reviewed")
+            runtime.approve(
+                contract,
+                "final",
+                "kbssk",
+                "Raw evidence reviewed",
+                evidence_refs=refs,
+            )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
+
+            runtime.reject(contract, "final", "kbssk", "Approval withdrawn")
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.ESCALATE)
+
+    def test_public_decisions_cannot_precede_durable_contract_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = GoalContract("Deploy", "not yet bound", risk=Risk.HIGH)
+
+            with self.assertRaises(ValueError):
+                runtime.approve(contract, "plan", "kbssk", "premature")
+            with self.assertRaises(ValueError):
+                runtime.record_verifier(
+                    contract,
+                    VerifierDecision("premature", "pass", "not bound"),
+                )
+            with self.assertRaises(ValueError):
+                runtime.transition(contract, "blocked", "not bound")
+
+            runtime.create_contract(contract)
+            self.assertEqual(
+                runtime.evaluate_plan(contract).decision,
+                GateDecision.ESCALATE,
+            )
 
     def test_irreversible_action_requires_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

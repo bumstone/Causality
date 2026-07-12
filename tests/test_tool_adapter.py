@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.browser_adapter import CommandResult
-from causality.contracts import AuditEventType, GoalContract, PermissionContract
+from causality.contracts import AuditEventType, GoalContract, PermissionContract, Risk
 from causality.execution import ActionBlocked, ExecutionAdapter
 from causality.orchestrator import Causality
 from causality.tool_adapter import ToolAdapter
@@ -44,7 +44,31 @@ class ToolAdapterTests(unittest.TestCase):
             tool_calls = runtime.ledger.find(AuditEventType.TOOL_CALL)
             self.assertEqual(len(tool_calls), 1)
             self.assertEqual(tool_calls[0].payload["argv"], ["echo", "hello"])
+            self.assertIs(tool_calls[0].payload["mutates_task"], True)
             self.assertEqual(tool_calls[0].contract_id, contract.goal_id)
+
+    def test_public_run_cannot_suppress_mutation_tracking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime, _, adapter = self._setup(temp_dir)
+            tool = ToolAdapter(runtime.ledger, adapter, runner=_recording_runner([]))
+
+            with self.assertRaises(TypeError):
+                tool.run(["echo", "hidden write"], mutates_task=False)
+
+    def test_high_risk_public_write_requires_plan_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime, contract, adapter = self._setup(temp_dir, risk=Risk.HIGH)
+            tool = ToolAdapter(runtime.ledger, adapter, root=root)
+            target = root / "blocked.txt"
+
+            with self.assertRaises(ActionBlocked) as caught:
+                tool.write_text(target, "must not write")
+
+            self.assertEqual(caught.exception.result.decision.value, "escalate")
+            self.assertFalse(target.exists())
+            runtime.approve(contract, "plan", "alice", "approved")
+            self.assertEqual(tool.write_text(target, "approved"), target)
 
     def test_run_blocked_by_non_goal_neither_executes_nor_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -155,6 +179,10 @@ class ToolAdapterTests(unittest.TestCase):
             evidence = runtime.ledger.find(AuditEventType.EVIDENCE)
             self.assertEqual(len(evidence), 1)
             self.assertEqual(evidence[0].payload["path"], str(written))
+            self.assertEqual(
+                len(evidence[0].payload["evidence_workspace_fingerprint_sha256"]),
+                64,
+            )
             self.assertTrue(evidence[0].artifacts and evidence[0].artifacts[0]["sha256"])
 
             content = tool.read_text(target)

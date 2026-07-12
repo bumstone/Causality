@@ -16,6 +16,7 @@ loop, the standardized review, reflection, and skill distillation together.
 from __future__ import annotations
 
 import inspect
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,15 @@ from .agenda import Agenda, AgendaItem
 from .agent_harness import AgentHarness, Dispatch, TaskType
 from .playbooks import Playbook
 from .contract_harness import ContractHarness
-from .contracts import GateDecision, GoalContract, Risk, TaskContract
+from .contracts import (
+    AuditEventType,
+    GateDecision,
+    GoalContract,
+    Risk,
+    StateTransition,
+    TaskContract,
+    VerificationRequirement,
+)
 from .execution import ActionBlocked, ApprovePlan, ExecutionAdapter
 from .gates import GateResult
 from .loop import LoopResult, StepOutcome, run_bounded_loop
@@ -34,6 +43,7 @@ from .orchestrator import Causality
 from .reflect import Reflection, reflect_on_contract
 from .review import ReviewResult, Verifier, run_review
 from .skills import SkillCandidate, SkillStore
+from .verification import workspace_changes, workspace_fingerprint
 
 # A unit of work for one loop iteration: do the work (record evidence, etc.).
 # A three-arg ``work(contract, iteration, adapter)`` opts into per-action
@@ -127,8 +137,11 @@ class CausalityEngine:
     root: Path
 
     def __post_init__(self) -> None:
-        self.root = Path(self.root)
-        self.runtime = Causality(self.root / ".causality" / "ledger.jsonl")
+        self.root = Path(self.root).resolve()
+        self.runtime = Causality(
+            self.root / ".causality" / "ledger.jsonl",
+            project_root=self.root,
+        )
         self.harness = ContractHarness(self.runtime)
         self.dispatcher = AgentHarness()
         self.memory = TypedMemory(self.root)
@@ -141,7 +154,7 @@ class CausalityEngine:
         objective: str,
         work: Work,
         verifiers: Sequence[Verifier],
-        verification: Sequence[str],
+        verification: Sequence[str | VerificationRequirement],
         stop_condition: Mapping[str, Any],
         non_goals: Sequence[str] = (),
         allowed_tools: Sequence[str] = (),
@@ -242,8 +255,50 @@ class CausalityEngine:
         def step(current: GoalContract, iteration: int) -> StepOutcome:
             progress["iterations"] = iteration
             _invoke_work(work, current, iteration, adapter)
-            review = run_review(self.runtime, current, verifiers, min_passes=min_passes)
+            for requirement in current.verification_requirements:
+                if not requirement.required or requirement.manual:
+                    continue
+                result = self.runtime.verify_requirement(
+                    current,
+                    requirement.id,
+                    root=self.root,
+                )
+                if result.status in {"blocked", "timeout", "error"}:
+                    return StepOutcome(progress=False)
+            before_review = workspace_fingerprint(self.root, self.runtime.ledger.path)
+            previous_bytecode_policy = sys.dont_write_bytecode
+            sys.dont_write_bytecode = True
+            try:
+                review = run_review(
+                    self.runtime,
+                    current,
+                    verifiers,
+                    min_passes=min_passes,
+                    require_evidence=bool(current.verification_requirements),
+                )
+            finally:
+                sys.dont_write_bytecode = previous_bytecode_policy
             last_review["result"] = review
+            changed = workspace_changes(
+                before_review,
+                workspace_fingerprint(self.root, self.runtime.ledger.path),
+            )
+            if changed:
+                self.runtime.ledger.append(
+                    AuditEventType.TOOL_CALL,
+                    {
+                        "tool": "verifier",
+                        "paths": changed[:100],
+                        "mutates_task": True,
+                    },
+                    contract_id=current.goal_id,
+                )
+                self.runtime.transition(
+                    current,
+                    StateTransition.BLOCKED,
+                    "verifier changed workspace state",
+                )
+                return StepOutcome(progress=False)
             return StepOutcome(progress=review.approved)
 
         try:
@@ -347,7 +402,7 @@ class CausalityEngine:
         *,
         work: Work,
         verifiers: Sequence[Verifier],
-        verification: Sequence[str],
+        verification: Sequence[str | VerificationRequirement],
         stop_condition: Mapping[str, Any],
         **kwargs: Any,
     ) -> TaskRun | None:

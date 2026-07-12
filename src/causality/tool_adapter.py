@@ -19,10 +19,11 @@ shared skill library (see :mod:`skills`).
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .browser_adapter import CommandResult
 from .contracts import AuditEventType, EvidenceKind, GateDecision
@@ -42,6 +43,15 @@ def _is_within(path: Path, base: Path) -> bool:
 # Test seam: run a command (argv list) and return its result. The default runs a
 # real subprocess; tests inject a fake so the suite never spawns a process.
 CommandRunner = Callable[[Sequence[str]], CommandResult]
+EffectHook = Callable[[], None]
+
+
+def utf8_size(value: str | bytes | None) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bytes):
+        return len(value)
+    return len(value.encode("utf-8"))
 
 
 @dataclass
@@ -61,6 +71,7 @@ class ToolAdapter:
     # resolve against, so a contract scope like ".causality/" matches
     # <root>/.causality regardless of the process cwd (codex r3448146018).
     root: Path = field(default_factory=Path.cwd)
+    last_event_hash: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         # Resolve at construction so the root anchoring is independent of any
@@ -83,8 +94,35 @@ class ToolAdapter:
         description: str | None = None,
         timeout: float = 30.0,
         cwd: str | Path | None = None,
+        before_effect: EffectHook | None = None,
     ) -> CommandResult:
-        """Run ``args`` (a non-empty command list) through the gates, no shell."""
+        """Run ``args`` through the gates and conservatively mark it as mutating."""
+        return self._run(
+            args,
+            tool=tool,
+            action_kind=action_kind,
+            description=description,
+            timeout=timeout,
+            cwd=cwd,
+            mutates_task=True,
+            environment_overrides={},
+            before_effect=before_effect,
+        )
+
+    def _run(
+        self,
+        args: Sequence[str],
+        *,
+        tool: str,
+        action_kind: str,
+        description: str | None,
+        timeout: float,
+        cwd: str | Path | None,
+        mutates_task: bool,
+        environment_overrides: Mapping[str, str],
+        before_effect: EffectHook | None = None,
+    ) -> CommandResult:
+        """Internal runner; verification owns the only read-only command path."""
         argv = [str(arg) for arg in args]
         if not argv:
             raise ValueError("run() requires a non-empty command")
@@ -95,26 +133,37 @@ class ToolAdapter:
         workdir = self._resolved(cwd) if cwd is not None else self.root
 
         def _do() -> CommandResult:
+            if before_effect is not None:
+                before_effect()
             if self.runner is not None:
                 return self.runner(argv)
             completed = subprocess.run(  # noqa: S603 - argv list, never shell=True
-                argv, text=True, capture_output=True, check=False, timeout=timeout, cwd=str(workdir)
+                argv,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout,
+                cwd=str(workdir),
+                env={**os.environ, **environment_overrides},
             )
             return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
-        result = self.execution.execute(
-            tool=tool, action_kind=action_kind, description=desc, run=_do
-        )
-        self._record(
-            AuditEventType.TOOL_CALL,
-            {
-                "tool": tool,
-                "argv": argv,
-                "exit_code": result.exit_code,
-                "stdout_bytes": len(result.stdout),
-                "stderr_bytes": len(result.stderr),
-            },
-        )
+        with self.execution.runtime.execution_lock():
+            result = self.execution.execute(
+                tool=tool, action_kind=action_kind, description=desc, run=_do
+            )
+            self._record(
+                AuditEventType.TOOL_CALL,
+                {
+                    "tool": tool,
+                    "argv": argv,
+                    "exit_code": result.exit_code,
+                    "stdout_bytes": utf8_size(result.stdout),
+                    "stderr_bytes": utf8_size(result.stderr),
+                    "mutates_task": mutates_task,
+                    "environment_overrides": dict(environment_overrides),
+                },
+            )
         return result
 
     def write_text(
@@ -125,6 +174,7 @@ class ToolAdapter:
         tool: str = "file.write",
         action_kind: str = "write",
         encoding: str = "utf-8",
+        before_effect: EffectHook | None = None,
     ) -> Path:
         """Write ``content`` to ``path`` through the gates; record the artifact."""
         target = self._resolved(path)
@@ -134,23 +184,28 @@ class ToolAdapter:
         self._enforce_write_scope(target)
 
         def _do() -> Path:
+            if before_effect is not None:
+                before_effect()
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding=encoding)
             return target
 
-        self.execution.execute(
-            tool=tool, action_kind=action_kind, description=f"write file {target}", run=_do
-        )
-        self._record(
-            AuditEventType.EVIDENCE,
-            {
-                "kind": EvidenceKind.ARTIFACT_HASH.value,
-                "tool": tool,
-                "path": str(target),
-                "bytes": len(content.encode(encoding)),
-            },
-            artifact_paths=[target],
-        )
+        with self.execution.runtime.execution_lock():
+            self.execution.execute(
+                tool=tool, action_kind=action_kind, description=f"write file {target}", run=_do
+            )
+            event = self.execution.runtime.record_evidence(  # type: ignore[attr-defined]
+                self.execution.contract,
+                EvidenceKind.ARTIFACT_HASH,
+                {
+                    "tool": tool,
+                    "path": str(target),
+                    "bytes": len(content.encode(encoding)),
+                    "mutates_task": True,
+                },
+                artifact_paths=[target],
+            )
+            self.last_event_hash = event.entry_hash
         return target
 
     def read_text(
@@ -160,11 +215,14 @@ class ToolAdapter:
         tool: str = "file.read",
         action_kind: str = "tool_call",
         encoding: str = "utf-8",
+        before_effect: EffectHook | None = None,
     ) -> str:
         """Read ``path`` through the gates; record a TOOL_CALL."""
         target = self._resolved(path)
 
         def _do() -> str:
+            if before_effect is not None:
+                before_effect()
             return target.read_text(encoding=encoding)
 
         content = self.execution.execute(
@@ -172,7 +230,12 @@ class ToolAdapter:
         )
         self._record(
             AuditEventType.TOOL_CALL,
-            {"tool": tool, "path": str(target), "bytes": len(content.encode(encoding))},
+            {
+                "tool": tool,
+                "path": str(target),
+                "bytes": len(content.encode(encoding)),
+                "mutates_task": False,
+            },
         )
         return content
 
@@ -204,12 +267,10 @@ class ToolAdapter:
         self,
         event_type: AuditEventType,
         payload: dict,
-        *,
-        artifact_paths: Sequence[str | Path] = (),
     ) -> None:
-        self.ledger.append(
+        event = self.ledger.append(
             event_type,
             payload,
             contract_id=self.execution.contract.goal_id,
-            artifact_paths=artifact_paths,
         )
+        self.last_event_hash = event.entry_hash

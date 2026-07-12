@@ -38,6 +38,19 @@ class ContractTests(unittest.TestCase):
 
         self.assertFalse(contract.approval_required)
 
+    def test_risk_strings_are_canonical_and_fail_closed(self) -> None:
+        self.assertIs(
+            GoalContract(title="Deploy", summary="canonical", risk="high").risk,
+            Risk.HIGH,
+        )
+        for invalid in ("HIGH", "hgh", "", True):
+            with self.subTest(risk=invalid), self.assertRaises(ValueError):
+                GoalContract(
+                    title="Deploy",
+                    summary="invalid risk",
+                    risk=invalid,  # type: ignore[arg-type]
+                )
+
     def test_non_goals_roundtrip(self) -> None:
         contract = GoalContract(
             title="Slice",
@@ -50,6 +63,18 @@ class ContractTests(unittest.TestCase):
 
         restored = GoalContract.from_mapping(data)
         self.assertEqual(restored.non_goals, ("refactor browser_adapter", "touch CI config"))
+
+    def test_new_verification_fields_preserve_legacy_positional_order(self) -> None:
+        contract = GoalContract(
+            "legacy",
+            "positional",
+            Risk.LOW,
+            PermissionContract(),
+            [],
+            ("do not deploy",),
+        )
+
+        self.assertEqual(contract.non_goals, ("do not deploy",))
 
     def test_task_contract_derives_clauses(self) -> None:
         contract = GoalContract(

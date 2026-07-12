@@ -24,6 +24,10 @@ state.json
 # Durable write sidecars for local JSON/JSONL runtime stores.
 *.json.lock
 *.jsonl.lock
+*.jsonl.*.lock
+*.jsonl.head
+*.jsonl.idx
+*.jsonl.[0-9]*
 .*.json.*.tmp
 .*.jsonl.*.tmp
 

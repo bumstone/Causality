@@ -6,10 +6,12 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.contracts import AuditEventType
+import causality.ledger as ledger_module
 from causality.ledger import EvidenceLedger
 
 
@@ -472,6 +474,170 @@ class LedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
             self.assertIsNone(ledger.rotate())
+
+    def test_rotate_already_empty_current_segment_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            self.assertIsNotNone(ledger.rotate())
+            self.assertIsNone(ledger.rotate())
+
+    def test_cache_invalidates_on_rotate_and_same_size_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            stale = EvidenceLedger(path)
+            stale.append(AuditEventType.EVIDENCE, {"n": 0})
+            stale.rotate()
+            first = stale.append(AuditEventType.EVIDENCE, {"n": 1})
+            self.assertEqual(stale.events()[0].entry_hash, first.entry_hash)
+            sibling = EvidenceLedger(path)
+            sibling.rotate()
+            second = sibling.append(AuditEventType.EVIDENCE, {"n": 2})
+            self.assertEqual(path.stat().st_size, Path(str(path) + ".2").stat().st_size)
+
+            self.assertEqual([event.payload["n"] for event in stale.events()], [2])
+            self.assertEqual(
+                [event.payload["n"] for event in stale.events(all_segments=True)],
+                [0, 1, 2],
+            )
+            self.assertEqual(stale.latest_hash(), second.entry_hash)
+            stale.append(AuditEventType.EVIDENCE, {"n": 3})
+            self.assertTrue(stale.verify_chain())
+
+    def test_pending_anchor_recovers_after_final_anchor_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            real_write = ledger_module.write_text_durably
+            calls = 0
+
+            def fail_final_anchor(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated final anchor failure")
+                return real_write(*args, **kwargs)
+
+            with mock.patch.object(
+                ledger_module,
+                "write_text_durably",
+                side_effect=fail_final_anchor,
+            ):
+                with self.assertRaises(OSError):
+                    ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+
+            self.assertTrue(ledger.verify_chain())
+            self.assertEqual([event.payload["n"] for event in ledger.events()], [1])
+            ledger.append(AuditEventType.EVIDENCE, {"n": 2})
+            self.assertTrue(ledger.verify_chain())
+
+    def test_pending_anchor_rolls_back_when_row_append_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            with mock.patch.object(
+                ledger._store,
+                "append",
+                side_effect=OSError("simulated row failure"),
+            ):
+                with self.assertRaises(OSError):
+                    ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+
+            self.assertTrue(ledger.verify_chain())
+            self.assertEqual(ledger.events(), [])
+            ledger.append(AuditEventType.EVIDENCE, {"n": 2})
+            self.assertTrue(ledger.verify_chain())
+
+    def test_missing_anchor_and_unrotated_suffix_truncation_are_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            ledger.append(AuditEventType.EVIDENCE, {"n": 2})
+            Path(str(path) + ".head").unlink()
+            first_row = path.read_text(encoding="utf-8").splitlines()[0]
+            path.write_text(first_row + "\n", encoding="utf-8")
+
+            self.assertFalse(ledger.verify_chain())
+
+    def test_archive_numbering_gap_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            first = ledger.rotate()
+            Path(str(path) + ".3").write_bytes(first.read_bytes())
+
+            self.assertFalse(ledger.verify_chain())
+
+    def test_legacy_rotation_failure_keeps_chain_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+
+            legacy = json.loads(path.read_text(encoding="utf-8"))
+            legacy.pop("anchor_version")
+            unsigned = {key: value for key, value in legacy.items() if key != "entry_hash"}
+            legacy["entry_hash"] = ledger_module.sha256_text(
+                ledger_module._stable_json(unsigned)
+            )
+            path.write_text(
+                json.dumps(legacy, ensure_ascii=True, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            Path(str(path) + ".head").unlink()
+            self.assertTrue(ledger.verify_chain())
+
+            with mock.patch.object(
+                ledger,
+                "_build_index",
+                side_effect=OSError("simulated index failure"),
+            ):
+                with self.assertRaises(OSError):
+                    ledger.rotate()
+
+            self.assertTrue(ledger.verify_chain())
+            follow_up = ledger.append(AuditEventType.EVIDENCE, {"n": 2})
+            self.assertEqual(follow_up.previous_hash, legacy["entry_hash"])
+            self.assertTrue(ledger.verify_chain())
+
+    def test_corrupt_anchor_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            Path(str(path) + ".head").write_bytes(b"\xff")
+
+            self.assertFalse(ledger.verify_chain())
+
+    def test_unreadable_anchor_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            head = Path(str(path) + ".head")
+            real_read_text = Path.read_text
+
+            def fail_head_read(candidate: Path, *args, **kwargs):
+                if candidate == head:
+                    raise OSError("simulated unreadable anchor")
+                return real_read_text(candidate, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", fail_head_read):
+                self.assertFalse(ledger.verify_chain())
+
+    def test_latest_contract_hash_survives_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            event = ledger.append(
+                AuditEventType.EVIDENCE,
+                {"kind": "test_output"},
+                contract_id="task-a",
+            )
+            self.assertIsNotNone(ledger.rotate())
+
+            self.assertEqual(ledger.latest_hash_for_contract("task-a"), event.entry_hash)
 
     def test_verify_chain_detects_tampered_archive(self) -> None:
         # A same-length in-place edit to a SEALED archive must fail the full
