@@ -38,7 +38,7 @@ class E2ELoopTests(unittest.TestCase):
         return CausalityEngine(Path(temp_dir))
 
     def _work(self, engine: CausalityEngine):
-        def work(contract: GoalContract, iteration: int) -> None:
+        def work(contract: GoalContract, iteration: int, _adapter) -> None:
             engine.runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
         return work
 
@@ -190,7 +190,7 @@ class E2ELoopTests(unittest.TestCase):
             engine = self._engine(temp_dir)
             state = {"iteration": 0}
 
-            def work(contract: GoalContract, iteration: int) -> None:
+            def work(contract: GoalContract, iteration: int, _adapter) -> None:
                 state["iteration"] = iteration
                 engine.runtime.record_evidence(
                     contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}

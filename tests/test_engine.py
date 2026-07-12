@@ -24,7 +24,7 @@ class EngineTests(unittest.TestCase):
         return CausalityEngine(Path(temp_dir))
 
     def _work(self, engine: CausalityEngine):
-        def work(contract: GoalContract, iteration: int) -> None:
+        def work(contract: GoalContract, iteration: int, _adapter) -> None:
             engine.runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
         return work
 

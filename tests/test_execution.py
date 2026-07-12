@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -282,14 +283,15 @@ class EngineGatingTests(unittest.TestCase):
             def work(contract, iteration):
                 engine.runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
 
-            run = engine.run_task(
-                objective="implement the parser",
-                work=work,
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
-                stop_condition={"max_iterations": 3},
-                non_goals=["delete production data"],
-            )
+            with self.assertWarns(DeprecationWarning):
+                run = engine.run_task(
+                    objective="implement the parser",
+                    work=work,
+                    verifiers=_passing_verifiers(),
+                    verification=["pytest"],
+                    stop_condition={"max_iterations": 3},
+                    non_goals=["delete production data"],
+                )
             self.assertTrue(run.passed)
 
 
@@ -305,6 +307,31 @@ class AcceptsAdapterTests(unittest.TestCase):
                 return None
 
         self.assertTrue(_accepts_adapter(Worker().run))
+
+    def test_two_argument_work_emits_deprecation_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+
+            def work(contract, iteration):
+                engine.runtime.record_evidence(
+                    contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+                )
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                run = engine.run_task(
+                    objective="implement the parser",
+                    work=work,
+                    verifiers=_passing_verifiers(),
+                    verification=["python -m unittest"],
+                    stop_condition={"max_iterations": 1},
+                )
+
+            self.assertTrue(run.passed)
+            self.assertTrue(
+                any(item.category is DeprecationWarning for item in caught),
+                "two-argument work callback did not emit DeprecationWarning",
+            )
 
 
 if __name__ == "__main__":

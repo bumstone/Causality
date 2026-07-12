@@ -22,7 +22,7 @@ def _passing_verifiers():
 
 
 def _evidence_work(engine: CausalityEngine):
-    def work(contract, iteration):
+    def work(contract, iteration, _adapter):
         engine.runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
 
     return work

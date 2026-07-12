@@ -16,6 +16,7 @@ loop, the standardized review, reflection, and skill distillation together.
 from __future__ import annotations
 
 import inspect
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -35,9 +36,9 @@ from .review import ReviewResult, Verifier, run_review
 from .skills import SkillCandidate, SkillStore
 
 # A unit of work for one loop iteration: do the work (record evidence, etc.).
-# A two-arg ``work(contract, iteration)`` runs ungated (back-compatible); a
-# three-arg ``work(contract, iteration, adapter)`` opts into per-action gating
-# by routing its side effects through the ExecutionAdapter (see _invoke_work).
+# A three-arg ``work(contract, iteration, adapter)`` opts into per-action
+# gating. The legacy two-arg form remains for one deprecation cycle and runs
+# ungated because it cannot receive the ExecutionAdapter.
 Work = Callable[..., Any]
 
 # HITL hook for the guardrail read-path: given the active (non-expired) failures
@@ -76,6 +77,12 @@ def _invoke_work(work: Work, contract: GoalContract, iteration: int, adapter: Ex
     """Call ``work``, handing it the gating adapter only if it accepts one."""
     if _accepts_adapter(work):
         return work(contract, iteration, adapter)
+    warnings.warn(
+        "two-argument work callbacks are deprecated; accept "
+        "(contract, iteration, adapter) instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return work(contract, iteration)
 
 
@@ -297,13 +304,7 @@ class CausalityEngine:
         ]
         if candidates:
             injected.extend(clause for clause in confirm_guardrails(candidates) if clause and clause.strip())
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for clause in injected:
-            if clause not in seen:
-                seen.add(clause)
-                deduped.append(clause)
-        return deduped
+        return list(dict.fromkeys(injected))
 
     def _gated_out(
         self,
