@@ -430,6 +430,39 @@ class CausalityMCPServer:
             }
         )
         browser_schema["oneOf"] = browser_branches
+        phase_schema = _closed(
+            {
+                **_COMMON,
+                "phase_id": _TEXT,
+                "action": {"type": "string", "enum": ["start", "finish"]},
+                "status": {
+                    "type": "string",
+                    "enum": ["passed", "failed", "blocked"],
+                },
+                "evidence_refs": {
+                    "type": "array",
+                    "items": _HASH,
+                    "minItems": 1,
+                    "uniqueItems": True,
+                },
+            },
+            (*common_required, "phase_id", "action"),
+        )
+        phase_schema["oneOf"] = [
+            {
+                "properties": {"action": {"const": "start"}},
+                "not": {
+                    "anyOf": [
+                        {"required": ["status"]},
+                        {"required": ["evidence_refs"]},
+                    ]
+                },
+            },
+            {
+                "properties": {"action": {"const": "finish"}},
+                "required": ["status", "evidence_refs"],
+            },
+        ]
         tools = [
             _tool(
                 "causality_init",
@@ -472,6 +505,11 @@ class CausalityMCPServer:
                                 ("kind", "description", "required"),
                             ),
                         },
+                        "workflow": {
+                            "type": "string",
+                            "enum": ["auto", "root-cause-protocol"],
+                            "default": "auto",
+                        },
                         "idempotency_key": _KEY,
                     },
                     ("objective", "risk", "permissions", "verification_requirements", "stop_condition", "idempotency_key"),
@@ -485,8 +523,9 @@ class CausalityMCPServer:
                         **_COMMON,
                         "stage": {
                             "type": "string",
-                            "enum": ["plan", "final", *sorted(IRREVERSIBLE_ACTIONS)],
+                            "enum": ["plan", "final", "phase", *sorted(IRREVERSIBLE_ACTIONS)],
                         },
+                        "phase_id": _TEXT,
                         "approved": {"type": "boolean"},
                         "approver": _TEXT,
                         "rationale": _TEXT,
@@ -494,6 +533,43 @@ class CausalityMCPServer:
                         "proof": _TEXT,
                     },
                     (*common_required, "stage", "approved", "approver", "rationale", "evidence_refs", "proof"),
+                ),
+            ),
+            _tool(
+                "causality_task_phase",
+                "Start or finish the current durable workflow phase.",
+                phase_schema,
+            ),
+            _tool(
+                "causality_task_hypothesis",
+                "Record one evidence-backed debugging hypothesis outcome.",
+                _closed(
+                    {
+                        **_COMMON,
+                        "phase_id": _TEXT,
+                        "hypothesis": _TEXT,
+                        "verifier": _TEXT,
+                        "status": {
+                            "type": "string",
+                            "enum": ["supported", "rejected", "inconclusive"],
+                        },
+                        "rationale": _TEXT,
+                        "evidence_refs": {
+                            "type": "array",
+                            "items": _HASH,
+                            "minItems": 1,
+                            "uniqueItems": True,
+                        },
+                    },
+                    (
+                        *common_required,
+                        "phase_id",
+                        "hypothesis",
+                        "verifier",
+                        "status",
+                        "rationale",
+                        "evidence_refs",
+                    ),
                 ),
             ),
             _tool(
@@ -668,7 +744,7 @@ class CausalityMCPServer:
         allowed = {
             "objective", "summary", "risk", "permissions",
             "verification_requirements", "stop_condition", "non_goals",
-            "evidence_required", "idempotency_key",
+            "evidence_required", "workflow", "idempotency_key",
         }
         required = {
             "objective", "risk", "permissions", "verification_requirements",
@@ -679,6 +755,28 @@ class CausalityMCPServer:
             raise TaskLifecycleError("validation_error", "objective must be non-blank")
         if "summary" in arguments and not isinstance(arguments["summary"], str):
             raise TaskLifecycleError("validation_error", "summary must be a string")
+        workflow = arguments.get("workflow")
+        if workflow is not None and (
+            not isinstance(workflow, str)
+            or workflow not in {"auto", "root-cause-protocol"}
+        ):
+            raise TaskLifecycleError(
+                "validation_error",
+                "workflow must be auto or root-cause-protocol",
+            )
+        if workflow is None:
+            workflow = "auto"
+            for event in self.ledger.events(all_segments=True):
+                if (
+                    event.event_type == "task_started"
+                    and event.payload.get("idempotency_key")
+                    == arguments["idempotency_key"]
+                    and event.payload.get("workflow", "legacy") == "legacy"
+                ):
+                    # Preserve retries created before MCP began defaulting to
+                    # automatic workflow selection. New omitted requests use auto.
+                    workflow = "legacy"
+                    break
         permissions = arguments["permissions"]
         if not isinstance(permissions, dict):
             raise TaskLifecycleError("validation_error", "permissions must be an object")
@@ -773,7 +871,11 @@ class CausalityMCPServer:
             non_goals=non_goals,
             stopping_policy=dict(stop),
         )
-        return self.lifecycle.begin(contract, idempotency_key=arguments["idempotency_key"])
+        return self.lifecycle.begin(
+            contract,
+            idempotency_key=arguments["idempotency_key"],
+            workflow=workflow,
+        )
 
     @staticmethod
     def _operation_data(session: TaskSession, operation: str, key: str) -> tuple[dict[str, Any], str]:
@@ -815,6 +917,7 @@ class CausalityMCPServer:
         key = arguments.get("idempotency_key")
         ephemeral: Mapping[str, str] = {}
         before = self.ledger.event_count()
+        preexisting_operation = False
         if name == "causality_task_begin":
             session = self._begin(arguments)
         else:
@@ -822,7 +925,87 @@ class CausalityMCPServer:
             if not isinstance(arguments.get("task_id"), str) or not isinstance(key, str):
                 raise TaskLifecycleError("validation_error", "task_id and idempotency_key are required")
             task_id = arguments["task_id"]
-            if name == "causality_task_action":
+            if operation != "reflect":
+                try:
+                    current = self.lifecycle.get(task_id)
+                except TaskLifecycleError:
+                    current = None
+                preexisting_operation = bool(
+                    current is not None
+                    and (operation, key) in current.idempotency
+                )
+            if name == "causality_task_phase":
+                allowed = common | {"phase_id", "action", "status", "evidence_refs"}
+                required = common | {"phase_id", "action"}
+                self._strict(arguments, allowed=allowed, required=required)
+                phase_action = arguments["action"]
+                if phase_action == "start":
+                    self._strict(arguments, allowed=required, required=required)
+                    status = None
+                    refs: tuple[str, ...] = ()
+                elif phase_action == "finish":
+                    self._strict(
+                        arguments,
+                        allowed=allowed,
+                        required=required | {"status", "evidence_refs"},
+                    )
+                    status = arguments["status"]
+                    if status not in {"passed", "failed", "blocked"}:
+                        raise TaskLifecycleError(
+                            "validation_error",
+                            "phase finish status must be passed, failed, or blocked",
+                        )
+                    refs = self._string_array(
+                        arguments["evidence_refs"], "evidence_refs"
+                    )
+                else:
+                    raise TaskLifecycleError(
+                        "validation_error", "phase action must be start or finish"
+                    )
+                session = self.lifecycle.phase(
+                    task_id,
+                    phase_id=arguments["phase_id"],
+                    action=phase_action,
+                    status=status,
+                    evidence_refs=refs,
+                    idempotency_key=key,
+                )
+            elif name == "causality_task_hypothesis":
+                fields = {
+                    "phase_id",
+                    "hypothesis",
+                    "verifier",
+                    "status",
+                    "rationale",
+                    "evidence_refs",
+                }
+                self._strict(
+                    arguments,
+                    allowed=common | fields,
+                    required=common | fields,
+                )
+                if arguments["status"] not in {
+                    "supported",
+                    "rejected",
+                    "inconclusive",
+                }:
+                    raise TaskLifecycleError(
+                        "validation_error",
+                        "hypothesis status must be supported, rejected, or inconclusive",
+                    )
+                session = self.lifecycle.hypothesis(
+                    task_id,
+                    phase_id=arguments["phase_id"],
+                    hypothesis=arguments["hypothesis"],
+                    verifier=arguments["verifier"],
+                    status=arguments["status"],
+                    rationale=arguments["rationale"],
+                    evidence_refs=self._string_array(
+                        arguments["evidence_refs"], "evidence_refs"
+                    ),
+                    idempotency_key=key,
+                )
+            elif name == "causality_task_action":
                 self._strict(arguments, allowed=common | {"action"}, required=common | {"action"})
                 action = arguments["action"]
                 if not isinstance(action, dict):
@@ -941,14 +1124,28 @@ class CausalityMCPServer:
                 self._strict(arguments, allowed=common, required=common)
                 session = self.lifecycle.complete(task_id, idempotency_key=key)
             elif name == "causality_task_approve":
-                allowed = common | {"stage", "approved", "approver", "rationale", "evidence_refs", "proof"}
-                self._strict(arguments, allowed=allowed, required=allowed)
+                required = common | {
+                    "stage", "approved", "approver", "rationale",
+                    "evidence_refs", "proof",
+                }
+                allowed = required | {"phase_id"}
+                self._strict(arguments, allowed=allowed, required=required)
+                if arguments["stage"] == "phase" and "phase_id" not in arguments:
+                    raise TaskLifecycleError(
+                        "validation_error", "phase approval requires phase_id"
+                    )
+                if arguments["stage"] != "phase" and "phase_id" in arguments:
+                    raise TaskLifecycleError(
+                        "validation_error",
+                        "phase_id is only valid for phase approval",
+                    )
                 session = self.lifecycle.approve(
                     task_id,
                     stage=arguments["stage"],
                     approved=arguments["approved"],
                     approver=arguments["approver"],
                     rationale=arguments["rationale"],
+                    phase_id=arguments.get("phase_id"),
                     evidence_refs=self._string_array(arguments["evidence_refs"], "evidence_refs"),
                     idempotency_key=key,
                     proof=arguments["proof"],
@@ -999,7 +1196,11 @@ class CausalityMCPServer:
                 )
             else:
                 raise TaskLifecycleError("unknown_tool", f"unknown tool: {name}")
-        replayed = self.ledger.event_count() == before
+        replayed = (
+            self.ledger.event_count() == before
+            if operation in {"begin", "reflect"}
+            else preexisting_operation
+        )
         data, event_hash = self._operation_data(session, operation, str(key))
         if ephemeral:
             data["untrusted"] = {
@@ -1064,6 +1265,7 @@ class CausalityMCPServer:
                 return _text_result(json.dumps(workflow_manifest(), ensure_ascii=True, indent=2))
             lifecycle_names = {
                 "causality_task_begin", "causality_task_approve", "causality_task_action",
+                "causality_task_phase", "causality_task_hypothesis",
                 "causality_task_http", "causality_task_browser",
                 "causality_task_verify", "causality_task_verdict", "causality_task_complete",
                 "causality_task_resolve", "causality_task_reflect", "causality_append_evidence",

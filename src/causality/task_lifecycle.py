@@ -512,6 +512,7 @@ class TaskSession:
     workflow: str = "legacy"
     workflow_phases: tuple[WorkflowPhase, ...] = ()
     current_phase_id: str | None = None
+    approval_evidence_refs: tuple[str, ...] = ()
 
     @property
     def pending_intent(self) -> PendingIntent | None:
@@ -545,6 +546,8 @@ class TaskSession:
             "workflow": self.workflow,
             "workflow_phases": [phase.to_dict() for phase in self.workflow_phases],
             "current_phase_id": self.current_phase_id,
+            "blocked_reason": self.blocked_reason,
+            "approval_evidence_refs": list(self.approval_evidence_refs),
         }
 
 
@@ -3093,6 +3096,8 @@ class TaskLifecycle:
         )
 
     def _reconcile_phase_block(self, session: TaskSession) -> TaskSession:
+        if session.terminal:
+            return session
         current = next(
             (
                 phase
@@ -3120,7 +3125,12 @@ class TaskLifecycle:
         )
         return self.get(session.task_id)
 
-    def _phase_approval_evidence(self, session: TaskSession) -> tuple[str, ...]:
+    def _phase_approval_evidence(
+        self,
+        session: TaskSession,
+        *,
+        allow_pending: bool = False,
+    ) -> tuple[str, ...]:
         hypothesis = self._hypothesis_block_record(session)
         if hypothesis is not None:
             gate = self._authoritative_event(
@@ -3131,6 +3141,8 @@ class TaskLifecycle:
                 AuditEventType.GATE_DECISION,
             )
             if gate is None:
+                if allow_pending:
+                    return ()
                 raise _error(
                     "invalid_task_event",
                     "blocked hypothesis phase is missing its escalation gate",
@@ -3145,6 +3157,8 @@ class TaskLifecycle:
         cause_event = self._phase_block_event(session)
         cause = cause_event.entry_hash if cause_event is not None else None
         if cause is None:
+            if allow_pending:
+                return ()
             raise _error("invalid_task_event", "blocked phase has no approval evidence")
         return (cause,)
 
@@ -3183,10 +3197,9 @@ class TaskLifecycle:
         with self.runtime.execution_lock():
             session = self.get(task_id)
             if self._existing(session, "phase", key, digest) is not None:
-                return session
+                return self._reconcile_phase_block(session)
             if not session.workflow_phases:
                 raise _error("phase_not_configured", "task has no workflow phase plan")
-            session = self._ensure_executing(session)
             current = next(
                 (
                     phase
@@ -3209,6 +3222,7 @@ class TaskLifecycle:
                     raise _error("phase_in_progress", "a workflow phase is already running")
                 if current.status not in {"pending", "failed"}:
                     raise _error("phase_blocked", "current workflow phase cannot start")
+                session = self._ensure_executing(session)
                 phase_value = {
                     "phase_id": current.phase_id,
                     "from_status": current.status,
@@ -3219,6 +3233,7 @@ class TaskLifecycle:
             else:
                 if current.status != "running":
                     raise _error("phase_not_running", "current workflow phase is not running")
+                session = self._ensure_executing(session)
                 evidence = self._phase_evidence(session, current, refs, status or "")
                 phase_value = {
                     "phase_id": current.phase_id,
@@ -3361,8 +3376,6 @@ class TaskLifecycle:
         digest = canonical_sha256(request)
         with self.runtime.execution_lock():
             session = self.get(task_id)
-            if stage == "phase":
-                session = self._reconcile_phase_block(session)
             prior = self._existing(session, "approve", key, digest)
             if prior is not None:
                 if stage == "phase":
@@ -3451,6 +3464,12 @@ class TaskLifecycle:
                         "final decision requires executing or completion-blocked state",
                     )
                 if stage == "phase":
+                    if self._durable_state(task_id) is not TaskState.BLOCKED:
+                        raise _error(
+                            "recovery_required",
+                            "replay the exact blocked phase operation before approval",
+                            retryable=True,
+                        )
                     current = next(
                         (
                             phase
@@ -5423,7 +5442,7 @@ class TaskLifecycle:
             ),
             None,
         )
-        return TaskSession(
+        session = TaskSession(
             schema_version=SCHEMA_VERSION,
             task_id=task_id,
             contract_id=task_id,
@@ -5450,8 +5469,12 @@ class TaskLifecycle:
                 if action_orphan
                 else "unfinished completion decision"
                 if completion_orphan
-                else "workflow phase requires human review"
+                else "workflow recovery requires an exact operation replay"
                 if workflow_blocked
+                and projected_state is TaskState.BLOCKED
+                and state is not TaskState.BLOCKED
+                else "workflow phase requires human review"
+                if workflow_blocked and projected_state is TaskState.BLOCKED
                 else None
             ),
             workflow=workflow,
@@ -5462,6 +5485,22 @@ class TaskLifecycle:
                 else None
             ),
         )
+        if workflow_blocked and projected_state is TaskState.BLOCKED:
+            session = replace(
+                session,
+                approval_evidence_refs=self._phase_approval_evidence(
+                    session,
+                    allow_pending=state is not TaskState.BLOCKED,
+                ),
+            )
+            if state is not TaskState.BLOCKED:
+                recovery = (
+                    "hypothesis"
+                    if self._hypothesis_block_record(session) is not None
+                    else "phase_finish"
+                )
+                session = replace(session, allowed_next=(recovery, "reject"))
+        return session
 
 
 __all__ = [

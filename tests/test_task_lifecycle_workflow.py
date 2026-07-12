@@ -592,6 +592,23 @@ class WorkflowLifecycleTests(unittest.TestCase):
             )
             before = lifecycle.ledger.event_count()
 
+            for phase_id, action, code in (
+                (HYPOTHESIS, "start", "phase_mismatch"),
+                (REPRODUCE, "finish", "phase_not_running"),
+            ):
+                with self.assertRaises(TaskLifecycleError) as invalid:
+                    lifecycle.phase(
+                        task.task_id,
+                        phase_id=phase_id,
+                        action=action,
+                        status="blocked" if action == "finish" else None,
+                        evidence_refs=(),
+                        idempotency_key=f"invalid-first-{action}",
+                    )
+                self.assertEqual(invalid.exception.code, code)
+                self.assertEqual(lifecycle.ledger.event_count(), before)
+                self.assertEqual(lifecycle.get(task.task_id).state, TaskState.PLANNED)
+
             with self.assertRaises(TaskLifecycleError) as caught:
                 lifecycle.action(
                     task.task_id,
@@ -653,7 +670,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 root,
                 policy=TaskPolicy(verification_commands=(COMMAND,)),
                 approval_authorizer=lambda _approver, stage, proof: (
-                    stage == "phase" and proof == "trusted"
+                    stage in {"phase", "final"} and proof == "trusted"
                 ),
                 effect_runner=lambda action: calls.append(action) or {"status": "ok"},
             )
@@ -699,6 +716,10 @@ class WorkflowLifecycleTests(unittest.TestCase):
             self.assertEqual(len(gate_events), 1)
             self.assertEqual(gate_events[0].payload["decision"], "escalate")
             approval_refs = (*hypothesis_hashes, gate_events[0].entry_hash)
+            self.assertEqual(task.approval_evidence_refs, approval_refs)
+            self.assertEqual(
+                task.to_dict()["approval_evidence_refs"], list(approval_refs)
+            )
 
             before_calls = len(calls)
             with self.assertRaises(TaskLifecycleError):
@@ -819,6 +840,32 @@ class WorkflowLifecycleTests(unittest.TestCase):
             self.assertEqual(replay.workflow_phases[1].status, "blocked")
             self.assertEqual(lifecycle.ledger.event_count(), before)
 
+            terminal = lifecycle.approve(
+                task.task_id,
+                stage="final",
+                approved=False,
+                approver="operator",
+                rationale="stop the bounded debug task",
+                evidence_refs=(),
+                idempotency_key="final-rejection",
+                proof="trusted",
+            )
+            self.assertEqual(terminal.state, TaskState.REJECTED)
+            self.assertTrue(terminal.terminal)
+            self.assertEqual(terminal.allowed_next, ("reflect",))
+            self.assertIsNone(terminal.blocked_reason)
+            self.assertEqual(terminal.approval_evidence_refs, ())
+            before = lifecycle.ledger.event_count()
+            historical = self._record_hypothesis(
+                lifecycle,
+                task.task_id,
+                suffix="after-approval-3",
+                status="rejected",
+                evidence_ref=evidence,
+            )
+            self.assertEqual(historical, terminal)
+            self.assertEqual(lifecycle.ledger.event_count(), before)
+
     def test_hypothesis_block_recovers_after_transition_crash(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -843,17 +890,10 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 task.task_id,
                 "crash-3",
             )
-            original_transition = lifecycle._append_transition
-
-            def crash_before_blocked(session, target, **kwargs):
-                if target is TaskState.BLOCKED:
-                    raise RuntimeError("simulated transition crash")
-                return original_transition(session, target, **kwargs)
-
             with patch.object(
-                lifecycle,
-                "_append_transition",
-                crash_before_blocked,
+                lifecycle.runtime,
+                "should_stop",
+                side_effect=RuntimeError("simulated escalation crash"),
             ), self.assertRaises(RuntimeError):
                 self._record_hypothesis(
                     lifecycle,
@@ -866,7 +906,28 @@ class WorkflowLifecycleTests(unittest.TestCase):
             fresh = self._lifecycle(root)
             blocked = fresh.get(task.task_id)
             self.assertEqual(blocked.state, TaskState.BLOCKED)
+            self.assertEqual(blocked.approval_evidence_refs, ())
+            self.assertEqual(blocked.allowed_next, ("hypothesis", "reject"))
+            self.assertEqual(
+                blocked.blocked_reason,
+                "workflow recovery requires an exact operation replay",
+            )
             before = fresh.ledger.event_count()
+            with self.assertRaises(TaskLifecycleError) as premature:
+                fresh.approve(
+                    task.task_id,
+                    stage="phase",
+                    phase_id=HYPOTHESIS,
+                    approved=True,
+                    approver="operator",
+                    rationale="must replay the interrupted hypothesis first",
+                    evidence_refs=(),
+                    idempotency_key="premature-crash-approval",
+                    proof="trusted",
+                )
+            self.assertEqual(premature.exception.code, "recovery_required")
+            self.assertEqual(fresh.ledger.event_count(), before)
+
             recovered = self._record_hypothesis(
                 fresh,
                 task.task_id,
@@ -876,7 +937,8 @@ class WorkflowLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(recovered.state, TaskState.BLOCKED)
             self.assertEqual(recovered.hypothesis_count, 3)
-            self.assertEqual(fresh.ledger.event_count(), before + 1)
+            self.assertEqual(len(recovered.approval_evidence_refs), 4)
+            self.assertEqual(fresh.ledger.event_count(), before + 2)
             gates = [
                 event
                 for event in fresh.ledger.events_for_contract(
