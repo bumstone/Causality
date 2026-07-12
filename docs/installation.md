@@ -1,6 +1,6 @@
 # Installation
 
-## Package or local checkout
+## Package or checkout
 
 ```powershell
 python -m venv .venv
@@ -32,7 +32,7 @@ From a target project:
 
 ```powershell
 causality install-agent --client codex --adopt --verify
-# or: --client claude / --client generic
+# --client claude or generic
 ```
 
 Installs routing, local ledger/MCP config, and on-demand workflow/skill files.
@@ -48,8 +48,7 @@ explicit rerun command.
 
 ## MCP and adapters
 
-Codex uses `.codex/config.toml`, Claude `.mcp.json`, and generic clients
-`.causality/mcp.json`. Trust and approval remain user gates. Manual start:
+Clients use native config; trust and approval remain user gates. Manual start:
 
 ```powershell
 python -I -m causality.mcp_server --project .
@@ -69,5 +68,17 @@ $env:CAUSALITY_HTTP_CREDENTIALS_JSON='{"service-token":{"Authorization":"Bearer 
 $env:CAUSALITY_APPROVAL_TOKEN='operator-secret'
 ```
 
-Secrets stay in MCP only; task subprocesses do not inherit `CAUSALITY_*`.
-Browser lifecycle remains Spec 004B; primitives are not a completion claim.
+Task subprocesses never inherit `CAUSALITY_*`. Browser support is also
+default-deny and requires an explicit wrapper command:
+
+```powershell
+$env:CAUSALITY_BROWSER_COMMAND_JSON='["python","C:\\tools\\browser_wrapper.py"]'
+# legacy single executable:
+$env:CAUSALITY_BROWSER_BIN='C:\tools\causality-browser.exe'
+```
+
+There is no `PATH` discovery. Protocol v1 must advertise isolated sessions,
+network-scope enforcement, and observe/act/assert/inspect/visual. Causality
+supplies private task session/profile paths and exact origins; the wrapper
+enforces them. The package does not bundle/launch a browser, navigate URLs,
+reuse personal profiles, or inject browser credentials.

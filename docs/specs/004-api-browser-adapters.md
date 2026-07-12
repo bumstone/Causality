@@ -2,37 +2,44 @@
 
 ## Delivery
 
-- [x] **004A HTTP:** exact origin/auth ceilings, external-send approval,
-  redacted intent/result, explicit response artifact, closed MCP tool, restart E2E.
-- [ ] **004B browser:** capability-gated driver, stable refs, state-bound actions,
-  A11y/diff evidence. No browser lifecycle claim before this slice passes.
+- [x] **004A HTTP:** exact scopes, approval, redacted evidence, artifact,
+  closed MCP tool, restart E2E.
+- [x] **004B browser:** capability-gated wrapper, isolated sessions, stable refs,
+  state-bound actions, untrusted replay, and A11y/diff evidence.
 
 ## Contract
 
-API and browser actions use the task lifecycle and emit the same gated evidence
-as file/subprocess actions. They never bypass permissions or completion checks.
+HTTP/browser effects use the persistent lifecycle and cannot bypass permissions,
+approval, evidence, verification, or completion.
 
-## API adapter
+## HTTP
 
-Use standard-library HTTP first. `causality_task_http` accepts method, URL,
-headers, body reference, timeout, expected status codes, and artifact paths.
-Before request, enforce allowed tool, action risk, `network_scope`, and
-`auth_scope`; extend the gate API where those scopes are currently inert.
-Caller headers need a server allowlist; credential headers come only from an
-`auth_ref` alias and never reach task subprocess environments.
+`causality_task_http` enforces tool/risk, exact network/auth scopes, public
+headers, and credential aliases. It records redacted metadata, status, byte
+counts, and explicit artifact hashes. Redirects and task-process credential
+inheritance are forbidden.
 
-Record redacted request metadata, response status, byte counts, and artifact
-hashes. Never persist secret values; keep response bodies only when explicitly
-scoped as an artifact.
+## Browser
 
-## Browser adapter
+`A11yBrowserAdapter` speaks wrapper protocol v1 over bounded JSON subprocess
+calls. MCP enables it only through `CAUSALITY_BROWSER_COMMAND_JSON` or the legacy
+single binary setting. Handshake must prove isolated sessions, network-scope
+enforcement, and observe/act/assert/inspect/visual capabilities.
 
-Route `A11yBrowserAdapter` through task actions: observe, act, assert state,
-inspect, and visual. Require stable refs for actions; record snapshot hash,
-before/after diff, console/network deltas, and screenshot/report hashes. Page
-text is untrusted and browser methods cannot write directly to the ledger.
+Each task gets a private session/profile. Observe returns stable refs and a
+canonical state hash. Later operations reject stale task state; effects recheck
+current origins, and every act requires `external_send` approval.
+
+Raw driver data stays in a hash-verified ignored cache and MCP returns it only as
+untrusted data. The ledger stores intent, state/snapshot hashes, diff and
+diagnostic hashes, and artifact refs. The adapter never writes the ledger.
+
+Browser launch/navigation, personal profiles, credential injection,
+selectors/JavaScript, and driver-specific compatibility remain host-wrapper
+responsibilities.
 
 ## Acceptance
 
-Local HTTP and fake-driver E2E tests prove scope rejection, redaction, action
-gating, artifact evidence, verification completion, and high-risk escalation.
+Installed-project HTTP and fake-wrapper browser E2E prove scope rejection,
+isolation, redaction, state/action gates, restart replay, artifact evidence,
+verification, and verifier quorum.

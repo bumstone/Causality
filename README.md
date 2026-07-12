@@ -18,6 +18,8 @@ The core control path is implemented and covered by the regression suite. See
 - Core control loop: implemented.
 - Plan/action/tool/non-goal gates: enforced through `run_task`,
   `ExecutionAdapter`, and the file/subprocess `ToolAdapter`.
+- HTTP and browser actions: explicit capability and scope policy routes both
+  through the persistent task lifecycle and evidence ledger.
 - Failure feedback: scoped failures can be approved into later `non_goals` and
   expire by TTL.
 - Skill reuse: promoted earned skills are recalled by objective relevance and
@@ -27,9 +29,8 @@ The core control path is implemented and covered by the regression suite. See
 - Secret safety: skill distillation redacts sensitive keys, nested structures,
   common token shapes, and bearer/basic authorization values.
 
-Do not read this as “the product is finished.” Remaining work is operational:
-API/browser execution through the contract and evidence model, executable
-playbook phases, and repository automation setup.
+Do not read this as “the product is finished.” Remaining work is executable
+playbook phases, durable resume/skill operations, and external automation setup.
 
 Canonical references:
 

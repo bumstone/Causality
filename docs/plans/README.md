@@ -7,7 +7,7 @@ See the [implementation-spec index](../specs/README.md) for phase contracts.
 
 | Order | Plan | Status |
 | --- | --- | --- |
-| 001 | [External harness delivery](001-external-harness-delivery.md) | in progress (001-003, 004A implemented) |
+| 001 | [External harness delivery](001-external-harness-delivery.md) | in progress (001-004 implemented) |
 
 Rules:
 
