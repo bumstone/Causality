@@ -1,6 +1,6 @@
 # Causality Project Summary
 
-Baseline: `404` tests pass; Git and ledger retain commit history.
+Baseline: `406` tests pass; Git and ledger retain commit history.
 
 ## What It Is
 
