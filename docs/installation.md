@@ -14,14 +14,14 @@ Helpers install the venv, package, agent files, and doctor checks:
 # Windows
 .\scripts\install.ps1
 
-# Update; options: -RefreshAgent, -SkipTests
+# Update; options: -SkipTests
 .\scripts\update.ps1
 ```
 
 ```bash
 # Linux/WSL
 bash scripts/install.sh
-bash scripts/update.sh           # options: --refresh-agent, --skip-tests
+bash scripts/update.sh           # option: --skip-tests
 ```
 
 Run `scripts/doctor.ps1` or `scripts/doctor.sh` for a health check.
@@ -39,7 +39,9 @@ Installs host entrypoints, namespaced routing, local rules/ledger/MCP config,
 and on-demand workflow, checklist, skill, and memory files.
 
 Host `AGENTS.md` and `CLAUDE.md` are never overwritten. `--force` refreshes
-other generated files.
+other generated files; update helpers use it automatically for schema changes.
+MCP `causality_init` accepts only `client` and `verify`; `--force` and `--adopt`
+are CLI-only operator actions.
 
 `auto` needs exactly one existing Codex/Claude signal; otherwise it returns an
 explicit rerun command.
@@ -54,13 +56,14 @@ Generated native entries contain machine paths; keep them local unless the host
 uses a portable shared command. Manual stdio start:
 
 ```powershell
-python -m causality.mcp_server --project .
+python -I -m causality.mcp_server --project .
 ```
+
+`.causality/.gitignore` hides raw runtime state. If a legacy private path is
+already tracked, install returns `broken` with untrack guidance.
 
 Set the browser driver executable when browser actions are needed:
 
 ```powershell
 $env:CAUSALITY_BROWSER_BIN="C:\path\to\browser-driver.exe"
 ```
-
-Web projects may add Playwright/axe and ledger-hash their reports.

@@ -1,7 +1,7 @@
 # Causality Project Summary
 
-Baseline: final PR #35 verification pending. Git and the evidence ledger retain
-commit-specific history.
+Baseline: `296` tests green (PR #35 post-review verification). Git and the
+evidence ledger retain commit-specific history.
 
 ## What It Is
 

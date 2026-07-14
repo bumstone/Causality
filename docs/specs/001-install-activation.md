@@ -1,38 +1,39 @@
 # Spec 001 — Install Activation
 
-Status: implemented (2026-07-11).
+Status: implemented.
 
 ## Contract
 
-`causality install-agent` installs generated assets and truthfully reports
-server and client readiness. `--force` never overwrites root `AGENTS.md` or
-`CLAUDE.md`; client trust/approval is never changed.
+`install-agent` installs assets and reports server/client readiness. `--force`
+preserves root `AGENTS.md`/`CLAUDE.md`; trust/approval stays human-owned.
 
 ## Interface
 
 - `--client auto|codex|claude|generic` (default `auto`) and `--verify`.
-- `auto` resolves exactly one existing client signal; zero or many is `pending`
-  with an explicit-client command.
+- `auto` resolves one client signal; zero/many is `pending` with a rerun command.
 - `--adopt` adds an idempotent marker block to the selected host entry
   file. Without it, preserve files and return `activation: pending` plus the
   exact snippet required to activate routing.
-- Pin MCP commands to `sys.executable`. Merge the namespaced entry into Codex
+- Pin MCP to `sys.executable` with an isolated launcher. Merge into Codex
   `.codex/config.toml` or Claude `.mcp.json`; preserve unrelated settings.
 - `--verify` starts the configured server, sends `initialize` and `tools/list`,
   then probes client loading when supported.
+- MCP init accepts `client`/`verify`; force and host adoption remain explicit
+  CLI-only operator actions.
 
 ## State
 
-Precedence is `broken > pending > active`. Invalid/conflicting config or failed
-handshake is `broken`. Missing adoption, verification, Codex trust, or Claude
-approval is `pending`. `active` means all applicable checks passed; generic mode
-has no client trust probe.
+Precedence: `broken > pending > active`. Bad config/handshake is `broken`;
+missing adoption, verification, trust, or approval is `pending`. `active` means
+all applicable checks passed; generic mode has no trust probe.
 
 ## Persistence and failure
 
-Durably write `.causality/install-report.json` with requested/resolved client,
-files, interpreter, handshake, client probe, remediation, and UTC timestamp.
+Durably write `.causality/install-report.json` with client, files, interpreter,
+handshake/probe, remediation, and timestamp.
 Only `broken` exits nonzero; generated files remain for diagnosis.
+Write `.causality/.gitignore` before runtime state. Pretracked private paths fail
+`broken` with untrack guidance.
 
 ## Acceptance
 

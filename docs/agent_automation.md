@@ -9,7 +9,7 @@ this document describes current behavior.
 AGENTS.md, CLAUDE.md
 .claude/commands/{onboard,causality-*}.md
 .codex/{causality-routing.md,config.toml}, .mcp.json
-.causality/{agent-rules.md,ledger.jsonl,causality-workflows.json,mcp.json,install-report.json}
+.causality/{.gitignore,agent-rules.md,ledger.jsonl,causality-workflows.json,mcp.json,install-report.json}
 workflow/, checklists/, skills/, memory/
 ```
 
@@ -19,12 +19,13 @@ workflow/checklist/skill files.
 
 Use `--client codex|claude|generic --verify`; `--adopt` appends only a managed
 routing pointer. Results are `active`, `pending` (trust/approval/adoption), or
-`broken` (invalid config or failed handshake). `causality_init` exposes the same
-options over MCP.
+`broken` (invalid config or failed handshake). MCP `causality_init` exposes only
+safe `client` and `verify` options; force/adoption require the operator CLI.
 
-Native MCP entries pin the local interpreter. This repository ignores
-`.codex/config.toml` and `.mcp.json`; a host with an existing shared config keeps
-its own tracking policy and unrelated entries.
+Native MCP entries pin the local interpreter and use an isolated absolute launcher.
+The installed ignore keeps untracked runtime state private; pretracked private
+paths fail with cleanup guidance. This repository ignores `.codex/config.toml`
+and `.mcp.json`; hosts retain their own config policy and unrelated entries.
 
 The installed control loop is:
 
@@ -39,7 +40,7 @@ loaded from the matching on-demand workflow or skill.
 ## MCP server
 
 ```powershell
-python -m causality.mcp_server --project .
+python -I -m causality.mcp_server --project .
 ```
 
 It exposes initialization, context, evidence append, and workflow-manifest

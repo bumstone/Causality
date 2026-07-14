@@ -111,7 +111,7 @@ causality doc-budget --enforce docs/project-summary.md
 For MCP-style clients:
 
 ```powershell
-python -m causality.mcp_server --project .
+python -I -m causality.mcp_server --project .
 ```
 
 ## Repository Map

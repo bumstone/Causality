@@ -102,7 +102,7 @@ causality doc-budget --enforce docs/project-summary.md
 MCP 스타일 클라이언트:
 
 ```powershell
-python -m causality.mcp_server --project .
+python -I -m causality.mcp_server --project .
 ```
 
 ## 저장소 구성
