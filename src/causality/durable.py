@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -50,6 +51,15 @@ _DIR_FSYNC_UNSUPPORTED = {
 }
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _assert_single_link(path: Path, *, label: str) -> None:
+    try:
+        info = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+        raise ValueError(f"{label} must not be a hard link: {path}")
 
 
 def _thread_lock_for(path: Path) -> threading.RLock:
@@ -82,15 +92,29 @@ def file_lock(path: str | Path) -> Iterator[None]:
     """Exclusive lock keyed on a ``<path>.lock`` sidecar, held for one write.
 
     Two writers to the same store serialize instead of interleaving (across
-    processes and threads). On platforms without ``fcntl`` this is a best-effort
-    no-op (ADR 0011 §4: cross-process safety is POSIX-only).
+    processes and threads). POSIX uses ``flock`` and Windows uses
+    ``msvcrt.locking``; only platforms without either primitive fall back to
+    process-local thread locking.
     """
     lock_path = Path(str(path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.is_symlink():
+        raise ValueError(f"lock sidecar must not be a symlink: {lock_path}")
+    _assert_single_link(lock_path, label="lock sidecar")
     thread_lock = _thread_lock_for(lock_path)
     with thread_lock:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
         try:
+            fd = os.open(str(lock_path), flags, 0o644)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ValueError(f"lock sidecar must not be a symlink: {lock_path}") from exc
+            raise
+        try:
+            if os.fstat(fd).st_nlink > 1:
+                raise ValueError(f"lock sidecar must not be a hard link: {lock_path}")
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
                 try:
@@ -172,6 +196,7 @@ class DurableJsonl:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         def _do() -> None:
+            _assert_single_link(self.path, label="append target")
             self._repair_torn_tail()
             created = not self.path.exists()
             with self.path.open("a", encoding="utf-8") as handle:

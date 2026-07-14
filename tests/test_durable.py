@@ -77,6 +77,54 @@ class DurableJsonlTests(unittest.TestCase):
 
 
 class DurabilityTests(unittest.TestCase):
+    def test_file_lock_rejects_symlinked_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "state.jsonl"
+            outside = root / "outside.lock"
+            outside.write_bytes(b"")
+            try:
+                Path(str(path) + ".lock").symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"file symlinks unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "lock sidecar must not be a symlink"):
+                with file_lock(path):
+                    pass
+
+            self.assertEqual(outside.read_bytes(), b"")
+
+    def test_file_lock_rejects_hardlinked_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
+            path = Path(temp_dir) / "state.jsonl"
+            source = Path(outside) / "outside.lock"
+            source.write_bytes(b"")
+            try:
+                os.link(source, Path(str(path) + ".lock"))
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "lock sidecar must not be a hard link"):
+                with file_lock(path):
+                    pass
+
+            self.assertEqual(source.read_bytes(), b"")
+
+    def test_append_rejects_hardlinked_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
+            path = Path(temp_dir) / "state.jsonl"
+            source = Path(outside) / "outside.jsonl"
+            source.write_bytes(b"")
+            try:
+                os.link(source, path)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "append target must not be a hard link"):
+                DurableJsonl(path).append('{"safe": false}')
+
+            self.assertEqual(source.read_bytes(), b"")
+
     def test_atomic_replace_leaves_no_temp_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)

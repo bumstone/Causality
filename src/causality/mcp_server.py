@@ -6,7 +6,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .agent_bootstrap import SUPPORTED_CLIENTS, install_agent_files
+from .agent_bootstrap import (
+    SUPPORTED_CLIENTS,
+    _assert_safe_install_path,
+    _ensure_private_ignore,
+    _private_tracking_issue,
+    install_agent_files,
+)
 from .contracts import AuditEventType
 from .ledger import EvidenceLedger
 from .workflows import workflow_manifest
@@ -21,7 +27,18 @@ class CausalityMCPServer:
 
     def __init__(self, project: str | Path = "."):
         self.project = Path(project).resolve()
-        self.ledger = EvidenceLedger(self.project / ".causality" / "ledger.jsonl")
+        tracking_issue = _private_tracking_issue(self.project)
+        if tracking_issue:
+            raise ValueError(tracking_issue)
+        causality_dir = self.project / ".causality"
+        privacy_path = causality_dir / ".gitignore"
+        ledger_path = causality_dir / "ledger.jsonl"
+        _assert_safe_install_path(self.project, privacy_path)
+        _assert_safe_install_path(self.project, ledger_path)
+        _assert_safe_install_path(self.project, Path(str(ledger_path) + ".lock"))
+        causality_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_private_ignore(privacy_path)
+        self.ledger = EvidenceLedger(ledger_path)
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
         method = request.get("method")
@@ -53,21 +70,20 @@ class CausalityMCPServer:
                 "description": "Install project-level Causality agent files.",
                 "inputSchema": {
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
-                        "force": {"type": "boolean", "default": False},
                         "client": {
                             "type": "string",
                             "enum": list(SUPPORTED_CLIENTS),
                             "default": "auto",
                         },
-                        "adopt": {"type": "boolean", "default": False},
                         "verify": {"type": "boolean", "default": False},
                     },
                 },
             },
             {
                 "name": "causality_context",
-                "description": "Return recent ledger events and workflow names.",
+                "description": "Return recent ledger metadata and workflow names.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"limit": {"type": "integer", "default": 5}},
@@ -95,12 +111,25 @@ class CausalityMCPServer:
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "causality_init":
+            cli_only = {"force", "adopt"}.intersection(arguments)
+            if cli_only:
+                names = ", ".join(sorted(cli_only))
+                raise ValueError(f"{names} are CLI-only options requiring explicit operator action")
+            unknown = set(arguments).difference({"client", "verify"})
+            if unknown:
+                raise ValueError(f"unknown causality_init options: {', '.join(sorted(unknown))}")
+            client = arguments.get("client", "auto")
+            if not isinstance(client, str) or client not in SUPPORTED_CLIENTS:
+                raise ValueError(f"client must be one of: {', '.join(SUPPORTED_CLIENTS)}")
+            verify = arguments.get("verify", False)
+            if not isinstance(verify, bool):
+                raise ValueError("verify must be a boolean")
             result = install_agent_files(
                 self.project,
-                force=bool(arguments.get("force", False)),
-                client=str(arguments.get("client", "auto")),
-                adopt=bool(arguments.get("adopt", False)),
-                verify=bool(arguments.get("verify", False)),
+                force=False,
+                client=client,
+                adopt=False,
+                verify=verify,
             )
             return _text_result(json.dumps(result.to_dict(), ensure_ascii=True, indent=2))
 
