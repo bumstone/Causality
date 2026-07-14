@@ -8,9 +8,53 @@ from pathlib import Path
 from unittest import mock
 
 from causality.durable import DurableJsonl, file_lock, write_text_durably
+import causality.durable as durable_module
 
 
 class WriteTextDurablyTests(unittest.TestCase):
+    def test_transient_atomic_replace_permission_error_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            real_replace = os.replace
+            attempts = 0
+
+            def transient_replace(source, target) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError("simulated transient sharing violation")
+                real_replace(source, target)
+
+            with (
+                mock.patch.object(durable_module, "_ATOMIC_REPLACE_ATTEMPTS", 3),
+                mock.patch.object(durable_module.os, "replace", transient_replace),
+                mock.patch.object(durable_module.time, "sleep") as sleep,
+            ):
+                write_text_durably(path, "durable")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "durable")
+            self.assertEqual(attempts, 3)
+            self.assertEqual(sleep.call_count, 2)
+
+    def test_persistent_atomic_replace_permission_error_propagates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "state.json"
+            with (
+                mock.patch.object(durable_module, "_ATOMIC_REPLACE_ATTEMPTS", 2),
+                mock.patch.object(
+                    durable_module.os,
+                    "replace",
+                    side_effect=PermissionError("persistent sharing violation"),
+                ),
+                mock.patch.object(durable_module.time, "sleep"),
+            ):
+                with self.assertRaises(PermissionError):
+                    write_text_durably(path, "not committed")
+
+            self.assertFalse(path.exists())
+            self.assertEqual(list(root.glob("*.tmp")), [])
+
     def test_writes_exact_text_and_creates_parents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "nested" / "dir" / "state.json"

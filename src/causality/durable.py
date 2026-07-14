@@ -52,6 +52,8 @@ _DIR_FSYNC_UNSUPPORTED = {
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
 _LOCK_STATE = threading.local()
+_ATOMIC_REPLACE_ATTEMPTS = 5 if os.name == "nt" else 1
+_ATOMIC_REPLACE_RETRY_SECONDS = 0.02
 
 
 def _assert_single_link(path: Path, *, label: str) -> None:
@@ -86,6 +88,18 @@ def _fsync_dir(directory: Path) -> None:
             raise
     finally:
         os.close(dir_fd)
+
+
+def _replace_atomically(source: str | Path, target: str | Path) -> None:
+    """Replace a file, tolerating only bounded transient Windows sharing errors."""
+    for attempt in range(_ATOMIC_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 == _ATOMIC_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_ATOMIC_REPLACE_RETRY_SECONDS * (attempt + 1))
 
 
 @contextmanager
@@ -179,7 +193,7 @@ def write_text_durably(path: str | Path, text: str, *, lock: bool = True) -> Non
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_name, file_path)
+            _replace_atomically(tmp_name, file_path)
         except BaseException:
             try:
                 os.unlink(tmp_name)
