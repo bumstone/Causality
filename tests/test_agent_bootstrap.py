@@ -15,9 +15,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.agent_bootstrap import (
+    LEGACY_CLAUDE_MD,
     ClientProbeResult,
     _probe_claude,
     _probe_codex,
+    _trusted_client_executable,
     install_agent_files,
     mcp_config,
 )
@@ -31,6 +33,7 @@ class AgentBootstrapTests(unittest.TestCase):
         config = mcp_config(Path("project").resolve())
 
         self.assertEqual(config["mcpServers"]["causality"]["command"], sys.executable)
+        self.assertEqual(config["mcpServers"]["causality"]["args"][0], "-I")
 
     def test_install_agent_files_writes_project_automation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -144,7 +147,13 @@ class AgentBootstrapTests(unittest.TestCase):
             self.assertFalse((Path(outside) / "config.toml").exists())
 
     def test_install_rejects_symlinked_runtime_files(self) -> None:
-        for filename in ("mcp.json", "install-report.json", "ledger.jsonl"):
+        for filename in (
+            "mcp.json",
+            "install-report.json",
+            "install-report.json.lock",
+            "ledger.jsonl",
+            "ledger.jsonl.lock",
+        ):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
                 causality_dir = root / ".causality"
@@ -160,6 +169,144 @@ class AgentBootstrapTests(unittest.TestCase):
                     install_agent_files(root, client="generic")
 
                 self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+
+    def test_force_replaces_hardlinked_generated_file_without_touching_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp_dir)
+            portable = root / ".causality" / "mcp.json"
+            portable.parent.mkdir(parents=True)
+            source = Path(outside) / "mcp.json"
+            source.write_text("outside", encoding="utf-8")
+            try:
+                os.link(source, portable)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+
+            result = install_agent_files(root, client="generic", force=True)
+
+            self.assertNotEqual(result.activation, "broken")
+            self.assertEqual(source.read_text(encoding="utf-8"), "outside")
+            self.assertFalse(os.path.samefile(source, portable))
+
+    def test_install_self_ignores_private_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            causality_dir = root / ".causality"
+            causality_dir.mkdir()
+            (causality_dir / ".gitignore").write_text(
+                "# BEGIN CAUSALITY PRIVATE\n*\n!.gitignore\n"
+                "# END CAUSALITY PRIVATE\n!ledger.jsonl\n",
+                encoding="utf-8",
+            )
+
+            install_agent_files(root, client="generic")
+
+            ignored = subprocess.run(
+                ["git", "check-ignore", ".causality/ledger.jsonl"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            status = subprocess.run(
+                ["git", "status", "--short", "--untracked-files=all"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            self.assertEqual(ignored.returncode, 0)
+            self.assertNotIn("ledger.jsonl", status)
+            self.assertNotIn("install-report.json", status)
+            self.assertIn(".causality/.gitignore", status)
+
+    def test_install_blocks_pretracked_private_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            ledger = root / ".causality" / "ledger.jsonl"
+            ledger.parent.mkdir()
+            ledger.write_text("tracked legacy state\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-f", ".causality/ledger.jsonl"], cwd=root, check=True
+            )
+
+            result = install_agent_files(root, client="generic")
+
+            self.assertEqual(result.activation, "broken")
+            self.assertIsNone(result.report_path)
+            self.assertEqual(ledger.read_text(encoding="utf-8"), "tracked legacy state\n")
+            self.assertFalse((root / ".causality" / ".gitignore").exists())
+            self.assertIn("git rm -r --cached", " ".join(result.remediation))
+
+    def test_install_blocks_pretracked_private_path_outside_windows_acp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            private = root / ".causality" / "🔒.txt"
+            private.parent.mkdir()
+            private.write_text("private", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-f", ".causality/🔒.txt"], cwd=root, check=True
+            )
+
+            result = install_agent_files(root, client="generic")
+
+            self.assertEqual(result.activation, "broken")
+            self.assertIn("🔒.txt", " ".join(result.remediation))
+
+    @unittest.skipUnless(os.name == "nt", "Windows case-folding regression")
+    def test_install_blocks_case_variant_pretracked_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            ledger = root / ".Causality" / "ledger.jsonl"
+            ledger.parent.mkdir()
+            ledger.write_text("tracked legacy state\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-f", ".Causality/ledger.jsonl"], cwd=root, check=True
+            )
+
+            result = install_agent_files(root, client="generic")
+
+            self.assertEqual(result.activation, "broken")
+            self.assertEqual(ledger.read_text(encoding="utf-8"), "tracked legacy state\n")
+
+    def test_install_fails_closed_when_project_local_git_hides_trusted_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            ledger = root / ".causality" / "ledger.jsonl"
+            ledger.parent.mkdir()
+            ledger.write_text("tracked legacy state\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-f", ".causality/ledger.jsonl"], cwd=root, check=True
+            )
+            local_git = root / ("git.cmd" if os.name == "nt" else "git")
+            local_git.write_text("local git must not run", encoding="utf-8")
+            if os.name != "nt":
+                local_git.chmod(0o755)
+
+            with mock.patch.dict(os.environ, {"PATH": str(root)}):
+                result = install_agent_files(root, client="generic")
+
+            self.assertEqual(result.activation, "broken")
+            self.assertEqual(ledger.read_text(encoding="utf-8"), "tracked legacy state\n")
+            self.assertIn("trusted Git executable", " ".join(result.remediation))
+
+    def test_install_fails_closed_when_git_tracking_query_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            with mock.patch(
+                "causality.agent_bootstrap.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="query failed"),
+            ):
+                result = install_agent_files(root, client="generic")
+
+            self.assertEqual(result.activation, "broken")
+            self.assertIn("query failed", " ".join(result.remediation))
 
     def test_adopt_rejects_symlinked_host_entrypoint(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -197,6 +344,31 @@ class AgentBootstrapTests(unittest.TestCase):
             self.assertIn(agents, result.skipped)
             self.assertIn(claude, result.skipped)
             self.assertIn(generated, result.written)
+
+    def test_force_migrates_legacy_portable_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            portable = root / ".causality" / "mcp.json"
+            portable.parent.mkdir(parents=True)
+            portable.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "causality": {
+                                "command": "python",
+                                "args": ["-m", "causality.mcp_server", "--project", str(root)],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = install_agent_files(root, client="generic", force=True)
+
+            updated = json.loads(portable.read_text(encoding="utf-8"))
+            self.assertNotEqual(result.activation, "broken")
+            self.assertEqual(updated["mcpServers"]["causality"]["command"], sys.executable)
 
     def test_existing_host_requires_adopt_and_preserves_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -346,11 +518,15 @@ class AgentBootstrapTests(unittest.TestCase):
             config.parent.mkdir(parents=True)
             config.write_text("not = [valid", encoding="utf-8")
             original = config.read_bytes()
+            agents = root / "AGENTS.md"
+            agents.write_text("# Host rules\n", encoding="utf-8")
+            original_agents = agents.read_bytes()
 
-            result = install_agent_files(root, client="codex")
+            result = install_agent_files(root, client="codex", adopt=True)
 
             self.assertEqual(result.activation, "broken")
             self.assertEqual(config.read_bytes(), original)
+            self.assertEqual(agents.read_bytes(), original_agents)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -398,6 +574,7 @@ class AgentBootstrapTests(unittest.TestCase):
             "<!-- BEGIN CAUSALITY ROUTING -->\n# Empty\n<!-- END CAUSALITY ROUTING -->\n"
             "Follow `.causality/agent-rules.md`\n",
             "Do not follow `.causality/agent-rules.md`.\n",
+            "Do not Follow `.causality/agent-rules.md`.\n",
         )
         for content in samples:
             with self.subTest(content=content), tempfile.TemporaryDirectory() as temp_dir:
@@ -434,6 +611,17 @@ class AgentBootstrapTests(unittest.TestCase):
                 config["mcpServers"]["causality"]["command"], str(second_python)
             )
 
+    def test_force_accepts_legacy_generated_claude_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            claude = root / "CLAUDE.md"
+            claude.write_text(LEGACY_CLAUDE_MD, encoding="utf-8")
+
+            result = install_agent_files(root, client="claude", force=True)
+
+            self.assertNotEqual(result.activation, "broken")
+            self.assertEqual(claude.read_text(encoding="utf-8"), LEGACY_CLAUDE_MD)
+
     def test_client_probes_reject_unstructured_or_mismatched_output(self) -> None:
         root = Path.cwd()
         server = mcp_config(root)["mcpServers"]["causality"]
@@ -457,11 +645,77 @@ class AgentBootstrapTests(unittest.TestCase):
         self.assertNotEqual(codex.status, "pass")
         self.assertNotEqual(claude.status, "pass")
 
+    def test_client_probe_does_not_execute_project_local_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            marker = root / "probe-executed"
+            if os.name == "nt":
+                executable = root / "codex.cmd"
+                executable.write_text(f"@echo malicious>\"{marker}\"\r\n", encoding="utf-8")
+            else:
+                executable = root / "codex"
+                executable.write_text(f"#!/bin/sh\necho malicious > '{marker}'\n", encoding="utf-8")
+                executable.chmod(0o755)
+
+            with mock.patch.dict(os.environ, {"PATH": str(root)}):
+                result = _probe_codex(root, mcp_config(root)["mcpServers"]["causality"], 1)
+
+            self.assertEqual(result.status, "pending")
+            self.assertFalse(marker.exists())
+
+    def test_client_probe_rejects_project_symlink_to_trusted_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            marker = root / "probe-executed"
+            executable = root / ("codex.cmd" if os.name == "nt" else "codex")
+            try:
+                executable.symlink_to(Path(sys.executable))
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+            mcp = root / "mcp"
+            mcp.write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(os.environ, {"PATH": str(root)}):
+                result = _probe_codex(root, mcp_config(root)["mcpServers"]["causality"], 1)
+
+            self.assertEqual(result.status, "pending")
+            self.assertFalse(marker.exists())
+
+    def test_client_probe_allows_external_executable_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp_dir)
+            executable = Path(outside) / ("codex.exe" if os.name == "nt" else "codex")
+            try:
+                executable.symlink_to(Path(sys.executable))
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            with mock.patch(
+                "causality.agent_bootstrap.shutil.which", return_value=str(executable)
+            ):
+                trusted = _trusted_client_executable("codex", root)
+
+            self.assertEqual(trusted, str(Path(sys.executable).resolve()))
+
     def test_venv_interpreter_runs_external_project_handshake(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
             environment = base / "venv"
             project = base / "host project"
+            project.mkdir()
+            marker = project / "shadow-executed"
+            shadow = project / "causality"
+            shadow.mkdir()
+            (shadow / "__init__.py").write_text("", encoding="utf-8")
+            (shadow / "mcp_server.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+                "raise SystemExit(7)\n",
+                encoding="utf-8",
+            )
             venv.EnvBuilder(with_pip=False).create(environment)
             python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             purelib = subprocess.run(
@@ -472,13 +726,19 @@ class AgentBootstrapTests(unittest.TestCase):
             ).stdout.strip()
             Path(purelib, "causality-local.pth").write_text(str(SRC_ROOT), encoding="utf-8")
             clean_env = os.environ.copy()
-            clean_env.pop("PYTHONPATH", None)
+            clean_env["PYTHONPATH"] = str(project)
+            installer_launcher = (
+                "import runpy,sys;"
+                f"sys.path.insert(0,{str(SRC_ROOT)!r});"
+                "runpy.run_module('causality.cli',run_name='__main__')"
+            )
 
             completed = subprocess.run(
                 [
                     str(python),
-                    "-m",
-                    "causality.cli",
+                    "-I",
+                    "-c",
+                    installer_launcher,
                     "install-agent",
                     "--project",
                     str(project),
@@ -496,6 +756,7 @@ class AgentBootstrapTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             output = json.loads(completed.stdout)
             self.assertEqual(output["activation"], "active")
+            self.assertFalse(marker.exists())
             config = json.loads((project / ".causality" / "mcp.json").read_text(encoding="utf-8"))
             self.assertEqual(config["mcpServers"]["causality"]["command"], str(python))
 
