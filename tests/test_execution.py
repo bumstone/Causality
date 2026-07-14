@@ -51,6 +51,15 @@ def _passing_verifiers(engine: CausalityEngine):
     ]
 
 
+class PlanApprovalTests(unittest.TestCase):
+    def test_requires_nonblank_approver_and_rationale_at_construction(self) -> None:
+        with self.assertRaises(TypeError):
+            PlanApproval("alice")  # type: ignore[call-arg]
+        for approval in (("", "release sign-off"), ("alice", "")):
+            with self.subTest(approval=approval), self.assertRaises(ValueError):
+                PlanApproval(*approval)
+
+
 class AdapterUnitTests(unittest.TestCase):
     """ExecutionAdapter enforces the contract's per-action gates."""
 

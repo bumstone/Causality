@@ -39,7 +39,13 @@ class PlanApproval:
     """
 
     approver: str
-    rationale: str = ""
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.approver, str) or not self.approver.strip():
+            raise ValueError("approval approver must be a non-blank string")
+        if not isinstance(self.rationale, str) or not self.rationale.strip():
+            raise ValueError("approval rationale must be a non-blank string")
 
 
 # Hook consulted for an approval-required plan: bound contract -> approval|None.
