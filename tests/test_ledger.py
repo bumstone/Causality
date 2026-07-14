@@ -560,6 +560,24 @@ class LedgerTests(unittest.TestCase):
 
             self.assertFalse(ledger.verify_chain())
 
+    def test_append_rejects_truncated_anchored_ledger_without_blessing_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            for n in range(3):
+                ledger.append(AuditEventType.EVIDENCE, {"n": n})
+            original_head = Path(str(path) + ".head").read_bytes()
+            rows = path.read_text(encoding="utf-8").splitlines()
+            path.write_text("\n".join(rows[:2]) + "\n", encoding="utf-8")
+
+            self.assertFalse(ledger.verify_chain())
+            with self.assertRaisesRegex(RuntimeError, "invalid ledger chain"):
+                ledger.append(AuditEventType.EVIDENCE, {"n": 3})
+
+            self.assertEqual(Path(str(path) + ".head").read_bytes(), original_head)
+            self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
+            self.assertFalse(ledger.verify_chain())
+
     def test_archive_numbering_gap_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ledger.jsonl"
@@ -601,6 +619,54 @@ class LedgerTests(unittest.TestCase):
             follow_up = ledger.append(AuditEventType.EVIDENCE, {"n": 2})
             self.assertEqual(follow_up.previous_hash, legacy["entry_hash"])
             self.assertTrue(ledger.verify_chain())
+
+    def test_legacy_rotated_head_with_current_events_migrates_to_current_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ledger.jsonl"
+            ledger = EvidenceLedger(path)
+            ledger.append(AuditEventType.EVIDENCE, {"n": 1})
+            archived = json.loads(path.read_text(encoding="utf-8"))
+            archived.pop("anchor_version")
+            archived_unsigned = {
+                key: value for key, value in archived.items() if key != "entry_hash"
+            }
+            archived["entry_hash"] = ledger_module.sha256_text(
+                ledger_module._stable_json(archived_unsigned)
+            )
+            archive_path = Path(str(path) + ".1")
+            archive_path.write_text(
+                json.dumps(archived, ensure_ascii=True, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            current = dict(archived)
+            current["event_id"] = current["event_id"] + "-current"
+            current["payload"] = {"n": 2}
+            current["previous_hash"] = archived["entry_hash"]
+            current_unsigned = {
+                key: value for key, value in current.items() if key != "entry_hash"
+            }
+            current["entry_hash"] = ledger_module.sha256_text(
+                ledger_module._stable_json(current_unsigned)
+            )
+            path.write_text(
+                json.dumps(current, ensure_ascii=True, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            head = Path(str(path) + ".head")
+            head.write_text(archived["entry_hash"] + "\n", encoding="utf-8")
+
+            migrated = EvidenceLedger(path)
+
+            self.assertTrue(migrated.verify_chain())
+            anchor = json.loads(head.read_text(encoding="utf-8"))
+            self.assertEqual(
+                anchor,
+                {"version": 1, "committed": current["entry_hash"], "pending": None},
+            )
+            follow_up = migrated.append(AuditEventType.EVIDENCE, {"n": 3})
+            self.assertEqual(follow_up.previous_hash, current["entry_hash"])
+            self.assertTrue(migrated.verify_chain())
 
     def test_corrupt_anchor_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

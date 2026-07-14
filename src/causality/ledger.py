@@ -76,6 +76,7 @@ class EvidenceLedger:
         # internal scans touch the cache directly. (Cross-process concurrency
         # still needs locking -- ADR 0011 R4.)
         self._cached_latest_hash: str | None = None
+        self._cached_current_has_events: bool | None = None
         self._synced_token: tuple[object, ...] | None = None
         self._cached_events: list[LedgerEvent] | None = None
         self._events_synced_token: tuple[object, ...] | None = None
@@ -123,7 +124,7 @@ class EvidenceLedger:
         # appended since our last sync; the store append runs lock=False since we
         # already hold it.
         with file_lock(self.path):
-            previous_hash = self.latest_hash()
+            previous_hash = self._append_base_hash_locked()
             entry_without_hash = {
                 "event_id": str(uuid4()),
                 "timestamp": utc_now(),
@@ -152,6 +153,7 @@ class EvidenceLedger:
             # Resync to the row we just wrote so the next append is O(1) and the
             # size guard stays consistent with what is on disk.
             self._cached_latest_hash = entry_hash
+            self._cached_current_has_events = True
             new_token = self._cache_token()
             self._synced_token = new_token
             # Keep the parsed-events cache warm across append-then-read, but only
@@ -250,6 +252,7 @@ class EvidenceLedger:
             # either -- otherwise a same-length repair+append could serve a stale
             # anchor and fork the chain (codex r3445819560).
             lines, torn = self._store.read_lines_with_torn()
+            self._cached_current_has_events = bool(lines)
             if lines:
                 self._cached_latest_hash = json.loads(lines[-1]).get("entry_hash")
             else:
@@ -259,6 +262,22 @@ class EvidenceLedger:
                 self._cached_latest_hash = self._carry_over_head()
             self._synced_token = None if torn else token
         return self._cached_latest_hash
+
+    def _append_base_hash_locked(self) -> str | None:
+        """Return a trusted tail without letting append bless lost ledger rows."""
+        previous_hash = self.latest_hash()
+        anchor = self._anchor_state()
+        if (
+            anchor is not None
+            and anchor.get("version") == 1
+            and anchor.get("pending") is None
+            and anchor.get("committed") == previous_hash
+            and (previous_hash is None or self._cached_current_has_events is True)
+        ):
+            return previous_hash
+        if not self._verify_chain_locked():
+            raise RuntimeError("cannot append to an invalid ledger chain")
+        return self.latest_hash()
 
     def events_for_contract(
         self,
@@ -319,6 +338,7 @@ class EvidenceLedger:
         # its first entry's previous_hash points at the sealed tail. So the seam
         # is checked, and a tampered archive fails verification too.
         previous_hash = None
+        archive_tail = None
         events: list[LedgerEvent] = []
         try:
             archives = self._archive_segments()
@@ -345,6 +365,8 @@ class EvidenceLedger:
                         return False
                     previous_hash = event.entry_hash
                     events.append(event)
+                if segment != self.path:
+                    archive_tail = previous_hash
         except (OSError, TypeError, ValueError):
             return False
 
@@ -356,7 +378,15 @@ class EvidenceLedger:
         committed = anchor.get("committed")
         pending = anchor.get("pending")
         if anchor.get("version") == 0:
-            return not any(event.anchor_version is not None for event in events) and committed == previous_hash
+            if (
+                not archives
+                or committed != archive_tail
+                or any(event.anchor_version is not None for event in events)
+            ):
+                return False
+            self._write_anchor(previous_hash)
+            self._reset_caches()
+            return True
         if anchor.get("version") != 1:
             return False
         if pending is None:
@@ -436,6 +466,7 @@ class EvidenceLedger:
 
     def _reset_caches(self) -> None:
         self._cached_latest_hash = None
+        self._cached_current_has_events = None
         self._synced_token = None
         self._cached_events = None
         self._events_synced_token = None
