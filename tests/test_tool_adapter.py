@@ -53,6 +53,24 @@ class ToolAdapterTests(unittest.TestCase):
             self.assertIs(tool_calls[0].payload["mutates_task"], True)
             self.assertEqual(tool_calls[0].contract_id, contract.goal_id)
 
+    def test_public_run_decodes_raw_output_after_recording_exact_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime, _, adapter = self._setup(temp_dir)
+            raw = b"\xff\xfe\x80"
+            tool = ToolAdapter(
+                runtime.ledger,
+                adapter,
+                runner=_recording_runner([], CommandResult(0, raw, b"")),
+            )
+
+            result = tool.run(["raw-output"])
+
+            self.assertIsInstance(result.stdout, str)
+            self.assertIn("\ufffd", result.stdout)
+            payload = runtime.ledger.find(AuditEventType.TOOL_CALL)[0].payload
+            self.assertEqual(payload["stdout_bytes"], len(raw))
+            self.assertEqual(payload["stdout_sha256"], hashlib.sha256(raw).hexdigest())
+
     def test_run_bounds_large_ledger_output_and_hashes_the_full_stream(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime, _, adapter = self._setup(temp_dir)

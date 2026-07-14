@@ -82,6 +82,13 @@ def captured_output(value: str | bytes | None) -> tuple[str, int, str, bool]:
     return captured.decode("utf-8"), size, digest, truncated
 
 
+def _display_output(value: str | bytes) -> str:
+    """Decode raw subprocess output without changing the public adapter API."""
+    if isinstance(value, str):
+        return value
+    return value.decode("utf-8", errors="replace")
+
+
 @dataclass
 class ToolAdapter:
     """Gate-enforcing executors handed to (or built by) a task's ``work``.
@@ -125,7 +132,7 @@ class ToolAdapter:
         before_effect: EffectHook | None = None,
     ) -> CommandResult:
         """Run ``args`` through the gates and conservatively mark it as mutating."""
-        return self._run(
+        result = self._run(
             args,
             tool=tool,
             action_kind=action_kind,
@@ -135,6 +142,11 @@ class ToolAdapter:
             mutates_task=True,
             environment_overrides={},
             before_effect=before_effect,
+        )
+        return CommandResult(
+            result.exit_code,
+            _display_output(result.stdout),
+            _display_output(result.stderr),
         )
 
     def _run(
@@ -167,7 +179,6 @@ class ToolAdapter:
                 return self.runner(argv)
             completed = subprocess.run(  # noqa: S603 - argv list, never shell=True
                 argv,
-                text=True,
                 capture_output=True,
                 check=False,
                 timeout=timeout,

@@ -680,7 +680,7 @@ class HITLGate:
                 metadata = candidate.lstat()
                 current_resolved = candidate.resolve()
                 current_mode = stat.S_IMODE(metadata.st_mode)
-            except OSError:
+            except (OSError, RuntimeError):
                 issues.append(f"artifact changed after verification: {declared_path}")
                 continue
             if not current_resolved.is_relative_to(root):

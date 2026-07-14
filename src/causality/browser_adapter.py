@@ -30,8 +30,8 @@ class BrowserCommandError(RuntimeError):
 @dataclass(frozen=True)
 class CommandResult:
     exit_code: int
-    stdout: str = ""
-    stderr: str = ""
+    stdout: str | bytes = ""
+    stderr: str | bytes = ""
 
 
 @dataclass(frozen=True)

@@ -68,7 +68,14 @@ class Causality:
                     candidate = Path(declared_path)
                     if not candidate.is_absolute():
                         candidate = self.project_root / candidate
-                    if not candidate.resolve().is_relative_to(self.project_root):
+                    try:
+                        resolved_artifact = candidate.resolve()
+                    except (OSError, RuntimeError) as exc:
+                        raise ValueError(
+                            "verification artifact path cannot be resolved: "
+                            f"{declared_path}"
+                        ) from exc
+                    if not resolved_artifact.is_relative_to(self.project_root):
                         raise ValueError(
                             "verification artifact path escapes project root: "
                             f"{declared_path}"

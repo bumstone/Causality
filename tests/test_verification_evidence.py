@@ -92,6 +92,24 @@ def _cite(runtime: Causality, contract: GoalContract, event_hash: str) -> None:
 
 
 class VerificationRequirementTests(unittest.TestCase):
+    def test_contract_rejects_cyclic_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "cycle-a"
+            second = root / "cycle-b"
+            try:
+                first.symlink_to(second)
+                second.symlink_to(first)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            runtime = Causality(root / "ledger.jsonl")
+
+            with self.assertRaisesRegex(ValueError, "cannot be resolved"):
+                _contract(
+                    runtime,
+                    _requirement(artifact_paths={"cycle-a": None}),
+                )
+
     def test_roundtrip_preserves_executable_contract(self) -> None:
         expected = hashlib.sha256(b"ok").hexdigest()
         requirement = _requirement(
@@ -195,6 +213,68 @@ class VerificationRequirementTests(unittest.TestCase):
 
 
 class VerificationExecutionTests(unittest.TestCase):
+    def _verify_with_symlink_cycle(self, *, target_is_directory: bool) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "cycle-a"
+            second = root / "cycle-b"
+            try:
+                first.symlink_to(second, target_is_directory=target_is_directory)
+                second.symlink_to(first, target_is_directory=target_is_directory)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            runtime = Causality(root / "ledger.jsonl")
+            contract = _contract(runtime, _requirement())
+
+            result = runtime.verify_requirement(contract, "unit", root=root)
+
+            self.assertEqual(result.status, "pass")
+
+    def test_file_symlink_cycle_has_stable_workspace_signature(self) -> None:
+        self._verify_with_symlink_cycle(target_is_directory=False)
+
+    def test_directory_symlink_cycle_has_stable_workspace_signature(self) -> None:
+        self._verify_with_symlink_cycle(target_is_directory=True)
+
+    def test_non_utf8_output_preserves_raw_byte_hash_and_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = Causality(root / "ledger.jsonl")
+            raw = b"\xff\xfe\x80"
+            requirement = _requirement(
+                argv=_python(f"import os; os.write(1, {raw!r})")
+            )
+            contract = _contract(runtime, requirement)
+
+            result = runtime.verify_requirement(contract, "unit", root=root)
+
+            self.assertEqual(result.status, "pass")
+            self.assertEqual(result.stdout_bytes, len(raw))
+            self.assertEqual(result.stdout_sha256, hashlib.sha256(raw).hexdigest())
+            self.assertIn("\ufffd", result.stdout)
+
+    def test_cyclic_artifact_created_during_verification_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = Causality(root / "ledger.jsonl")
+            contract = _contract(
+                runtime,
+                _requirement(artifact_paths={"result.txt": None}),
+            )
+
+            target = root / "result.txt"
+            other = root / "other.txt"
+            try:
+                target.symlink_to(other)
+                other.symlink_to(target)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            result = runtime.verify_requirement(contract, "unit", root=root)
+
+            self.assertEqual(result.status, "fail")
+            self.assertIn("cannot be resolved", result.reason)
+
     def test_record_evidence_payload_cannot_override_reserved_kind(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime = Causality(Path(temp_dir) / "ledger.jsonl")
@@ -1328,6 +1408,31 @@ class VerificationCompletionTests(unittest.TestCase):
             target.unlink()
             try:
                 target.symlink_to(external)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            completion = runtime.complete(contract)
+
+            self.assertEqual(completion.decision, GateDecision.REPAIR)
+            self.assertIn("artifact", " ".join(completion.reasons))
+
+    def test_artifact_symlink_cycle_after_verification_requires_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = Causality(root / "ledger.jsonl")
+            requirement = _requirement(
+                argv=_python("from pathlib import Path; Path('result.txt').write_text('same')"),
+                artifact_paths={"result.txt": hashlib.sha256(b"same").hexdigest()},
+            )
+            contract = _contract(runtime, requirement)
+            result = runtime.verify_requirement(contract, "unit", root=root)
+            _cite(runtime, contract, result.event_hash)
+            target = root / "result.txt"
+            other = root / "other.txt"
+            target.unlink()
+            try:
+                target.symlink_to(other)
+                other.symlink_to(target)
             except OSError as exc:
                 self.skipTest(f"symlink unavailable: {exc}")
 

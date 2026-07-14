@@ -88,7 +88,7 @@ def _path_signature(path: Path, visited: frozenset[Path] = frozenset()) -> str:
                     target = f"directory:{_tree_digest(resolved, visited)}"
                 else:
                     target = "other"
-            except OSError as exc:
+            except (OSError, RuntimeError) as exc:
                 target = f"unreadable:{type(exc).__name__}"
             return f"{mode:o}:symlink:{link_target}:target:{target}"
         if stat.S_ISREG(metadata.st_mode):
@@ -96,7 +96,7 @@ def _path_signature(path: Path, visited: frozenset[Path] = frozenset()) -> str:
         if stat.S_ISDIR(metadata.st_mode):
             return f"{mode:o}:directory"
         return f"{mode:o}:other:{stat.S_IFMT(metadata.st_mode):o}"
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         return f"unreadable:{type(exc).__name__}"
 
 
@@ -179,7 +179,10 @@ def workspace_fingerprint(
         if not candidate.is_absolute():
             candidate = root / candidate
         allowed_artifacts.add(candidate.absolute())
-    ledger = Path(ledger_path).resolve()
+    ledger = Path(ledger_path)
+    if not ledger.is_absolute():
+        ledger = root / ledger
+    ledger = ledger.absolute()
     fingerprint: dict[str, str] = {}
     for directory, dirnames, filenames in os.walk(root, followlinks=False):
         base = Path(directory)
@@ -196,8 +199,7 @@ def workspace_fingerprint(
             path = base / name
             if path.absolute() in allowed_artifacts:
                 continue
-            resolved = path.resolve()
-            if _is_ledger_runtime_path(resolved, ledger):
+            if _is_ledger_runtime_path(path.absolute(), ledger):
                 continue
             relative = path.relative_to(root).as_posix()
             fingerprint[relative] = _path_signature(path)
@@ -280,7 +282,6 @@ def _resolve_artifacts(
         candidate = Path(declared_path)
         if not candidate.is_absolute():
             candidate = root / candidate
-        resolved = candidate.resolve()
         mode: int | None = None
         file_type = "missing"
         metadata: os.stat_result | None = None
@@ -300,6 +301,24 @@ def _resolve_artifacts(
         except OSError as exc:
             file_type = "unreadable"
             problems.append(f"artifact unreadable: {declared_path}: {exc}")
+
+        try:
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError) as exc:
+            resolved = candidate.absolute()
+            actual[declared_path] = None
+            problems.append(f"artifact path cannot be resolved: {declared_path}: {exc}")
+            records.append(
+                {
+                    "path": declared_path,
+                    "resolved_path": str(resolved),
+                    "expected_sha256": expected,
+                    "actual_sha256": None,
+                    "file_type": file_type,
+                    "mode": mode,
+                }
+            )
+            continue
 
         record: dict[str, object] = {
             "path": declared_path,

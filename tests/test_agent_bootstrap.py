@@ -752,6 +752,7 @@ class AgentBootstrapTests(unittest.TestCase):
             imported = subprocess.run(
                 [
                     str(python),
+                    "-I",
                     "-c",
                     "from pathlib import Path; import causality; print(Path(causality.__file__).resolve())",
                 ],
