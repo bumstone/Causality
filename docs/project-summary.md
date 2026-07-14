@@ -1,6 +1,6 @@
 # Causality Project Summary
 
-Baseline: `367` tests pass; Git and ledger retain commit history.
+Baseline: `404` tests pass; Git and ledger retain commit history.
 
 ## What It Is
 
@@ -12,11 +12,11 @@ into memory and skills.
 
 | Area | Status |
 | --- | --- |
-| Dispatch | Each task type resolves to a structured vendored playbook. |
+| Dispatch | Each task type maps to a vendored playbook. |
 | Contract | `GoalContract` freezes objective, non-goals, tools, and verification into `TaskContract`. |
 | Gates | `run_task`, `ExecutionAdapter`, and `ToolAdapter` enforce plan/action/tool/non-goal checks. |
 | Completion | Evidence and substantive independent verifier passes are required. |
-| Verification | Frozen requirement IDs and argv execute without a shell; results, artifacts, workspace state, and citations bind completion. |
+| Verification | Frozen argv runs without a shell; evidence and citations bind completion. |
 | Ledger | Durable hash-chained JSONL with repair, cache, rotation, and offset paging. |
 | Feedback | Approved failures can become TTL-bounded later non-goals. |
 | Skills | Earned skills can be distilled, promoted, deduped, recalled, and injected. |
