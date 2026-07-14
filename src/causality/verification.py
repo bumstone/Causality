@@ -37,6 +37,14 @@ _VOLATILE_DIRS = {
 }
 
 
+def resolve_allow_missing(path: Path) -> Path:
+    """Resolve existing links strictly while allowing a future artifact leaf."""
+    try:
+        return path.resolve(strict=True)
+    except FileNotFoundError:
+        return path.resolve()
+
+
 def _tree_digest(root: Path, visited: frozenset[Path]) -> str:
     """Digest a symlinked directory target without following nested links blindly."""
     resolved_root = root.resolve()
@@ -303,7 +311,7 @@ def _resolve_artifacts(
             problems.append(f"artifact unreadable: {declared_path}: {exc}")
 
         try:
-            resolved = candidate.resolve()
+            resolved = resolve_allow_missing(candidate)
         except (OSError, RuntimeError) as exc:
             resolved = candidate.absolute()
             actual[declared_path] = None

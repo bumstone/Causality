@@ -63,13 +63,15 @@ class Causality:
                 and Path(contract.workspace_root).resolve() != self.project_root
             ):
                 raise ValueError("contract workspace_root differs from runtime project root")
+            from .verification import resolve_allow_missing
+
             for requirement in contract.verification_requirements:
                 for declared_path in requirement.artifact_paths:
                     candidate = Path(declared_path)
                     if not candidate.is_absolute():
                         candidate = self.project_root / candidate
                     try:
-                        resolved_artifact = candidate.resolve()
+                        resolved_artifact = resolve_allow_missing(candidate)
                     except (OSError, RuntimeError) as exc:
                         raise ValueError(
                             "verification artifact path cannot be resolved: "
