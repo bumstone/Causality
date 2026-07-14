@@ -5,13 +5,11 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
 ALLOW_DIRTY=0
 SKIP_TESTS=0
-REFRESH_AGENT=0
 
 for arg in "$@"; do
   case "$arg" in
     --allow-dirty) ALLOW_DIRTY=1 ;;
     --skip-tests) SKIP_TESTS=1 ;;
-    --refresh-agent) REFRESH_AGENT=1 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -38,11 +36,7 @@ else
   "$VENV_PYTHON" -m pip install -e .
 fi
 
-if [[ "$REFRESH_AGENT" -eq 1 ]]; then
-  "$VENV_PYTHON" -m causality.cli install-agent --project . --force
-else
-  "$VENV_PYTHON" -m causality.cli install-agent --project .
-fi
+"$VENV_PYTHON" -m causality.cli install-agent --project . --force
 
 if [[ "$SKIP_TESTS" -ne 1 ]]; then
   bash "$PROJECT_ROOT/scripts/doctor.sh"

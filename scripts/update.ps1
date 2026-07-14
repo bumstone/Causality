@@ -1,6 +1,5 @@
 param(
     [switch]$AllowDirty,
-    [switch]$RefreshAgent,
     [switch]$SkipTests
 )
 
@@ -46,12 +45,7 @@ try {
         Invoke-Checked $VenvPython @("-m", "pip", "install", "-e", ".")
     }
 
-    if ($RefreshAgent) {
-        Invoke-Checked $VenvPython @("-m", "causality.cli", "install-agent", "--project", ".", "--force")
-    }
-    else {
-        Invoke-Checked $VenvPython @("-m", "causality.cli", "install-agent", "--project", ".")
-    }
+    Invoke-Checked $VenvPython @("-m", "causality.cli", "install-agent", "--project", ".", "--force")
 
     if (-not $SkipTests) {
         & (Join-Path $PSScriptRoot "doctor.ps1")
