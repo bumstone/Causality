@@ -63,8 +63,8 @@ and skills.
 - `CLAUDE.md` and `.claude/commands/*` for Claude command ergonomics.
 - `.causality/agent-rules.md`, workflow manifest, MCP config, and a local
   ledger.
-- `workflow/`, `checklists/`, `skills/`, and `memory/` README stubs for
-  on-demand context.
+- `workflow/`, `checklists/`, `skills/`, and `memory/` on-demand context,
+  including `/onboard` via `skills/onboard-project.md`.
 
 Generated workflow files are views of `src/causality/workflows.py`. Avoid
 hand-editing generated views unless you are intentionally customizing a local

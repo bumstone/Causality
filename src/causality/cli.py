@@ -112,7 +112,7 @@ def main() -> int:
         ledger = EvidenceLedger(args.ledger)
         context = {
             "ledger": str(Path(args.ledger)),
-            "ledger_tail": ledger.tail(args.limit),
+            "ledger_tail": ledger.context_tail(args.limit),
             "workflows": [item["name"] for item in workflow_manifest()["workflows"]],
         }
         indent = 2 if args.pretty else None

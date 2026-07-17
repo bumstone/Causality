@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
@@ -312,11 +312,8 @@ class SkillStore:
         if skill_id not in candidates:
             raise SkillPromotionError(f"unknown skill_id: {skill_id!r}")
         current = candidates[skill_id]
-        updated = SkillCandidate(
-            skill_id=current.skill_id,
-            objective=current.objective,
-            steps=current.steps,
-            provenance=current.provenance,
+        updated = replace(
+            current,
             attempts=current.attempts + 1,
             successes=current.successes + (1 if success else 0),
         )

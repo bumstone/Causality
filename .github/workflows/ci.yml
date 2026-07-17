@@ -20,6 +20,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Byte-compile sources and tests
         run: python -m compileall -q src tests
+      - name: Validate shell helpers
+        run: |
+          bash -n scripts/*.sh
+          test -x scripts/install.sh
+          test -x scripts/doctor.sh
+          test -x scripts/update.sh
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Editable install smoke test

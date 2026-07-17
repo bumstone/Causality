@@ -14,7 +14,7 @@ gitignores. The store loads on init and saves after every mutation.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -106,13 +106,7 @@ class Agenda:
     def _transition(self, item_id: str, status: str) -> AgendaItem:
         for index, item in enumerate(self._items):
             if item.item_id == item_id:
-                updated = AgendaItem(
-                    item_id=item.item_id,
-                    objective=item.objective,
-                    priority=item.priority,
-                    status=status,
-                    created_at=item.created_at,
-                )
+                updated = replace(item, status=status)
                 self._items[index] = updated
                 self._save()
                 return updated

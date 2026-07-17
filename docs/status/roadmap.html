@@ -26,6 +26,7 @@
   }
 
   * { box-sizing: border-box; }
+  html, body { max-width: 100%; overflow-x: hidden; }
   body {
     margin: 0;
     color: var(--ink);
@@ -37,6 +38,7 @@
   }
 
   a { color: var(--blue); }
+  p, li, td, th, .sub, .what { overflow-wrap: anywhere; word-break: break-word; }
   code {
     display: inline-block;
     max-width: 100%;
@@ -47,10 +49,11 @@
     color: #252b33;
     font: 12.5px/1.35 "Cascadia Mono", "Consolas", monospace;
     overflow-wrap: anywhere;
+    word-break: break-word;
     white-space: normal;
   }
 
-  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 72px; }
+  .wrap { width: 100%; max-width: 1180px; margin: 0 auto; padding: 32px 20px 72px; }
   .topbar {
     display: flex;
     justify-content: space-between;
@@ -58,13 +61,14 @@
     gap: 18px;
     margin-bottom: 22px;
   }
-  h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.08; letter-spacing: 0; }
-  h2 { margin: 38px 0 14px; font-size: 20px; line-height: 1.25; letter-spacing: 0; }
-  h3 { margin: 0 0 8px; font-size: 15px; line-height: 1.32; letter-spacing: 0; }
+  h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.08; letter-spacing: 0; overflow-wrap: anywhere; }
+  h2 { margin: 38px 0 14px; font-size: 20px; line-height: 1.25; letter-spacing: 0; overflow-wrap: anywhere; }
+  h3 { margin: 0 0 8px; font-size: 15px; line-height: 1.32; letter-spacing: 0; overflow-wrap: anywhere; }
   p { margin: 0; }
   .sub { color: var(--muted); max-width: 820px; }
   .meta {
-    min-width: 230px;
+    min-width: 0;
+    width: min(100%, 244px);
     padding: 12px;
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -81,6 +85,7 @@
     margin: 18px 0 18px;
   }
   .statement {
+    min-width: 0;
     padding: 18px;
     border: 1px solid var(--line-strong);
     border-left: 5px solid var(--green);
@@ -90,6 +95,7 @@
   }
   .statement strong { color: var(--green); }
   .caveat {
+    min-width: 0;
     padding: 18px;
     border: 1px solid #e2bd7b;
     border-left: 5px solid var(--amber);
@@ -110,11 +116,15 @@
     color: var(--muted);
     font-size: 12px;
     font-weight: 700;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
   .done { color: var(--green); border-color: #9bd2b7; background: var(--green-soft); }
   .now { color: var(--blue); border-color: #9ebee3; background: var(--blue-soft); }
   .risk { color: var(--amber); border-color: #e2bd7b; background: var(--amber-soft); }
   .later { color: var(--violet); border-color: #c7b7ed; background: var(--violet-soft); }
+  .local { color: #7a4c14; border-color: #ddc094; background: #fff7e8; }
   .commit { font-family: "Cascadia Mono", "Consolas", monospace; }
 
   .map {
@@ -123,6 +133,7 @@
     gap: 10px;
   }
   .stage {
+    min-width: 0;
     position: relative;
     min-height: 154px;
     padding: 14px;
@@ -145,6 +156,7 @@
 
   .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
   .card {
+    min-width: 0;
     grid-column: span 4;
     min-height: 154px;
     padding: 16px;
@@ -164,6 +176,7 @@
 
   .timeline { display: grid; gap: 10px; }
   .event {
+    min-width: 0;
     display: grid;
     grid-template-columns: 120px 1fr;
     gap: 12px;
@@ -213,8 +226,10 @@
   }
 
   @media (max-width: 900px) {
+    .wrap { max-width: 100vw; padding-right: 44px; overflow: hidden; }
     .topbar, .verdict { grid-template-columns: 1fr; display: grid; }
-    .meta { min-width: 0; }
+    .topbar > *, .verdict > * { min-width: 0; }
+    .meta { width: 100%; }
     .map { grid-template-columns: 1fr; }
     .stage::after { display: none; }
     .card, .wide { grid-column: 1 / -1; }
@@ -237,6 +252,38 @@
       padding-top: 10px;
       font-size: 14px;
     }
+    .verdict, .grid, .map, .timeline,
+    .statement, .caveat, .card, .stage, .event, .meta {
+      width: 100%;
+      max-width: 100%;
+      overflow: hidden;
+    }
+    h1, h2, h3, p, li, td, th, .sub, .what, .tag, code {
+      max-width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-all;
+    }
+  }
+  @media (max-width: 520px) {
+    body { width: 100vw; }
+    .wrap { max-width: 100vw; padding: 28px 44px 56px 20px; overflow: hidden; }
+    h1 { font-size: 27px; line-height: 1.12; }
+    h2 { font-size: 19px; }
+    .verdict, .grid, .map, .timeline,
+    .statement, .caveat, .card, .stage, .event, .meta {
+      width: 100%;
+      max-width: 100%;
+      overflow: hidden;
+    }
+    .statement, .caveat, .card, .stage { padding: 14px; }
+    .tag { font-size: 11.5px; }
+    h1, h2, h3, p, li, td, th, .sub, .what, .tag, code {
+      max-width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-all;
+    }
   }
 </style>
 </head>
@@ -245,33 +292,52 @@
   <section class="topbar" aria-labelledby="title">
     <div>
       <h1 id="title">Causality 구현 상태와 로드맵</h1>
-      <p class="sub">이 문서는 Causality가 무엇을 이미 보장하고, 무엇을 아직 보장한다고 말하면 안 되는지 빠르게 판단하기 위한 운영 상태표다.</p>
+      <p class="sub">이 문서는 새로 합류한 사람이 Causality가 무엇을 통제하고, 최근 어디까지 닫혔고, 아직 어디를 과장하면 안 되는지 빠르게 판단하기 위한 운영 상태표다.</p>
     </div>
     <div class="meta">
       <div><b>기준 브랜치</b> <code>main</code></div>
-      <div><b>갱신</b> 2026-06-21</div>
-      <div><b>최근 근거</b> PR #29, merge <code>6c239e0</code></div>
-      <div><b>검증</b> 231 tests green</div>
+      <div><b>갱신</b> 2026-07-13</div>
+      <div><b>최근 근거</b> PR #30-#34 post-review verification</div>
+      <div><b>온보딩</b> <code>/onboard</code> tracked by PR #34</div>
+      <div><b>검증 기준</b> <code>docs/project-summary.md</code> + repository checks</div>
     </div>
   </section>
 
   <section class="verdict" aria-label="요약 판단">
     <div class="statement">
-      <p><strong>정직한 결론:</strong> Causality의 코어 제어 루프는 배선만 된 상태를 넘어, 스킬 절차 깊이, verifier 실질성, 민감 intent fail-safe, secret redaction, 파일/서브프로세스 실행 어댑터, ledger rotation/offset index, L1 playbook vendoring까지 반영됐다.</p>
+      <p><strong>정직한 결론:</strong> Causality의 코어 제어 하네스는 기능적으로 닫힌 상태다. 계약, gate, verifier quorum, redaction, 파일/서브프로세스 도구 실행, ledger rotation/<code>.idx</code>, L1 playbook vendoring까지 main에 들어왔고, PR #34가 프로젝트 온보딩용 <code>/onboard</code> 경로를 추적 기준선에 추가한다.</p>
       <div class="tags">
         <span class="tag done">코어 루프 닫힘</span>
-        <span class="tag done">P2 efficacy 반영</span>
-        <span class="tag done">CI green</span>
-        <span class="tag commit">e78ec21</span>
+        <span class="tag done">P3 scale/playbook 반영</span>
+        <span class="tag done">/onboard 기준선</span>
+        <span class="tag commit">PR #34</span>
       </div>
     </div>
     <div class="caveat">
-      <p><strong>과장하면 안 되는 부분:</strong> 이것은 범용 자동 운영 플랫폼의 완성 선언이 아니다. 남은 작업은 더 넓은 end-to-end 시나리오 증거, API/browser playbook, 장기 ledger 운용, 배포/자동화 설정 같은 운영 품질 영역이다.</p>
+      <p><strong>과장하면 안 되는 부분:</strong> 이것은 범용 자동 운영 플랫폼의 완성 선언이 아니다. 남은 핵심은 API/browser 실행 어댑터, playbook phase의 자동 실행화, 외부 PR/autofix 운영 설정, 상태판 자동 생성 같은 제품화와 운영 품질이다.</p>
       <div class="tags">
-        <span class="tag risk">E2E 증거 확장 필요</span>
-        <span class="tag risk">API/browser playbook 필요</span>
-        <span class="tag later">스케일 항목 보류</span>
+        <span class="tag risk">API/browser 실행 미검증</span>
+        <span class="tag risk">phase는 아직 지침</span>
+        <span class="tag later">운영 자동화 설정 필요</span>
       </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="reader-path">
+    <h2 id="reader-path">처음 보는 사람의 읽는 순서</h2>
+    <div class="grid">
+      <article class="card now-card">
+        <h3><span class="tag now">1</span> 무엇을 만드는가</h3>
+        <p>아래 60초 설명과 5단계 제어 흐름을 먼저 보면 이 프로젝트가 “프롬프트 모음”이 아니라 실행 통제 런타임이라는 점이 잡힌다.</p>
+      </article>
+      <article class="card done-card">
+        <h3><span class="tag done">2</span> 어디까지 닫혔는가</h3>
+        <p>최근 변경과 완료된 기반을 보면 main의 코어 기능과 PR #34가 추가한 추적 가능한 <code>/onboard</code> 기준선을 함께 확인할 수 있다.</p>
+      </article>
+      <article class="card risk-card">
+        <h3><span class="tag risk">3</span> 다음에 뭘 봐야 하나</h3>
+        <p>남은 로드맵은 구현 공백이 아니라 “아직 보장한다고 말하면 안 되는 것”을 정리한다. 새 작업은 여기서 시작한다.</p>
+      </article>
     </div>
   </section>
 
@@ -306,8 +372,8 @@
         <div class="name">Dispatch</div>
         <ul>
           <li>intent routing</li>
+          <li>vendored playbooks</li>
           <li>sensitive fallback</li>
-          <li>keyword miss 방어</li>
         </ul>
       </div>
       <div class="stage" role="listitem">
@@ -333,8 +399,8 @@
         <div class="name">Evidence Ledger</div>
         <ul>
           <li>hash chain</li>
-          <li>durable writes</li>
-          <li>read-path cache</li>
+          <li>rotation + archive</li>
+          <li>offset index paging</li>
         </ul>
       </div>
     </div>
@@ -344,8 +410,20 @@
     <h2 id="changed">최근 변경 반영</h2>
     <div class="timeline">
       <div class="event">
+        <div class="when">PR #30-#33</div>
+        <div class="what"><b>P3 scale/playbook 보강.</b> ledger rotation과 chain continuity, tool adapter를 실제 run에 넣는 E2E, <code>.idx</code> 기반 archive paging, L1 playbook vendoring이 main에 반영됐다.</div>
+      </div>
+      <div class="event">
+        <div class="when">0c4c94a</div>
+        <div class="what"><b>repo hygiene 최신화.</b> OS/editor cruft(<code>.DS_Store</code>, <code>.idea/</code>, <code>.vscode/</code>)가 ignore되어 개인 환경 파일이 PR diff에 섞일 위험을 줄였다.</div>
+      </div>
+      <div class="event">
+        <div class="when">PR #34</div>
+        <div class="what"><b><code>/onboard</code> 도입.</b> 프로젝트 시작 시 agent가 현재 작업, 구현 우선순위, 검증 명령, 위험을 모으도록 project-local command/skill 설치 경로를 추적 기준선에 추가했다.</div>
+      </div>
+      <div class="event">
         <div class="when">PR #27-#29</div>
-        <div class="what"><b>P3 운영 증거 보강.</b> PR autofix secret 미설정 green-skip, 장기 실행 루프를 닫는 E2E 테스트, 파일/서브프로세스 <code>ToolAdapter</code>가 main에 반영됨.</div>
+        <div class="what"><b>P3 운영 증거 보강.</b> PR autofix secret 미설정 green-skip, 장기 실행 루프를 닫는 E2E 테스트, 파일/서브프로세스 <code>ToolAdapter</code>가 main에 반영됐다.</div>
       </div>
       <div class="event">
         <div class="when">PR #25</div>
@@ -390,6 +468,14 @@
         <p>L1 <code>_ROUTING</code>의 번들 라벨이 더 이상 빈 문자열이 아니라 <code>causality.playbooks</code>의 구조화된 <code>Playbook</code>(순서 있는 phase·step)으로 vendoring됐다. 라우팅된 모든 라벨이 실재 playbook으로 resolve되거나 raise하며, <code>TaskRun.playbooks</code>로 run에 노출된다.</p>
       </article>
       <article class="card done-card">
+        <h3><span class="tag done">완료</span> ledger scale path</h3>
+        <p>대규모 ledger를 위해 <code>rotate()</code>가 archive segment를 만들고 chain continuity를 보존한다. <code>.idx</code> 사이드카는 <code>event_count()</code>와 <code>events_page()</code>가 전체 파싱 없이 archive를 다루게 한다.</p>
+      </article>
+      <article class="card done-card">
+        <h3><span class="tag done">완료</span> 프로젝트 온보딩</h3>
+        <p><code>/onboard</code>는 새 세션에서 repo map, 현재 작업, 구현 계획, 검증 리스크를 모아 main agent가 요약하도록 하는 절차다. project-local 산출물은 PR #34의 추적 기준선이다.</p>
+      </article>
+      <article class="card done-card">
         <h3><span class="tag done">완료</span> 보안 redaction</h3>
         <p>secret key 이름, nested dict/list, hyphenated <code>sk-</code>, opaque bearer/basic token을 skill distill 경로에서 방어한다.</p>
       </article>
@@ -424,24 +510,19 @@
       </thead>
       <tbody>
         <tr>
-          <td>End-to-end 시나리오</td>
-          <td>PR #28로 대표 루프 테스트가 추가됐지만, 실패 종류와 tool adapter 경로를 넓힌 장기 시나리오 증거는 더 필요하다.</td>
-          <td>계약 생성 → 실행 gate → failure 환류 → skill distill/recall → tool adapter → verifier completion까지 이어지는 복수 시나리오 테스트.</td>
+          <td>API/browser 실행</td>
+          <td>파일/서브프로세스 <code>ToolAdapter</code>는 run 안에서 검증됐지만, API 호출과 browser action을 같은 계약/증거 모델로 실행하는 어댑터는 아직 없다.</td>
+          <td>API/browser adapter가 plan/action gate, evidence ledger, verifier completion을 통과하는 E2E 테스트.</td>
         </tr>
         <tr>
-          <td>실행 playbook</td>
+          <td>playbook 실행 깊이</td>
           <td>번들 라벨은 구조화된 playbook으로 vendoring됐고(phase·step), 파일/서브프로세스 어댑터도 들어왔다. 다만 phase는 에이전트가 따르는 지침이며 엔진이 자동 실행하지 않고, API/browser 실사용 어댑터는 아직 없다.</td>
-          <td>API/browser 실행 어댑터와, playbook phase를 실제 실행/검증으로 연결하는 경로를 테스트로 고정.</td>
+          <td>playbook phase를 실제 실행 계획, 검증 명령, ledger evidence로 연결하는 최소 자동화 경로.</td>
         </tr>
         <tr>
           <td>운영 자동화 설정</td>
           <td>PR watch/autofix 정책은 있으나 외부 App 설치, secret 설정, repository rule과 결합되어야 완전한 자동 운영이 된다.</td>
           <td>설치 상태 점검 명령과 green/skip 이유가 명확한 운영 health report.</td>
-        </tr>
-        <tr>
-          <td>ledger 스케일</td>
-          <td>opt-in rotation/archival + <code>.idx</code> 오프셋 인덱스까지 들어왔다 — <code>rotate()</code>가 segment로 봉인(체인은 seam 넘어 <code>verify_chain()</code> 검증)하고, <code>.idx</code> 사이드카로 <code>event_count()</code>/<code>events_page()</code>가 전체 파싱 없이 아카이브를 카운트·seek한다.</td>
-          <td>현 규모엔 read cache로 충분하므로 rotation/<code>.idx</code>는 대규모 운용 대비용. 정책(임계값)만 배포별로 조정.</td>
         </tr>
         <tr>
           <td>문서 소스 정합성</td>
@@ -461,11 +542,11 @@
       </article>
       <article class="card wide done-card">
         <h3><span class="tag done">적합</span> 변경 추적용</h3>
-        <p>PR #27-#29, PR #25, PR #19-#23, merge commit, test count를 분리해 과거의 낙관적 진행률 대신 근거 중심의 상태 추적 문서로 바꿨다.</p>
+        <p>PR #30-#34, PR #27-#29, 기준 commit, test count를 분리해 코어 기능과 온보딩 기준선의 근거를 추적한다.</p>
       </article>
       <article class="card wide risk-card">
         <h3><span class="tag risk">주의</span> 완성 선언 문서로는 부적합</h3>
-        <p>API/browser playbook, 더 넓은 E2E 증거, 운영 자동화 검증이 남아 있으므로 “프로젝트 완성”이라고 말하면 과장이다. 이 문서는 “코어 하네스는 닫혔고, 운영 품질이 남았다”는 판단에 맞춰 읽어야 한다.</p>
+        <p>API/browser 실행, playbook phase 자동화, 운영 자동화 검증이 남아 있으므로 “프로젝트 완성”이라고 말하면 과장이다. 이 문서는 “코어 하네스는 닫혔고, 제품화/운영 품질이 남았다”는 판단에 맞춰 읽어야 한다.</p>
       </article>
       <article class="card wide later-card">
         <h3><span class="tag later">개선 여지</span> 자동 생성 가능성</h3>
@@ -475,7 +556,7 @@
   </section>
 
   <footer class="footer">
-    <p><b>근거:</b> <code>docs/project-summary.md</code>, ADR 0001-0011, PR #19-#29, merge <code>6c239e0</code>, local test <code>python -m unittest discover -s tests</code> 231 green. <code>docs/code-review-2026-06-13.md</code>는 현재 상태가 아니라 역사적 리뷰 스냅샷이다.</p>
+    <p><b>근거:</b> <code>docs/project-summary.md</code>, ADR 0001-0011, PR #19-#34 post-review verification. 최신 test baseline은 project summary를 단일 원천으로 사용한다.</p>
   </footer>
 </main>
 </body>

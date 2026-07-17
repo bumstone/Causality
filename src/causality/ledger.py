@@ -467,6 +467,34 @@ class EvidenceLedger:
             for event in events
         ]
 
+    def context_tail(self, limit: int = 5) -> list[dict[str, Any]]:
+        """Return ledger metadata that is safe to place in agent context.
+
+        Ledger payloads intentionally retain raw evidence, which can include
+        credentials or other confidential tool output.  Context consumers only
+        need ordering and contract/state clues, so never copy payloads or
+        artifact paths into this projection.
+        """
+        if limit <= 0:
+            return []
+        events = self._load_events()[-limit:]
+        contract_refs: dict[str, str] = {}
+        for event in events:
+            if event.contract_id and event.contract_id not in contract_refs:
+                contract_refs[event.contract_id] = f"contract-{len(contract_refs) + 1}"
+        return [
+            {
+                "event_id": event.event_id,
+                "event_type": event.event_type,
+                "timestamp": event.timestamp,
+                # Response-local labels preserve correlation without exposing
+                # caller-supplied identifiers or guessable hashes of them.
+                "contract_ref": contract_refs.get(event.contract_id),
+                "entry_hash": event.entry_hash,
+            }
+            for event in events
+        ]
+
     @staticmethod
     def _artifact_record(path: str | Path) -> dict[str, Any]:
         artifact = Path(path)

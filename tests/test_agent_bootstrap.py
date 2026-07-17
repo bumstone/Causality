@@ -19,6 +19,7 @@ class AgentBootstrapTests(unittest.TestCase):
 
             self.assertTrue((root / "AGENTS.md").is_file())
             self.assertTrue((root / "CLAUDE.md").is_file())
+            self.assertTrue((root / ".claude" / "commands" / "onboard.md").is_file())
             self.assertTrue((root / ".claude" / "commands" / "causality-plan.md").is_file())
             self.assertTrue((root / ".claude" / "commands" / "causality-verify.md").is_file())
             self.assertTrue((root / ".codex" / "causality-routing.md").is_file())
@@ -43,6 +44,9 @@ class AgentBootstrapTests(unittest.TestCase):
             )
             self.assertTrue((root / "checklists" / "verification-before-completion.md").is_file())
             self.assertTrue((root / "skills" / "README.md").is_file())
+            onboard_skill = root / "skills" / "onboard-project.md"
+            self.assertTrue(onboard_skill.is_file())
+            self.assertIn("Close every spawned subagent", onboard_skill.read_text(encoding="utf-8"))
             for mem_type in (
                 "decisions",
                 "assumptions",
@@ -60,11 +64,50 @@ class AgentBootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "AGENTS.md").write_text("custom", encoding="utf-8")
+            command = root / ".claude" / "commands" / "onboard.md"
+            command.parent.mkdir(parents=True)
+            command.write_text("custom command", encoding="utf-8")
+            skill = root / "skills" / "onboard-project.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("custom skill", encoding="utf-8")
 
             result = install_agent_files(temp_dir)
 
             self.assertEqual((root / "AGENTS.md").read_text(encoding="utf-8"), "custom")
+            self.assertEqual(command.read_text(encoding="utf-8"), "custom command")
+            self.assertEqual(skill.read_text(encoding="utf-8"), "custom skill")
             self.assertIn(root / "AGENTS.md", result.skipped)
+            self.assertIn(command, result.skipped)
+            self.assertIn(skill, result.skipped)
+
+    def test_install_rejects_symlinked_generated_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp_dir)
+            linked_skills = root / "skills"
+            try:
+                linked_skills.symlink_to(Path(outside), target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "contains a symlink"):
+                install_agent_files(root)
+
+            self.assertFalse((Path(outside) / "onboard-project.md").exists())
+            self.assertFalse((root / ".causality").exists())
+
+    def test_install_rejects_symlinked_causality_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp_dir)
+            linked_causality = root / ".causality"
+            try:
+                linked_causality.symlink_to(Path(outside), target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "contains a symlink"):
+                install_agent_files(root)
+
+            self.assertFalse((Path(outside) / "ledger.jsonl").exists())
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 The per-module tests cover layers in isolation; these exercise the *whole*
 self-improvement loop across MULTIPLE runs, which is the only way to prove the
-"loop is closed" claim end to end (code-review-2026-06-13 P3):
+"loop is closed" claim end to end (June 2026 P3 review):
 
 - back half: a passing run distills an earned skill, reproducibility is accrued,
   a HITL gate promotes it, and a *later related* run recalls and injects it;
@@ -38,7 +38,7 @@ class E2ELoopTests(unittest.TestCase):
         return CausalityEngine(Path(temp_dir))
 
     def _work(self, engine: CausalityEngine):
-        def work(contract: GoalContract, iteration: int) -> None:
+        def work(contract: GoalContract, iteration: int, _adapter) -> None:
             engine.runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
         return work
 
@@ -190,7 +190,7 @@ class E2ELoopTests(unittest.TestCase):
             engine = self._engine(temp_dir)
             state = {"iteration": 0}
 
-            def work(contract: GoalContract, iteration: int) -> None:
+            def work(contract: GoalContract, iteration: int, _adapter) -> None:
                 state["iteration"] = iteration
                 engine.runtime.record_evidence(
                     contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}

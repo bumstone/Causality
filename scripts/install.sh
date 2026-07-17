@@ -18,4 +18,4 @@ fi
 "$VENV_PYTHON" -m pip install --upgrade pip
 "$VENV_PYTHON" -m pip install -e .
 "$VENV_PYTHON" -m causality.cli install-agent --project .
-"$PROJECT_ROOT/scripts/doctor.sh"
+bash "$PROJECT_ROOT/scripts/doctor.sh"

@@ -9,30 +9,58 @@ dist/
 .gstack/
 node_modules/
 
-# Runtime / per-run development state — NOT shared (see docs/adr/0008).
+# Local environment files may contain credentials. A redacted template is safe.
+.env
+.env.*
+!.env.example
+
+# Runtime / per-run development state -- not shared (see docs/adr/0008).
 # Rule: machine-written runtime artifacts stay local; source, design, and
 # curated *.md memory notes stay tracked. The ledger and installed automation
-# already live under .causality/ (above).
+# already live under .causality/ above.
 state.json
 *.state.json
+
 # Durable write sidecars for local JSON/JSONL runtime stores.
 *.json.lock
 *.jsonl.lock
 .*.json.*.tmp
 .*.jsonl.*.tmp
-# Machine-written typed-memory logs (decisions/assumptions/failures/...).
-# Note: *.md under memory/ is intentionally NOT ignored, so a curated,
-# shareable memory note can be committed without un-ignoring anything.
+
+# Machine-written typed-memory logs. Curated *.md memory notes stay trackable.
 memory/**/*.jsonl
-# Earned-skill store logs (candidates/promoted) — runtime; curated *.md stays tracked.
+
+# Earned-skill store logs. Curated *.md skills stay trackable.
 skills/**/*.jsonl
-# Agenda backlog state (runtime / per-project).
+
+# Agenda backlog state.
 agenda.json
 *.agenda.json
-# Local evaluation/review artifacts (generated HTML reviews) — not shared.
-_review/
 
-# OS / editor cruft — machine-local, never shared.
+# Local evaluation/review/archive artifacts generated during doc work.
+# Keep ad-hoc code review output under _review/ instead of committing
+# timestamped code-review snapshots into docs/.
+_review/
+**/_review/
+_archive/
+**/_archive/
+code_review/
+**/code_review/
+code-review/
+**/code-review/
+docs/code-review-*.md
+
+# Local agent/client policy. Shared Codex routing stays tracked in
+# .codex/causality-routing.md.
+.codex/hooks.json
+.codex/*.local.*
+.claude/*.local.*
+
+# install-agent pins these client configs to this machine's interpreter/path.
+.codex/config.toml
+.mcp.json
+
+# OS / editor cruft -- machine-local, never shared.
 .DS_Store
 .idea/
 .vscode/

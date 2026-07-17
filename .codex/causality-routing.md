@@ -4,9 +4,11 @@ Codex does not require project slash-command files for this integration. Use
 `AGENTS.md` and `.causality/agent-rules.md` as the automatic router.
 
 When the user asks for planning, implementation, debugging, browser/UI testing,
-or completion, select the matching Causality workflow without waiting for the
-user to name it:
+completion, or explicit onboarding, select the matching Causality workflow
+without waiting for the user to name it:
 
+- `onboard` uses `skills/onboard-project.md`, `session-bootstrap`, and bounded
+  subagent inspection when available
 - `causality-plan`
 - `causality-verify`
 - `causality-root-cause`
