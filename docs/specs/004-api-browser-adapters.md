@@ -21,11 +21,13 @@ inheritance are forbidden.
 
 ## Browser
 
-`A11yBrowserAdapter` speaks wrapper protocol v1 over bounded argv subprocess
-calls. `capabilities --json` returns JSON; normal operations return bounded plain
-stdout. MCP requires an explicit command. Handshake must prove isolated sessions,
-network-scope enforcement, observe/act/assert/inspect/visual, and console/network
-diagnostics.
+`A11yBrowserAdapter` speaks wrapper protocol v1 over bounded subprocess calls.
+`capabilities --json` returns JSON; normal operations return bounded plain stdout.
+`fill`, `press`, and `select` receive `--value-stdin` in argv and the exact UTF-8
+value on stdin, never in argv. The wrapper receives only a minimal process
+environment plus the three task-scoped `CAUSALITY_BROWSER_*` values. MCP requires
+an explicit command. Handshake must prove isolated sessions, network-scope
+enforcement, observe/act/assert/inspect/visual, and console/network diagnostics.
 
 Each task gets a private session/profile. Observe returns stable refs and a
 canonical state hash. Later operations reject stale task state; effects recheck
