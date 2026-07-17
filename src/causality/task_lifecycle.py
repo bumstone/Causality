@@ -486,6 +486,19 @@ class TaskLifecycle:
                 "verification argv is not in the server-owned exact allowlist",
                 commands=undeclared_commands,
             )
+        excessive_timeouts = [
+            requirement.id
+            for requirement in contract.verification_requirements
+            if not requirement.manual
+            and requirement.timeout_seconds > self.policy.max_timeout_seconds
+        ]
+        if excessive_timeouts:
+            raise _error(
+                "policy_denied",
+                "verification timeout exceeds the server policy ceiling",
+                requirements=excessive_timeouts,
+                max_timeout_seconds=self.policy.max_timeout_seconds,
+            )
         return replace(
             contract,
             goal_id=task_id,
@@ -1624,7 +1637,8 @@ class TaskLifecycle:
                     {
                         "requirement_id": requirement.id,
                         "status": "pass" if approved else "fail",
-                        "evidence_hash": decision.entry_hash,
+                        "evidence_hash": evidence_hash,
+                        "decision_hash": decision.entry_hash,
                     },
                 )
                 return self.get(task_id)

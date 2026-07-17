@@ -11,6 +11,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.contracts import (
+    AuditEventType,
+    EvidenceKind,
     GoalContract,
     PermissionContract,
     Risk,
@@ -435,6 +437,75 @@ class TaskLifecycleTests(unittest.TestCase):
                 policy=TaskPolicy(verification_commands=(command,)),
             ).begin(contract, idempotency_key="verify-allowed")
             self.assertEqual(allowed.state, TaskState.PLANNED)
+
+            overlong = GoalContract(
+                title="verification timeout policy",
+                summary="",
+                permissions=PermissionContract(allowed_tools=("shell",)),
+                verification_requirements=(
+                    VerificationRequirement(
+                        id="too-long",
+                        argv=command,
+                        timeout_seconds=2,
+                    ),
+                ),
+            )
+            with self.assertRaises(TaskLifecycleError) as timeout_denied:
+                TaskLifecycle(
+                    root / "timeout-denied",
+                    policy=TaskPolicy(
+                        verification_commands=(command,),
+                        max_timeout_seconds=1,
+                    ),
+                ).begin(overlong, idempotency_key="timeout-denied")
+            self.assertEqual(timeout_denied.exception.code, "policy_denied")
+            self.assertIn("too-long", timeout_denied.exception.details["requirements"])
+
+    def test_manual_verify_operation_returns_cited_evidence_and_decision_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lifecycle = TaskLifecycle(
+                root,
+                approval_authorizer=lambda _principal, _stage, _proof: True,
+            )
+            task = lifecycle.begin(
+                GoalContract(
+                    title="manual verification response",
+                    summary="",
+                    verification_requirements=(
+                        VerificationRequirement(id="visual", argv=(), manual=True),
+                    ),
+                ),
+                idempotency_key="manual-begin",
+            )
+            contract = lifecycle._contract(task)
+            evidence = lifecycle.runtime.record_evidence(
+                contract,
+                EvidenceKind.A11Y_REPORT,
+                {"summary": "screen reviewed"},
+            )
+
+            lifecycle.verify(
+                task.task_id,
+                "visual",
+                idempotency_key="manual-verify",
+                mode="manual",
+                evidence_hash=evidence.entry_hash,
+                approved=True,
+                approver="reviewer",
+                rationale="visual state matches",
+                proof="trusted",
+            )
+
+            operation = lifecycle.ledger.find(
+                AuditEventType.TASK_OPERATION,
+                lambda event: event.contract_id == task.task_id
+                and event.payload.get("operation") == "verify",
+            )[-1]
+            response = operation.payload["response"]
+            self.assertEqual(response["evidence_hash"], evidence.entry_hash)
+            self.assertRegex(response["decision_hash"], r"^[0-9a-f]{64}$")
+            self.assertNotEqual(response["decision_hash"], evidence.entry_hash)
 
     def test_high_risk_final_approval_recovers_completion_escalation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
