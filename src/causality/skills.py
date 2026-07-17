@@ -225,6 +225,7 @@ class SkillCandidate:
     source_task_id: str = ""
     outcomes: tuple[tuple[str, bool, tuple[str, ...]], ...] = ()
     promotion_evidence_refs: tuple[str, ...] = ()
+    promoted_by: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -251,6 +252,7 @@ class SkillCandidate:
                 for attempt_id, success, evidence_refs in self.outcomes
             ],
             "promotion_evidence_refs": list(self.promotion_evidence_refs),
+            "promoted_by": self.promoted_by,
         }
 
     @classmethod
@@ -274,6 +276,7 @@ class SkillCandidate:
             promotion_evidence_refs=tuple(
                 str(ref) for ref in value.get("promotion_evidence_refs", ())
             ),
+            promoted_by=str(value.get("promoted_by", "")),
         )
 
 
@@ -340,6 +343,17 @@ class SkillStore:
             raise SkillPromotionError(
                 f"no ledger events for contract {contract.goal_id!r} to distill"
             )
+        if provenance is not None:
+            boundary = next(
+                (
+                    index
+                    for index, event in enumerate(matches)
+                    if event.entry_hash == provenance
+                ),
+                None,
+            )
+            if boundary is not None:
+                matches = matches[: boundary + 1]
         steps = tuple(_distill_step(event) for event in matches)
         candidate = SkillCandidate(
             skill_id=skill_id.strip(),
@@ -354,14 +368,19 @@ class SkillStore:
         with file_lock(path):
             existing = self._latest_candidates().get(candidate.skill_id)
             if existing is not None:
-                distilled = replace(
-                    existing,
-                    attempts=0,
-                    successes=0,
-                    outcomes=(),
-                    promotion_evidence_refs=(),
+                seed = (
+                    candidate.objective,
+                    candidate.steps,
+                    candidate.provenance,
+                    candidate.source_task_id,
                 )
-                if distilled != candidate:
+                existing_seed = (
+                    existing.objective,
+                    existing.steps,
+                    existing.provenance,
+                    existing.source_task_id,
+                )
+                if existing_seed != seed:
                     raise SkillPromotionError(
                         f"skill_id {candidate.skill_id!r} already has different content"
                     )
@@ -384,7 +403,7 @@ class SkillStore:
         """
         if not isinstance(success, bool):
             raise SkillPromotionError("success must be boolean")
-        refs = tuple(str(ref) for ref in evidence_refs)
+        refs = tuple(sorted(str(ref) for ref in evidence_refs))
         if len(refs) != len(set(refs)):
             raise SkillPromotionError("evidence_refs must be unique")
         if attempt_id is None:
@@ -438,7 +457,16 @@ class SkillStore:
             candidates = self._latest_candidates()
             promoted = self._latest_by_id(promoted_path)
             if skill_id in promoted:
-                return promoted[skill_id]
+                existing = promoted[skill_id]
+                requested_refs = tuple(sorted(str(ref) for ref in evidence_refs))
+                if (
+                    existing.promoted_by != str(approved_by).strip()
+                    or existing.promotion_evidence_refs != requested_refs
+                ):
+                    raise SkillPromotionError(
+                        f"skill_id {skill_id!r} promotion conflicts with its prior approval"
+                    )
+                return existing
             if skill_id not in candidates:
                 raise SkillPromotionError(f"unknown skill_id: {skill_id!r}")
             candidate = candidates[skill_id]
@@ -455,7 +483,8 @@ class SkillStore:
             self._reject_if_duplicates_authored(candidate, authored_names, dedup_threshold)
             promoted_candidate = replace(
                 candidate,
-                promotion_evidence_refs=tuple(str(ref) for ref in evidence_refs),
+                promotion_evidence_refs=tuple(sorted(str(ref) for ref in evidence_refs)),
+                promoted_by=str(approved_by).strip(),
             )
             self._append(promoted_path, promoted_candidate)
             return promoted_candidate
@@ -492,6 +521,12 @@ class SkillStore:
     def candidates(self) -> list[SkillCandidate]:
         return list(self._latest_candidates().values())
 
+    def candidate(self, skill_id: str) -> SkillCandidate:
+        try:
+            return self._latest_candidates()[skill_id]
+        except KeyError as exc:
+            raise SkillPromotionError(f"unknown skill_id: {skill_id!r}") from exc
+
     def promoted(self) -> list[SkillCandidate]:
         """Promoted skills, the authoritative latest row per ``skill_id``.
 
@@ -506,6 +541,7 @@ class SkillStore:
         objective: str,
         *,
         authored: Sequence[SkillCandidate] = (),
+        earned: Sequence[SkillCandidate] | None = None,
         limit: int = 3,
     ) -> list[SkillCandidate]:
         """Recall skills worth reusing for ``objective``, authored before earned.
@@ -538,7 +574,11 @@ class SkillStore:
             key=lambda s: -overlap(s),
         )
         earned_hits = sorted(
-            (s for s in self.promoted() if overlap(s) > 0),
+            (
+                s
+                for s in (self.promoted() if earned is None else earned)
+                if overlap(s) > 0
+            ),
             key=lambda s: (-overlap(s), -reproducibility(s)),
         )
         return (authored_hits + earned_hits)[:limit]

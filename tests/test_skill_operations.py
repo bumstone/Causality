@@ -98,7 +98,8 @@ class SkillOperationsTests(unittest.TestCase):
             self.runtime.ledger,
             contract,
             skill_id=candidate.skill_id,
-            source_task_id=contract.goal_id,
+            provenance=candidate.provenance,
+            source_task_id=candidate.source_task_id,
         )
 
         self.assertEqual(replay, recorded)
@@ -145,6 +146,14 @@ class SkillOperationsTests(unittest.TestCase):
         self.assertEqual(replay, promoted)
         self.assertEqual(len(self.store.promoted()), 1)
         self.assertEqual(promoted.promotion_evidence_refs, ("c" * 64,))
+        self.assertEqual(promoted.promoted_by, "operator")
+        with self.assertRaises(SkillPromotionError):
+            self.store.promote(
+                candidate.skill_id,
+                approved_by="different-operator",
+                authored_names=("unrelated-authored-skill",),
+                evidence_refs=("c" * 64,),
+            )
 
 
 if __name__ == "__main__":

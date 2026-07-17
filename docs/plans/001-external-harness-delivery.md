@@ -20,9 +20,9 @@ terminal state.
    - [x] 004B: capability-gated, isolated A11y/browser lifecycle.
 5. [x] [Workflow and debug loop](../specs/005-workflow-debug-loop.md): persist phase
    state, route debugging, count failed hypotheses, and deduplicate failures.
-6. [ ] [Resume and skill operations](../specs/006-resume-and-skill-operations.md):
+6. [x] [Resume and skill operations](../specs/006-resume-and-skill-operations.md):
    - [x] 006A: resume interrupted tasks and expose governed context without replaying effects.
-   - [ ] 006B: expose earned-skill outcome, recall, and HITL promotion operations.
+   - [x] 006B: expose earned-skill outcome, recall, and HITL promotion operations.
 
 ## Boundaries
 
