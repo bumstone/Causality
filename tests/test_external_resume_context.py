@@ -456,7 +456,14 @@ class ExternalResumeContextTests(unittest.TestCase):
             self.assertNotIn("external-terminal-action", serialized_context)
             self.assertTrue(
                 all(
-                    set(item) == {"event_id", "event_type", "timestamp"}
+                    set(item)
+                    == {
+                        "event_id",
+                        "event_type",
+                        "timestamp",
+                        "contract_ref",
+                        "entry_hash",
+                    }
                     for item in context["ledger_tail"]
                 )
             )

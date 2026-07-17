@@ -254,7 +254,13 @@ class MCPResumeContextTests(unittest.TestCase):
             self.assertNotIn("orphan-effect", context_text)
             self.assertEqual(
                 set(context["ledger_tail"][0]),
-                {"event_id", "event_type", "timestamp"},
+                {
+                    "event_id",
+                    "event_type",
+                    "timestamp",
+                    "contract_ref",
+                    "entry_hash",
+                },
             )
 
     def test_terminal_and_reflected_results_are_replayed_without_effects(self) -> None:
