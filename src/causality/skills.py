@@ -354,7 +354,14 @@ class SkillStore:
         with file_lock(path):
             existing = self._latest_candidates().get(candidate.skill_id)
             if existing is not None:
-                if existing.to_dict() != candidate.to_dict():
+                distilled = replace(
+                    existing,
+                    attempts=0,
+                    successes=0,
+                    outcomes=(),
+                    promotion_evidence_refs=(),
+                )
+                if distilled != candidate:
                     raise SkillPromotionError(
                         f"skill_id {candidate.skill_id!r} already has different content"
                     )

@@ -85,6 +85,26 @@ class SkillOperationsTests(unittest.TestCase):
                 evidence_refs=("a" * 64,),
             )
 
+    def test_distill_retry_preserves_recorded_outcomes(self) -> None:
+        contract, candidate = self._candidate()
+        recorded = self.store.record_outcome(
+            candidate.skill_id,
+            success=True,
+            attempt_id="task-attempt-1",
+            evidence_refs=("a" * 64,),
+        )
+
+        replay = self.store.distill_once(
+            self.runtime.ledger,
+            contract,
+            skill_id=candidate.skill_id,
+            source_task_id=contract.goal_id,
+        )
+
+        self.assertEqual(replay, recorded)
+        self.assertEqual(replay.attempts, 1)
+        self.assertEqual(len(replay.outcomes), 1)
+
     def test_concurrent_same_attempt_counts_once(self) -> None:
         _, candidate = self._candidate()
 
