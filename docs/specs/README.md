@@ -11,5 +11,5 @@ tests. Keep each spec decision-complete and under the document budget.
 | 002 | [Verification evidence](002-verification-evidence.md) | implemented | 001 |
 | 003 | [MCP task lifecycle](003-mcp-task-lifecycle.md) | implemented | 001, 002 |
 | 004 | [API/browser adapters](004-api-browser-adapters.md) | implemented | 002, 003 |
-| 005 | [Workflow and debug loop](005-workflow-debug-loop.md) | planned | 002, 003, 004 |
+| 005 | [Workflow and debug loop](005-workflow-debug-loop.md) | implemented | 002, 003, 004 |
 | 006 | [Resume and skill operations](006-resume-and-skill-operations.md) | planned | 003, 005 |

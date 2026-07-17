@@ -920,6 +920,8 @@ class HITLGate:
         self,
         contract: GoalContract,
         iteration_state: Mapping[str, int],
+        *,
+        event_metadata: Mapping[str, object] | None = None,
     ) -> GateResult:
         """Enforce the Stop-condition clause by reading ``stopping_policy``.
 
@@ -951,19 +953,24 @@ class HITLGate:
 
         if max_iterations and iterations >= max_iterations:
             return self._record(
-                contract, GateDecision.STOP, f"reached max_iterations ({max_iterations})"
+                contract,
+                GateDecision.STOP,
+                f"reached max_iterations ({max_iterations})",
+                metadata=event_metadata,
             )
         if max_no_progress and no_progress >= max_no_progress:
             return self._record(
                 contract,
                 GateDecision.STOP,
                 f"no progress for {max_no_progress} iteration(s)",
+                metadata=event_metadata,
             )
         if max_failed and failed >= max_failed:
             return self._record(
                 contract,
                 GateDecision.ESCALATE,
                 f"reached max_failed_hypotheses ({max_failed})",
+                metadata=event_metadata,
             )
         # Keep going: a pure poll, not a material gate decision. Return without
         # recording so the per-iteration check leaves no observer footprint in

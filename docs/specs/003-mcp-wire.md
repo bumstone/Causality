@@ -4,45 +4,44 @@ Status: implemented.
 
 ## Inputs
 
-Mutations need a nonblank key; follow-ups need `task_id`. `begin` also needs
-objective, risk, permissions, verification requirements, and stop condition.
-
-Begin evidence kinds are `test_output|browser_diff|artifact_hash|tool_output|a11y_report|verification_result`.
-`append_evidence` produces the first five;
-`verify` produces the last.
+Mutations use `idempotency_key`; follow-ups use `task_id`. Objects are closed.
+`begin` adds objective, risk, permissions, checks, stop condition, and optional
+`workflow=auto|root-cause-protocol`.
 
 | Tool | Extra fields (`?` optional) |
 | --- | --- |
-| approve | stage, approved, approver, rationale, evidence_refs, proof |
-| action | action; subprocess cwd?, timeout_seconds? |
-| verify | requirement_id, mode; manual fields below |
+| approve | stage, approved, approver, rationale, evidence_refs, proof, phase_id? |
+| phase | phase_id, action; finish adds status, evidence_refs |
+| hypothesis | phase_id, hypothesis, verifier, status, rationale, evidence_refs |
+| action | typed action; cwd?, timeout? |
+| http/browser | closed Spec 004 fields |
+| verify | requirement_id, mode; manual decision fields when manual |
 | verdict | verifier, status, rationale, evidence_refs, severity? |
 | complete | none |
 | resolve | operation_id, resolution, approver, rationale, proof |
 | reflect | scope?, ttl_days? |
-| append_evidence | kind, payload, artifact_paths? |
 
-Manual verify needs evidence_hash, approved, approver, rationale, and proof.
-Arrays stay arrays; text is nonblank. Resolution is
-`applied|not_applied|reject`; only `not_applied` reopens.
+Text is nonblank; arrays remain arrays. Only `not_applied` resolution reopens an
+uncertain effect.
 
 ## Outputs and state
 
-Success: `{ok,task,event_hash,idempotency:{key,replayed},data}`. Errors set
+Success: `{ok,task,event_hash,idempotency:{key,replayed},data}`. Domain errors set
 `isError` and return `{ok:false,error:{code,message,retryable,details},task?}`.
-Same key+digest replays. Complete maps PASS→verified, REPAIR→executing, and
-ESCALATE/STOP→blocked. Terminal states never reopen.
+Exact retries return recorded data even when replay repairs a transition.
 
-## Error triggers
+`task` exposes state, current/ordered phases, `allowed_next`, block reason, and
+approval evidence. Terminal tasks permit recorded replays and reflection.
 
-- `validation_error`: invalid shape/type/enum/blank; no write.
-- `policy_denied`: request exceeds frozen policy.
-- `approval_required`: untrusted proof; default deny.
+## Failure rules
+
+- `validation_error|idempotency_conflict`: bad/conflicting input; no write.
+- `policy_denied|approval_required`: outside authority or untrusted proof.
+- `phase_mismatch|phase_evidence_*`: stale phase or incomplete evidence.
+- `recovery_required`: replay the interrupted phase operation before HITL.
 - `task_blocked|unresolved_action_intent`: resolve uncertain work.
-- `recovery_in_progress`: another decision owns the effect.
-- `completion_snapshot_stale`: PASS snapshot has a later task event or current
-  workspace differs; retry needs fresh evidence and a new key.
-- `task_terminal`: new work after terminal.
+- `completion_snapshot_stale`: ledger/workspace changed after PASS.
+- `task_terminal`: new terminal work is forbidden.
 
-Partial ESCALATE/STOP and rejection block effects. Bad stdio is recoverable;
-notifications have no response.
+Bad stdio is recoverable; notifications have no response. Ledger state is
+authoritative.

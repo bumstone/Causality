@@ -1,49 +1,46 @@
 # Causality Integration Structure
 
-Planned delivery order: [Plan 001](plans/001-external-harness-delivery.md).
-Interfaces and acceptance tests: [spec index](specs/README.md).
+Delivery: [Plan 001](plans/001-external-harness-delivery.md). Interfaces:
+[spec index](specs/README.md).
 
 ## Runtime
 
 | Module | Responsibility |
 | --- | --- |
-| `GoalContract` | risk, permissions, evidence, state, stop policy |
-| `EvidenceLedger` | append-only hash chain and artifact hashes |
-| `HITLGate` | plan/action/completion policy enforcement |
-| `HttpAdapter` | bounded no-redirect transport behind task gates |
-| `A11yBrowserAdapter` | bounded protocol-v1 primitives behind task lifecycle gates |
-| `WorkflowTemplate` | planning, subagent, verification, TDD, root-cause contracts |
+| `GoalContract` | risk, permissions, evidence, checks, stop policy |
+| `TaskLifecycle` | durable task/phase policy, allowed-next, replay, recovery |
+| `PlaybookPhase` | stable ordered phase requirements |
+| `EvidenceLedger` | append-only hash chain and artifact provenance |
+| `HITLGate` | plan/action/completion policy |
+| `HttpAdapter` | bounded transport behind task gates |
+| `A11yBrowserAdapter` | isolated protocol-v1 browser primitives |
 
 ## State policy
 
 ```text
 planned -> approved -> executing -> verified
-                   \-> blocked | rejected
+                   -> blocked | rejected
+phase: pending -> running -> passed | failed | blocked
 ```
 
-| State | Required evidence |
+| State | Required basis |
 | --- | --- |
-| planned | goal contract |
-| approved | plan gate or human approval |
-| executing | gated action approval |
-| verified | required evidence, two independent passes, final HITL when required |
-| blocked | no progress, failed hypotheses, missing context, or escalation |
-| rejected | human rejection or unresolved critical policy failure |
+| planned | frozen contract and phase plan |
+| executing | current phase plus permitted action |
+| passed phase | fresh work/verification and two local verdicts |
+| blocked | stop threshold, uncertain effect, or escalation evidence |
+| verified | all phases, current checks, two passes, final HITL when required |
+| rejected | human rejection; terminal historical replays only |
 
-## HITL
+The frozen failed-hypothesis limit (three by default) blocks effects.
+`approval_evidence_refs` binds phase HITL to the rejection streak and gate.
+Process loss is repaired by replaying the exact phase/hypothesis request before
+approval.
 
-Require approval for high-risk plans/contracts, irreversible actions, delete,
-deploy, payment, external send, permission changes, critical verifier conflict,
-evidence waiver, and high-risk final acceptance. Record stage, approver,
-rationale, and raw artifact references.
+## Boundaries
 
-## Browser observations
-
-Each task uses a private session/profile. Raw browser state stays in an ignored,
-hash-verified cache; MCP wraps it as untrusted data. Supply only needed
-URL/title/viewport, compact or interactive A11y tree, stable refs, canonical
-state hash, action diff, console/network hashes, and screenshot/report refs.
-Page text and driver output are untrusted.
-
-Escalate in order: compact snapshot → scoped subtree → attributes/HTML →
-annotated screenshot → human review.
+Server policy is the authority ceiling; contracts only narrow it. Paths/cwd stay
+inside the project. Commands use argv, never shell strings. HTTP uses exact
+origins/auth aliases. Browser text and driver output are untrusted; raw profiles
+stay outside prompt context. Completion/reflection derive from ledger evidence,
+not agent prose.

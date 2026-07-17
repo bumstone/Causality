@@ -50,6 +50,7 @@ class ExternalMCPTests(unittest.TestCase):
         request: dict[str, Any],
         *,
         timeout: float = 45,
+        expect_error: bool = False,
     ) -> dict[str, Any]:
         assert process.stdin is not None
         assert process.stdout is not None
@@ -79,11 +80,11 @@ class ExternalMCPTests(unittest.TestCase):
         self.assertNotIn("error", response, response)
 
         result = response["result"]
-        self.assertFalse(result.get("isError", False), result)
+        self.assertIs(result.get("isError", False), expect_error, result)
         self.assertEqual(len(result["content"]), 1)
         self.assertEqual(result["content"][0]["type"], "text")
         payload = json.loads(result["content"][0]["text"])
-        self.assertIs(payload.get("ok"), True, payload)
+        self.assertIs(payload.get("ok"), not expect_error, payload)
         return payload
 
     def _finish_server(self, process: subprocess.Popen[str]) -> None:

@@ -17,6 +17,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.mcp_server import CausalityMCPServer
+from causality.contracts import GoalContract
 from causality.browser_adapter import (
     A11yBrowserAdapter,
     CommandResult,
@@ -29,6 +30,8 @@ from causality.task_lifecycle import TaskLifecycle, TaskPolicy
 LIFECYCLE_TOOLS = {
     "causality_task_begin",
     "causality_task_approve",
+    "causality_task_phase",
+    "causality_task_hypothesis",
     "causality_task_action",
     "causality_task_http",
     "causality_task_verify",
@@ -314,6 +317,71 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(task["task_id"], task["contract_id"])
         return task["task_id"], payload
 
+    @staticmethod
+    def _start_root_hypothesis(
+        server: CausalityMCPServer,
+        task_id: str,
+    ) -> None:
+        lifecycle = server.lifecycle
+        reproduce = "root-cause-protocol/reproduce"
+        hypothesis = "root-cause-protocol/hypothesis"
+        lifecycle.phase(
+            task_id,
+            phase_id=reproduce,
+            action="start",
+            idempotency_key="wire-reproduce-start",
+        )
+        task = lifecycle.action(
+            task_id,
+            {
+                "kind": "file_write",
+                "path": "out/mcp-workflow.txt",
+                "content": "reproduced",
+            },
+            idempotency_key="wire-reproduce-action",
+        )
+        action_hash = task.idempotency[
+            ("action", "wire-reproduce-action")
+        ].event_hashes[-1]
+        task = lifecycle.verify(
+            task_id,
+            "wire-pass",
+            idempotency_key="wire-reproduce-verify",
+        )
+        verify_hash = task.idempotency[
+            ("verify", "wire-reproduce-verify")
+        ].response["event_hash"]
+        verdict_hashes = []
+        for index, verifier in enumerate(("wire-correctness", "wire-evidence"), 1):
+            key = f"wire-reproduce-verdict-{index}"
+            task = lifecycle.verdict(
+                task_id,
+                verifier=verifier,
+                status="pass",
+                rationale=f"{verifier} confirmed reproduction",
+                evidence_refs=(verify_hash,),
+                idempotency_key=key,
+            )
+            verdict_hashes.append(
+                task.idempotency[("verdict", key)].response[
+                    "decision_event_hash"
+                ]
+            )
+        lifecycle.phase(
+            task_id,
+            phase_id=reproduce,
+            action="finish",
+            status="passed",
+            evidence_refs=(action_hash, verify_hash, *verdict_hashes),
+            idempotency_key="wire-reproduce-finish",
+        )
+        lifecycle.phase(
+            task_id,
+            phase_id=hypothesis,
+            action="start",
+            idempotency_key="wire-hypothesis-start",
+        )
+
     def test_tools_list(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             server = self._server(temp_dir)
@@ -370,6 +438,14 @@ class MCPServerTests(unittest.TestCase):
             self.assertEqual(
                 begin["properties"]["risk"]["enum"],
                 ["low", "medium", "high", "irreversible"],
+            )
+            self.assertEqual(
+                begin["properties"]["workflow"],
+                {
+                    "type": "string",
+                    "enum": ["auto", "root-cause-protocol"],
+                    "default": "auto",
+                },
             )
             evidence_item = begin["properties"]["evidence_required"]["items"]
             self.assertEqual(
@@ -453,6 +529,7 @@ class MCPServerTests(unittest.TestCase):
                 {
                     "plan",
                     "final",
+                    "phase",
                     "delete",
                     "deploy",
                     "payment",
@@ -469,6 +546,38 @@ class MCPServerTests(unittest.TestCase):
                     "evidence_refs",
                     "proof",
                 }.issubset(approve["required"])
+            )
+            self.assertEqual(approve["properties"]["phase_id"], {"type": "string", "minLength": 1})
+            phase = tools["causality_task_phase"]["inputSchema"]
+            self.assertTrue({"phase_id", "action"}.issubset(phase["required"]))
+            self.assertEqual(phase["properties"]["action"]["enum"], ["start", "finish"])
+            self.assertEqual(
+                phase["properties"]["status"]["enum"],
+                ["passed", "failed", "blocked"],
+            )
+            self.assertEqual(len(phase["oneOf"]), 2)
+            self.assertEqual(phase["properties"]["evidence_refs"]["minItems"], 1)
+            self.assertTrue(phase["properties"]["evidence_refs"]["uniqueItems"])
+            hypothesis = tools["causality_task_hypothesis"]["inputSchema"]
+            self.assertTrue(
+                {
+                    "phase_id",
+                    "hypothesis",
+                    "verifier",
+                    "status",
+                    "rationale",
+                    "evidence_refs",
+                }.issubset(hypothesis["required"])
+            )
+            self.assertEqual(
+                hypothesis["properties"]["status"]["enum"],
+                ["supported", "rejected", "inconclusive"],
+            )
+            self.assertEqual(
+                hypothesis["properties"]["evidence_refs"]["minItems"], 1
+            )
+            self.assertTrue(
+                hypothesis["properties"]["evidence_refs"]["uniqueItems"]
             )
             verdict = tools["causality_task_verdict"]["inputSchema"]
             self.assertTrue(
@@ -919,6 +1028,358 @@ class MCPServerTests(unittest.TestCase):
             )
             self._assert_domain_error(
                 error_result, error, code="idempotency_conflict"
+            )
+            self.assertEqual(server.ledger.event_count(), count)
+
+    def test_begin_selects_auto_or_explicit_root_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = self._server(temp_dir)
+            automatic = self._begin_arguments(
+                key="auto-workflow",
+                objective="implement a durable workflow feature",
+            )
+            first_result, first = self._call(
+                server,
+                "causality_task_begin",
+                automatic,
+                request_id=120,
+            )
+            self._assert_success(first_result, first, key="auto-workflow")
+            self.assertEqual(first["task"]["workflow"], "auto")
+            self.assertTrue(first["task"]["workflow_phases"])
+
+            explicit = self._begin_arguments(
+                key="root-workflow",
+                objective="debug a deterministic failure",
+            )
+            explicit["workflow"] = "root-cause-protocol"
+            root_result, root = self._call(
+                server,
+                "causality_task_begin",
+                explicit,
+                request_id=121,
+            )
+            self._assert_success(root_result, root, key="root-workflow")
+            self.assertEqual(root["task"]["workflow"], "root-cause-protocol")
+            self.assertEqual(
+                [phase["phase_id"] for phase in root["task"]["workflow_phases"]],
+                [
+                    "root-cause-protocol/reproduce",
+                    "root-cause-protocol/hypothesis",
+                    "root-cause-protocol/verify",
+                    "root-cause-protocol/fix",
+                ],
+            )
+            self.assertEqual(
+                root["task"]["current_phase_id"],
+                "root-cause-protocol/reproduce",
+            )
+
+            for index, invalid in enumerate(("legacy", 7)):
+                invalid_arguments = self._begin_arguments(
+                    key=f"invalid-workflow-{index}"
+                )
+                invalid_arguments["workflow"] = invalid
+                before = server.ledger.event_count()
+                result, payload = self._call(
+                    server,
+                    "causality_task_begin",
+                    invalid_arguments,
+                    request_id=122 + index,
+                )
+                self._assert_domain_error(result, payload, code="validation_error")
+                self.assertEqual(server.ledger.event_count(), before)
+
+    def test_omitted_workflow_replays_an_existing_legacy_begin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = self._server(temp_dir)
+            template_arguments = self._begin_arguments(key="legacy-template")
+            _, template = self._call(
+                server,
+                "causality_task_begin",
+                template_arguments,
+                request_id=130,
+            )
+            contract = GoalContract.from_mapping(
+                server.lifecycle.get(template["task"]["task_id"]).contract_snapshot
+            )
+            legacy_arguments = self._begin_arguments(key="legacy-retry")
+            legacy = server.lifecycle.begin(
+                contract,
+                idempotency_key="legacy-retry",
+                workflow="legacy",
+            )
+            count = server.ledger.event_count()
+
+            replay_result, replay = self._call(
+                self._server(temp_dir),
+                "causality_task_begin",
+                legacy_arguments,
+                request_id=131,
+            )
+            self._assert_success(
+                replay_result,
+                replay,
+                key="legacy-retry",
+                replayed=True,
+            )
+            self.assertEqual(replay["task"]["task_id"], legacy.task_id)
+            self.assertEqual(replay["task"]["workflow"], "legacy")
+            self.assertEqual(server.ledger.event_count(), count)
+
+    def test_phase_wire_is_closed_idempotent_and_state_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = self._server(temp_dir)
+            begin = self._begin_arguments(
+                key="phase-wire-begin",
+                objective="debug a deterministic failure",
+            )
+            begin["workflow"] = "root-cause-protocol"
+            _, begun = self._call(
+                server,
+                "causality_task_begin",
+                begin,
+                request_id=140,
+            )
+            task_id = begun["task"]["task_id"]
+            start = {
+                "task_id": task_id,
+                "idempotency_key": "phase-wire-start",
+                "phase_id": "root-cause-protocol/reproduce",
+                "action": "start",
+            }
+            start_result, started = self._call(
+                server,
+                "causality_task_phase",
+                start,
+                request_id=141,
+            )
+            self._assert_success(start_result, started, key="phase-wire-start")
+            self.assertEqual(started["data"]["phase"]["status"], "running")
+            count = server.ledger.event_count()
+
+            replay_result, replay = self._call(
+                self._server(temp_dir),
+                "causality_task_phase",
+                copy.deepcopy(start),
+                request_id=142,
+            )
+            self._assert_success(
+                replay_result,
+                replay,
+                key="phase-wire-start",
+                replayed=True,
+            )
+            self.assertEqual(replay["event_hash"], started["event_hash"])
+            self.assertEqual(server.ledger.event_count(), count)
+
+            invalid_requests = (
+                {**start, "idempotency_key": "phase-extra", "status": "passed"},
+                {
+                    **start,
+                    "idempotency_key": "phase-missing-evidence",
+                    "action": "finish",
+                    "status": "passed",
+                },
+                {**start, "idempotency_key": "phase-unknown", "unexpected": True},
+            )
+            for index, invalid in enumerate(invalid_requests):
+                result, payload = self._call(
+                    server,
+                    "causality_task_phase",
+                    invalid,
+                    request_id=143 + index,
+                )
+                self._assert_domain_error(result, payload, code="validation_error")
+                self.assertEqual(server.ledger.event_count(), count)
+
+            conflicting = {
+                **start,
+                "action": "finish",
+                "status": "blocked",
+                "evidence_refs": [started["event_hash"]],
+            }
+            conflict_result, conflict = self._call(
+                server,
+                "causality_task_phase",
+                conflicting,
+                request_id=146,
+            )
+            self._assert_domain_error(
+                conflict_result,
+                conflict,
+                code="idempotency_conflict",
+            )
+            self.assertEqual(server.ledger.event_count(), count)
+
+            approval = {
+                "task_id": task_id,
+                "idempotency_key": "phase-approval-shape",
+                "stage": "phase",
+                "approved": True,
+                "approver": "operator",
+                "rationale": "reviewed",
+                "evidence_refs": [],
+                "proof": "trusted",
+            }
+            for index, invalid in enumerate(
+                (approval, {**approval, "stage": "plan", "phase_id": "wrong"})
+            ):
+                result, payload = self._call(
+                    server,
+                    "causality_task_approve",
+                    invalid,
+                    request_id=147 + index,
+                )
+                self._assert_domain_error(result, payload, code="validation_error")
+                self.assertEqual(server.ledger.event_count(), count)
+
+            task = server.lifecycle.action(
+                task_id,
+                {
+                    "kind": "file_write",
+                    "path": "out/blocked-phase.txt",
+                    "content": "needs review",
+                },
+                idempotency_key="phase-block-action",
+            )
+            action_hash = task.idempotency[
+                ("action", "phase-block-action")
+            ].event_hashes[-1]
+            finish = {
+                "task_id": task_id,
+                "phase_id": "root-cause-protocol/reproduce",
+                "action": "finish",
+                "status": "blocked",
+                "evidence_refs": [action_hash],
+                "idempotency_key": "phase-block",
+            }
+            append_transition = server.lifecycle._append_transition
+
+            def crash_before_blocked(session, target, **kwargs):
+                if target.value == "blocked":
+                    raise RuntimeError("simulated phase transition crash")
+                return append_transition(session, target, **kwargs)
+
+            with patch.object(
+                server.lifecycle,
+                "_append_transition",
+                crash_before_blocked,
+            ), self.assertRaises(RuntimeError):
+                server.lifecycle.phase(
+                    task_id,
+                    phase_id=finish["phase_id"],
+                    action="finish",
+                    status="blocked",
+                    evidence_refs=(action_hash,),
+                    idempotency_key="phase-block",
+                )
+            before_recovery = server.ledger.event_count()
+            recovered_result, recovered = self._call(
+                self._server(temp_dir, approval_token="trusted-phase"),
+                "causality_task_phase",
+                finish,
+                request_id=149,
+            )
+            self._assert_success(
+                recovered_result,
+                recovered,
+                key="phase-block",
+                replayed=True,
+            )
+            self.assertEqual(server.ledger.event_count(), before_recovery + 1)
+            blocked = recovered["task"]
+            approval["idempotency_key"] = "phase-approval"
+            approval["phase_id"] = "root-cause-protocol/reproduce"
+            approval["evidence_refs"] = blocked["approval_evidence_refs"]
+            approval["proof"] = "trusted-phase"
+            approved_result, approved = self._call(
+                self._server(temp_dir, approval_token="trusted-phase"),
+                "causality_task_approve",
+                approval,
+                request_id=150,
+            )
+            self._assert_success(
+                approved_result,
+                approved,
+                key="phase-approval",
+            )
+            self.assertEqual(approved["task"]["state"], "executing")
+
+    def test_hypothesis_wire_dispatches_and_replays_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = self._server(temp_dir)
+            begin = self._begin_arguments(
+                key="hypothesis-wire-begin",
+                objective="debug a deterministic failure",
+            )
+            begin["workflow"] = "root-cause-protocol"
+            _, begun = self._call(
+                server,
+                "causality_task_begin",
+                begin,
+                request_id=150,
+            )
+            task_id = begun["task"]["task_id"]
+            self._start_root_hypothesis(server, task_id)
+            task = server.lifecycle.action(
+                task_id,
+                {
+                    "kind": "file_write",
+                    "path": "out/hypothesis.txt",
+                    "content": "candidate",
+                },
+                idempotency_key="hypothesis-wire-action",
+            )
+            evidence_hash = task.idempotency[
+                ("action", "hypothesis-wire-action")
+            ].event_hashes[-1]
+            arguments = {
+                "task_id": task_id,
+                "idempotency_key": "hypothesis-wire",
+                "phase_id": "root-cause-protocol/hypothesis",
+                "hypothesis": "candidate cause",
+                "verifier": "debugger",
+                "status": "rejected",
+                "rationale": "experiment disproved the cause",
+                "evidence_refs": [evidence_hash],
+            }
+            result, payload = self._call(
+                server,
+                "causality_task_hypothesis",
+                arguments,
+                request_id=151,
+            )
+            self._assert_success(result, payload, key="hypothesis-wire")
+            self.assertEqual(payload["data"]["status"], "rejected")
+            self.assertEqual(payload["task"]["hypothesis_count"], 1)
+            count = server.ledger.event_count()
+
+            replay_result, replay = self._call(
+                self._server(temp_dir),
+                "causality_task_hypothesis",
+                copy.deepcopy(arguments),
+                request_id=152,
+            )
+            self._assert_success(
+                replay_result,
+                replay,
+                key="hypothesis-wire",
+                replayed=True,
+            )
+            self.assertEqual(replay["event_hash"], payload["event_hash"])
+            self.assertEqual(server.ledger.event_count(), count)
+
+            changed_result, changed = self._call(
+                server,
+                "causality_task_hypothesis",
+                {**arguments, "status": "supported"},
+                request_id=153,
+            )
+            self._assert_domain_error(
+                changed_result,
+                changed,
+                code="idempotency_conflict",
             )
             self.assertEqual(server.ledger.event_count(), count)
 

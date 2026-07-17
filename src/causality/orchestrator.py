@@ -345,5 +345,11 @@ class Causality:
         self,
         contract: GoalContract,
         iteration_state: Mapping[str, int],
+        *,
+        event_metadata: Mapping[str, object] | None = None,
     ) -> GateResult:
-        return self.gate.should_stop(contract, iteration_state)
+        return self.gate.should_stop(
+            contract,
+            iteration_state,
+            event_metadata=event_metadata,
+        )

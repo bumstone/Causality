@@ -93,6 +93,16 @@ class ClassifyTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertEqual(self.harness.classify(phrase), TaskType.IMPLEMENTATION)
 
+    def test_debug_aliases_route_to_implementation_bundle(self) -> None:
+        for phrase in ("debug the parser", "debugging checkout", "diagnose the failure"):
+            with self.subTest(phrase=phrase):
+                task_type = self.harness.classify(phrase)
+                self.assertEqual(task_type, TaskType.IMPLEMENTATION)
+                self.assertEqual(
+                    self.harness.route(task_type).playbook,
+                    ("tdd", "debugging"),
+                )
+
     def test_release_phrases(self) -> None:
         for phrase in ("release v1.2", "ship it", "deploy to prod", "publish the package"):
             with self.subTest(phrase=phrase):

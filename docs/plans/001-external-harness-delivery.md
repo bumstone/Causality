@@ -18,7 +18,7 @@ terminal state.
 4. [x] [API/browser adapters](../specs/004-api-browser-adapters.md):
    - [x] 004A: scoped HTTP action, MCP wire, installed-project E2E.
    - [x] 004B: capability-gated, isolated A11y/browser lifecycle.
-5. [ ] [Workflow and debug loop](../specs/005-workflow-debug-loop.md): persist phase
+5. [x] [Workflow and debug loop](../specs/005-workflow-debug-loop.md): persist phase
    state, route debugging, count failed hypotheses, and deduplicate failures.
 6. [ ] [Resume and skill operations](../specs/006-resume-and-skill-operations.md):
    resume interrupted tasks and expose earned-skill outcome/promotion operations.

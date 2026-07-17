@@ -4,7 +4,7 @@ After a run, the append-only :class:`EvidenceLedger` (L4) holds the raw trail of
 evidence, verifier decisions, gate decisions, and human decisions. The Reflect
 step reads only the events for one ``GoalContract`` and *distills* them into
 long-term typed memory (L0): a single ``retrospectives`` summary plus one
-``failures`` entry per failure signal (ADR 0006 §2.1 evolution loop).
+``failures`` entry per stable failure cause (ADR 0006 §2.1 evolution loop).
 
 Distillation, not transcription (ADR 0007 "completion -> typed summary only"):
 the retrospective is one concise paragraph of counts, not a replay of events.
@@ -19,7 +19,9 @@ of custody back to raw evidence survives the L0 boundary (ADR 0005 §2.2).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Any
 
 from .contracts import AuditEventType, GateDecision, GoalContract
 from .ledger import EvidenceLedger, LedgerEvent, sha256_text
@@ -48,6 +50,49 @@ def _is_fail(event: LedgerEvent) -> bool:
     return event.payload.get("status") == "fail"
 
 
+def _normalized(value: object) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _event_phases(events: list[LedgerEvent]) -> dict[str, str]:
+    phases: dict[str, str] = {}
+    current = ""
+    for event in events:
+        response = event.payload.get("response")
+        phase = response.get("phase") if isinstance(response, dict) else None
+        if (
+            event.event_type == AuditEventType.TASK_OPERATION.value
+            and event.payload.get("operation") == "phase"
+            and isinstance(phase, dict)
+        ):
+            phase_id = phase.get("phase_id")
+            status = phase.get("status")
+            if status == "running" and isinstance(phase_id, str):
+                current = phase_id.strip()
+            phases[event.entry_hash] = current
+            if status in {"passed", "failed", "blocked"}:
+                current = ""
+            continue
+        phases[event.entry_hash] = current
+    return phases
+
+
+def _failure_id(
+    task_id: str,
+    phase_id: str,
+    verifier: str,
+    rationale: str,
+    scope: str,
+) -> str:
+    return sha256_text(
+        json.dumps(
+            ["failure-cause-v1", task_id, phase_id, verifier, rationale, scope],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    )
+
+
 def reflect_on_contract(
     ledger: EvidenceLedger,
     memory: TypedMemory,
@@ -62,9 +107,9 @@ def reflect_on_contract(
     """Distill ``contract``'s ledger trail into typed long-term memory.
 
     Reads only events whose ``contract_id`` matches the contract, records one
-    ``retrospectives`` summary of the run, and one ``failures`` entry per
-    failure signal (critical-or-not verifier ``fail`` decisions and ``repair``
-    gate decisions). Returns the :class:`Reflection` it wrote.
+    ``retrospectives`` summary of the run, and one ``failures`` entry per stable
+    cause found in verifier ``fail`` decisions and ``repair`` gate decisions.
+    Returns the :class:`Reflection` it wrote.
 
     ``failure_scope`` is the scope stamped on the recorded ``failures``. It
     defaults to ``contract:<goal_id>`` -- unique per run, so failures stay tied
@@ -137,60 +182,53 @@ def reflect_on_contract(
         )
 
     scope = failure_scope or f"contract:{contract.goal_id}"
+    if not isinstance(scope, str) or not scope.strip():
+        raise ValueError("failure_scope must be non-blank")
     failures: list[MemoryEntry] = []
-
-    for event in verifier_fails:
-        verifier = event.payload.get("verifier", "unknown")
-        rationale = event.payload.get("rationale", "")
-        critical = event.payload.get("severity") == "critical"
-        marker = "critical verifier failure" if critical else "verifier failure"
-        failure_summary = f"{marker} from '{verifier}': {rationale}".strip()
-        if reflection_id is None:
-            entry = memory.record_failure(
-                failure_summary,
-                scope=scope,
-                provenance=event.entry_hash,
-                ttl_days=failure_ttl_days,
-            )
+    phases = _event_phases(events)
+    signals: dict[str, tuple[LedgerEvent, str, str]] = {}
+    for event in events:
+        if event.event_type == AuditEventType.VERIFIER_DECISION.value and _is_fail(event):
+            verifier_value = event.payload.get("verifier", "unknown")
+            rationale_value = event.payload.get("rationale", "")
+            critical = event.payload.get("severity") == "critical"
+            marker = "critical verifier failure" if critical else "verifier failure"
+            failure_summary = (
+                f"{marker} from '{verifier_value}': {rationale_value}"
+            ).strip()
+        elif (
+            event.event_type == AuditEventType.GATE_DECISION.value
+            and event.payload.get("decision") == GateDecision.REPAIR.value
+        ):
+            reasons = event.payload.get("reasons") or []
+            rationale_value = reasons[0] if reasons else "repair required"
+            verifier_value = "gate:repair"
+            failure_summary = f"repair gate decision: {rationale_value}"
         else:
-            metadata = {"scope": scope}
-            if failure_ttl_days is not None:
-                metadata["ttl_days"] = failure_ttl_days
-            entry = memory.record_once(
-                "failures",
-                failure_summary,
-                entry_id=sha256_text(f"{reflection_id}:failure:{event.entry_hash}"),
-                created_at=created_at,
-                provenance=event.entry_hash,
-                **metadata,
-            )
-        failures.append(entry)
-
-    for event in gates:
-        if event.payload.get("decision") != GateDecision.REPAIR.value:
             continue
-        reasons = event.payload.get("reasons") or []
-        reason = reasons[0] if reasons else "repair required"
-        failure_summary = f"repair gate decision: {reason}"
-        if reflection_id is None:
-            entry = memory.record_failure(
-                failure_summary,
-                scope=scope,
-                provenance=event.entry_hash,
-                ttl_days=failure_ttl_days,
-            )
-        else:
-            metadata = {"scope": scope}
-            if failure_ttl_days is not None:
-                metadata["ttl_days"] = failure_ttl_days
-            entry = memory.record_once(
+        phase_id = phases[event.entry_hash]
+        entry_id = _failure_id(
+            contract.goal_id,
+            phase_id,
+            _normalized(verifier_value),
+            _normalized(rationale_value),
+            scope,
+        )
+        signals.setdefault(entry_id, (event, failure_summary, phase_id))
+
+    for entry_id, (event, failure_summary, phase_id) in signals.items():
+        metadata: dict[str, Any] = {"scope": scope, "phase_id": phase_id}
+        if failure_ttl_days is not None:
+            metadata["ttl_days"] = failure_ttl_days
+        failures.append(
+            memory.record_once(
                 "failures",
                 failure_summary,
-                entry_id=sha256_text(f"{reflection_id}:failure:{event.entry_hash}"),
-                created_at=created_at,
+                entry_id=entry_id,
+                created_at=event.timestamp,
                 provenance=event.entry_hash,
                 **metadata,
             )
-        failures.append(entry)
+        )
 
     return Reflection(retrospective=retrospective, failures=tuple(failures))
