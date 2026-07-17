@@ -25,7 +25,7 @@ Local-first agent control: contract, gated execution, evidence, and reflection.
 ## Still Not Proven
 
 - Automatic orchestration across install, workflow selection, recovery, verification,
-  and reflection as one external-client-owned loop (planned as Spec 007).
+  and reflection as one external-client-owned loop ([planned as Spec 007](specs/007-automatic-orchestration.md)).
 - External App, secret, repository-rule, and autofix operating configuration.
 
 ## Sources
