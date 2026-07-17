@@ -1,6 +1,6 @@
 # Installation
 
-## Python package
+## Package or local checkout
 
 ```powershell
 python -m venv .venv
@@ -8,127 +8,62 @@ python -m venv .venv
 pip install -e .
 ```
 
-For a personal local checkout on Windows, the repository ships a one-command
-installer:
+Helpers install the venv, package, agent files, and doctor checks:
 
 ```powershell
-git clone https://github.com/bumstone/Causality.git D:\dev\Causality
-cd D:\dev\Causality
+# Windows
 .\scripts\install.ps1
-```
 
-The script creates `.venv`, installs Causality in editable mode, installs the
-project-level Claude/Codex automation, and runs the local doctor checks.
-
-For WSL/Linux:
-
-```bash
-git clone https://github.com/bumstone/Causality.git ~/dev/Causality
-cd ~/dev/Causality
-bash scripts/install.sh
-```
-
-## Local update workflow
-
-Update the local checkout with a fast-forward pull, reinstall the editable
-package, refresh the project automation, and run the doctor checks:
-
-```powershell
-cd D:\dev\Causality
+# Update; options: -SkipTests
 .\scripts\update.ps1
 ```
 
-Useful options:
-
-```powershell
-.\scripts\update.ps1 -RefreshAgent      # overwrite generated agent files
-.\scripts\update.ps1 -SkipTests         # update only, no doctor test run
-.\scripts\update.ps1 -UpdateCodexCli    # also run the Codex CLI updater
-```
-
-For WSL/Linux:
-
 ```bash
-bash scripts/update.sh
-bash scripts/update.sh --refresh-agent
+# Linux/WSL
+bash scripts/install.sh
+bash scripts/update.sh           # option: --skip-tests
 ```
 
-To register a weekly Windows scheduled task:
+Run `scripts/doctor.ps1` or `scripts/doctor.sh` for a health check.
+
+## Project agent files
+
+From a target project:
 
 ```powershell
-.\scripts\register-update-task.ps1
+causality install-agent --client codex --adopt --verify
+# or: --client claude / --client generic
 ```
 
-By default it runs `scripts\update.ps1 -SkipTests` every Sunday at 09:00. Add
-`-UpdateCodexCli` if you also want that scheduled task to update the Codex CLI.
+Installs host entrypoints, namespaced routing, local rules/ledger/MCP config,
+and on-demand workflow, checklist, skill, and memory files.
 
-Run the local health check directly with:
+Host `AGENTS.md` and `CLAUDE.md` are never overwritten. `--force` refreshes
+other generated files; update helpers use it automatically for schema changes.
+MCP `causality_init` accepts only `client` and `verify`; `--force` and `--adopt`
+are CLI-only operator actions.
+
+`auto` needs exactly one existing Codex/Claude signal; otherwise it returns an
+explicit rerun command.
+`active` means routing, config, handshake, and applicable client probes passed;
+`pending` needs adoption/trust/approval; `broken` is a real config/runtime error.
+
+## MCP and browser adapters
+
+Codex uses `.codex/config.toml`, Claude root `.mcp.json`, and generic clients
+`.causality/mcp.json`. Codex trust and Claude approval remain user gates.
+Generated native entries contain machine paths; keep them local unless the host
+uses a portable shared command. Manual stdio start:
 
 ```powershell
-.\scripts\doctor.ps1
+python -I -m causality.mcp_server --project .
 ```
 
-## Project-level agent automation
+`.causality/.gitignore` hides raw runtime state. If a legacy private path is
+already tracked, install returns `broken` with untrack guidance.
 
-In a new project:
-
-```powershell
-causality install-agent
-```
-
-This installs local instruction/config files:
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `.claude/commands/causality-plan.md`
-- `.claude/commands/causality-verify.md`
-- `.claude/commands/causality-root-cause.md`
-- `.claude/commands/causality-a11y-observe.md`
-- `.claude/commands/causality-complete.md`
-- `.codex/causality-routing.md`
-- `.causality/agent-rules.md`
-- `.causality/ledger.jsonl`
-- `.causality/causality-workflows.json`
-- `.causality/mcp.json`
-
-Existing files are not overwritten unless you pass `--force`.
-
-Claude uses the `.claude/commands/` files as project slash commands. Codex uses
-`AGENTS.md` as the automatic router and can call the MCP-style server when the
-client exposes it.
-
-For MCP-style clients, use the project config in `.causality/mcp.json` or
-register the server manually:
-
-```powershell
-python -m causality.mcp_server --project .
-```
-
-## Browser driver
-
-The browser adapter is driver-agnostic. Configure the executable with:
+Set the browser driver executable when browser actions are needed:
 
 ```powershell
 $env:CAUSALITY_BROWSER_BIN="C:\path\to\browser-driver.exe"
 ```
-
-The driver should expose snapshot/action commands or be wrapped by a small
-adapter script that does.
-
-## Browser accessibility tools
-
-For downstream web projects:
-
-```powershell
-npm install -D @playwright/test @axe-core/playwright
-npx playwright install
-```
-
-Optional:
-
-```powershell
-npm install -D pa11y lighthouse
-```
-
-These tools should produce JSON/HTML artifacts that are referenced from the
-Causality ledger by path and hash, not pasted into prompts.

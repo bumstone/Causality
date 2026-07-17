@@ -124,7 +124,6 @@
   .now { color: var(--blue); border-color: #9ebee3; background: var(--blue-soft); }
   .risk { color: var(--amber); border-color: #e2bd7b; background: var(--amber-soft); }
   .later { color: var(--violet); border-color: #c7b7ed; background: var(--violet-soft); }
-  .local { color: #7a4c14; border-color: #ddc094; background: #fff7e8; }
   .commit { font-family: "Cascadia Mono", "Consolas", monospace; }
 
   .map {
@@ -296,21 +295,19 @@
     </div>
     <div class="meta">
       <div><b>기준 브랜치</b> <code>main</code></div>
-      <div><b>갱신</b> 2026-07-13</div>
-      <div><b>최근 근거</b> PR #30-#34 post-review verification</div>
-      <div><b>온보딩</b> <code>/onboard</code> tracked by PR #34</div>
-      <div><b>검증 기준</b> <code>docs/project-summary.md</code> + repository checks</div>
+      <div><b>상태 원천</b> <a href="../project-summary.md">project-summary.md</a></div>
+      <div><b>검증</b> <code>python -m unittest discover -s tests</code></div>
     </div>
   </section>
 
   <section class="verdict" aria-label="요약 판단">
     <div class="statement">
-      <p><strong>정직한 결론:</strong> Causality의 코어 제어 하네스는 기능적으로 닫힌 상태다. 계약, gate, verifier quorum, redaction, 파일/서브프로세스 도구 실행, ledger rotation/<code>.idx</code>, L1 playbook vendoring까지 main에 들어왔고, PR #34가 프로젝트 온보딩용 <code>/onboard</code> 경로를 추적 기준선에 추가한다.</p>
+      <p><strong>정직한 결론:</strong> Causality의 코어 제어 하네스와 프로젝트 온보딩 기준선이 구현됐고, PR #35는 client-native MCP 설정, host-safe adoption, handshake, activation report를 추가한다.</p>
       <div class="tags">
         <span class="tag done">코어 루프 닫힘</span>
         <span class="tag done">P3 scale/playbook 반영</span>
-        <span class="tag done">/onboard 기준선</span>
-        <span class="tag commit">PR #34</span>
+        <span class="tag done">/onboard 반영</span>
+        <span class="tag done">설치 activation 반영</span>
       </div>
     </div>
     <div class="caveat">
@@ -332,7 +329,7 @@
       </article>
       <article class="card done-card">
         <h3><span class="tag done">2</span> 어디까지 닫혔는가</h3>
-        <p>최근 변경과 완료된 기반을 보면 main의 코어 기능과 PR #34가 추가한 추적 가능한 <code>/onboard</code> 기준선을 함께 확인할 수 있다.</p>
+        <p>완료된 기반과 아직 보장하지 않는 영역을 구분해 다음 구현 우선순위를 확인한다.</p>
       </article>
       <article class="card risk-card">
         <h3><span class="tag risk">3</span> 다음에 뭘 봐야 하나</h3>
@@ -418,6 +415,10 @@
         <div class="what"><b>repo hygiene 최신화.</b> OS/editor cruft(<code>.DS_Store</code>, <code>.idea/</code>, <code>.vscode/</code>)가 ignore되어 개인 환경 파일이 PR diff에 섞일 위험을 줄였다.</div>
       </div>
       <div class="event">
+        <div class="when">PR #35</div>
+        <div class="what"><b>외부 설치 activation.</b> client-native MCP 설정, host-owned entrypoint 보존, handshake와 durable install report를 추가했다.</div>
+      </div>
+      <div class="event">
         <div class="when">PR #34</div>
         <div class="what"><b><code>/onboard</code> 도입.</b> 프로젝트 시작 시 agent가 현재 작업, 구현 우선순위, 검증 명령, 위험을 모으도록 project-local command/skill 설치 경로를 추적 기준선에 추가했다.</div>
       </div>
@@ -473,7 +474,7 @@
       </article>
       <article class="card done-card">
         <h3><span class="tag done">완료</span> 프로젝트 온보딩</h3>
-        <p><code>/onboard</code>는 새 세션에서 repo map, 현재 작업, 구현 계획, 검증 리스크를 모아 main agent가 요약하도록 하는 절차다. project-local 산출물은 PR #34의 추적 기준선이다.</p>
+        <p><code>/onboard</code>는 새 세션의 repo map, 현재 작업, 구현 계획, 검증 리스크를 모은다. PR #35 installer는 이 기준선을 client-native MCP activation과 연결한다.</p>
       </article>
       <article class="card done-card">
         <h3><span class="tag done">완료</span> 보안 redaction</h3>
@@ -500,6 +501,7 @@
 
   <section aria-labelledby="remaining">
     <h2 id="remaining">남은 로드맵</h2>
+    <p class="sub">구현 순서와 수용 기준은 <a href="../plans/001-external-harness-delivery.md">Plan 001</a> 및 연결된 상세 spec을 기준으로 한다.</p>
     <table class="truth-table">
       <thead>
         <tr>
@@ -510,24 +512,34 @@
       </thead>
       <tbody>
         <tr>
-          <td>API/browser 실행</td>
-          <td>파일/서브프로세스 <code>ToolAdapter</code>는 run 안에서 검증됐지만, API 호출과 browser action을 같은 계약/증거 모델로 실행하는 어댑터는 아직 없다.</td>
-          <td>API/browser adapter가 plan/action gate, evidence ledger, verifier completion을 통과하는 E2E 테스트.</td>
+          <td>01 · 설치 활성화 (완료)</td>
+          <td>client-native MCP 설정, host 보존/adopt, venv interpreter 고정, handshake와 durable install report가 구현됐다. trust/approval은 우회하지 않고 pending으로 보고한다.</td>
+          <td><a href="../specs/001-install-activation.md">Spec 001</a> 수용 테스트 완료. 다음 구현은 02 검증 evidence다.</td>
         </tr>
         <tr>
-          <td>playbook 실행 깊이</td>
-          <td>번들 라벨은 구조화된 playbook으로 vendoring됐고(phase·step), 파일/서브프로세스 어댑터도 들어왔다. 다만 phase는 에이전트가 따르는 지침이며 엔진이 자동 실행하지 않고, API/browser 실사용 어댑터는 아직 없다.</td>
-          <td>playbook phase를 실제 실행 계획, 검증 명령, ledger evidence로 연결하는 최소 자동화 경로.</td>
+          <td>02 · 검증 evidence</td>
+          <td>현재 verification 문자열은 실제 명령 실행이 아니라 evidence kind 요구사항에 가깝다.</td>
+          <td><a href="../specs/002-verification-evidence.md">Spec 002</a>: requirement ID, argv, exit code, artifact hash를 completion에 결합.</td>
         </tr>
         <tr>
-          <td>운영 자동화 설정</td>
-          <td>PR watch/autofix 정책은 있으나 외부 App 설치, secret 설정, repository rule과 결합되어야 완전한 자동 운영이 된다.</td>
-          <td>설치 상태 점검 명령과 green/skip 이유가 명확한 운영 health report.</td>
+          <td>03 · MCP task lifecycle</td>
+          <td>MCP는 init/context/evidence/workflow 조회만 제공한다. 계약, action, verdict, completion, reflection은 Python API에만 있다.</td>
+          <td><a href="../specs/003-mcp-task-lifecycle.md">Spec 003</a>: durable task state와 gated lifecycle tools.</td>
         </tr>
         <tr>
-          <td>문서 소스 정합성</td>
-          <td>이 HTML은 빠른 상태판이다. 상세 근거는 ADR, code review note, PR diff, ledger에 흩어져 있다.</td>
-          <td>상태판 생성 원천을 명확히 하거나, 최소한 갱신 날짜와 근거 commit을 항상 같이 갱신.</td>
+          <td>04 · API/browser adapters</td>
+          <td>파일/서브프로세스 adapter만 run 안에서 검증됐다. API와 browser action은 같은 계약/증거 모델로 실행되지 않는다.</td>
+          <td><a href="../specs/004-api-browser-adapters.md">Spec 004</a>: scope-gated API/A11y actions와 E2E evidence.</td>
+        </tr>
+        <tr>
+          <td>05 · workflow/debug loop</td>
+          <td>workflow/playbook phase는 지침이며, debug 분류·가설 실패 escalation·failure dedup이 엔진 lifecycle에 완전히 연결되지 않았다.</td>
+          <td><a href="../specs/005-workflow-debug-loop.md">Spec 005</a>: persisted phase runner와 root-cause loop.</td>
+        </tr>
+        <tr>
+          <td>06 · resume/skill operations</td>
+          <td>failure와 candidate skill은 로컬 기록되지만, MCP resume·outcome·promotion과 terminal idempotency가 없다.</td>
+          <td><a href="../specs/006-resume-and-skill-operations.md">Spec 006</a>: durable resume와 HITL skill operations.</td>
         </tr>
       </tbody>
     </table>
@@ -542,7 +554,7 @@
       </article>
       <article class="card wide done-card">
         <h3><span class="tag done">적합</span> 변경 추적용</h3>
-        <p>PR #30-#34, PR #27-#29, 기준 commit, test count를 분리해 코어 기능과 온보딩 기준선의 근거를 추적한다.</p>
+        <p>완료된 기반과 남은 보장 공백을 분리하고, 최신 검증 기준은 단일 상태 원천으로 연결한다.</p>
       </article>
       <article class="card wide risk-card">
         <h3><span class="tag risk">주의</span> 완성 선언 문서로는 부적합</h3>
@@ -556,7 +568,7 @@
   </section>
 
   <footer class="footer">
-    <p><b>근거:</b> <code>docs/project-summary.md</code>, ADR 0001-0011, PR #19-#34 post-review verification. 최신 test baseline은 project summary를 단일 원천으로 사용한다.</p>
+    <p><b>근거:</b> <code>docs/project-summary.md</code>, ADR 0001-0011, regression suite, and the evidence ledger.</p>
   </footer>
 </main>
 </body>

@@ -1,8 +1,6 @@
 param(
     [switch]$AllowDirty,
-    [switch]$RefreshAgent,
-    [switch]$SkipTests,
-    [switch]$UpdateCodexCli
+    [switch]$SkipTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,16 +45,7 @@ try {
         Invoke-Checked $VenvPython @("-m", "pip", "install", "-e", ".")
     }
 
-    if ($RefreshAgent) {
-        Invoke-Checked $VenvPython @("-m", "causality.cli", "install-agent", "--project", ".", "--force")
-    }
-    else {
-        Invoke-Checked $VenvPython @("-m", "causality.cli", "install-agent", "--project", ".")
-    }
-
-    if ($UpdateCodexCli) {
-        & (Join-Path $PSScriptRoot "update-codex-cli.ps1")
-    }
+    Invoke-Checked $VenvPython @("-m", "causality.cli", "install-agent", "--project", ".", "--force")
 
     if (-not $SkipTests) {
         & (Join-Path $PSScriptRoot "doctor.ps1")
