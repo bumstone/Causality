@@ -9,16 +9,44 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from causality.contracts import EvidenceKind, GateDecision, VerifierDecision
+from causality.contracts import (
+    AuditEventType,
+    EvidenceKind,
+    GateDecision,
+    VerificationRequirement,
+    VerifierDecision,
+)
 from causality.durable import DurableJsonl
 from causality.engine import CausalityEngine
 from causality.memory import MemoryEntry
 
 
-def _passing_verifiers():
+def _verification() -> tuple[VerificationRequirement, ...]:
+    return (
+        VerificationRequirement(
+            id="unit",
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+        ),
+    )
+
+
+def _result_hash(engine: CausalityEngine, contract) -> str:
     return [
-        lambda c: VerifierDecision("correctness", "pass", "looks right"),
-        lambda c: VerifierDecision("evidence", "pass", "evidence present"),
+        event.entry_hash
+        for event in engine.runtime.ledger.events_for_contract(contract.goal_id)
+        if event.event_type == AuditEventType.EVIDENCE.value
+        and event.payload.get("kind") == "verification_result"
+    ][-1]
+
+
+def _passing_verifiers(engine: CausalityEngine):
+    return [
+        lambda c: VerifierDecision(
+            "correctness", "pass", "looks right", evidence_refs=(_result_hash(engine, c),)
+        ),
+        lambda c: VerifierDecision(
+            "evidence", "pass", "evidence present", evidence_refs=(_result_hash(engine, c),)
+        ),
     ]
 
 
@@ -45,7 +73,7 @@ class GuardrailFeedforwardTests(unittest.TestCase):
                 objective="parse the grammar",
                 work=_evidence_work(engine),
                 verifiers=_failing_verifiers(),
-                verification=["pytest"],
+                verification=_verification(),
                 stop_condition={"max_iterations": 1, "no_progress_iterations": 99},
                 failure_scope="parser-tasks",
             )
@@ -68,8 +96,8 @@ class GuardrailFeedforwardTests(unittest.TestCase):
             run2 = engine.run_task(
                 objective="parse the grammar again",
                 work=_evidence_work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 failure_scope="parser-tasks",
                 confirm_guardrails=confirm,
@@ -90,8 +118,8 @@ class GuardrailFeedforwardTests(unittest.TestCase):
             run = engine.run_task(
                 objective="parse the grammar",
                 work=_evidence_work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 non_goals=["base non-goal"],
                 failure_scope="parser-tasks",
@@ -124,8 +152,8 @@ class GuardrailFeedforwardTests(unittest.TestCase):
             engine.run_task(
                 objective="parse the grammar",
                 work=_evidence_work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 failure_scope="parser-tasks",
                 confirm_guardrails=confirm,
@@ -141,8 +169,8 @@ class GuardrailFeedforwardTests(unittest.TestCase):
             run = engine.run_task(
                 objective="parse the grammar",
                 work=_evidence_work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 non_goals=["do not touch the lexer"],
                 failure_scope="parser-tasks",
@@ -159,7 +187,7 @@ class GuardrailFeedforwardTests(unittest.TestCase):
                 objective="parse the grammar",
                 work=_evidence_work(engine),
                 verifiers=_failing_verifiers(),
-                verification=["pytest"],
+                verification=_verification(),
                 stop_condition={"max_iterations": 1, "no_progress_iterations": 99},
                 failure_scope="parser-tasks",
                 failure_ttl_days=7,
@@ -190,7 +218,7 @@ class GuardrailFeedforwardTests(unittest.TestCase):
                 objective="parse the grammar",
                 work=_evidence_work(engine),
                 verifiers=_failing_verifiers(),
-                verification=["pytest"],
+                verification=_verification(),
                 stop_condition={"max_iterations": 1, "no_progress_iterations": 99},
             )
             failures = engine.memory.entries("failures")

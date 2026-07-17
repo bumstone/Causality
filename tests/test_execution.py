@@ -12,19 +12,52 @@ from causality.contracts import (
     AuditEventType,
     EvidenceKind,
     GateDecision,
+    PermissionContract,
     Risk,
+    VerificationRequirement,
+    VerifierDecision,
 )
 from causality.engine import CausalityEngine, _accepts_adapter
 from causality.execution import ActionBlocked, ExecutionAdapter, PlanApproval
 
 
-def _passing_verifiers():
-    from causality.contracts import VerifierDecision
+def _verification() -> tuple[VerificationRequirement, ...]:
+    return (
+        VerificationRequirement(
+            id="unit",
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+        ),
+    )
+
+
+def _result_hash(engine: CausalityEngine, contract) -> str:
+    return [
+        event.entry_hash
+        for event in engine.runtime.ledger.events_for_contract(contract.goal_id)
+        if event.event_type == AuditEventType.EVIDENCE.value
+        and event.payload.get("kind") == "verification_result"
+    ][-1]
+
+
+def _passing_verifiers(engine: CausalityEngine):
 
     return [
-        lambda c: VerifierDecision("correctness", "pass", "looks right"),
-        lambda c: VerifierDecision("evidence", "pass", "evidence present"),
+        lambda c: VerifierDecision(
+            "correctness", "pass", "looks right", evidence_refs=(_result_hash(engine, c),)
+        ),
+        lambda c: VerifierDecision(
+            "evidence", "pass", "evidence present", evidence_refs=(_result_hash(engine, c),)
+        ),
     ]
+
+
+class PlanApprovalTests(unittest.TestCase):
+    def test_requires_nonblank_approver_and_rationale_at_construction(self) -> None:
+        with self.assertRaises(TypeError):
+            PlanApproval("alice")  # type: ignore[call-arg]
+        for approval in (("", "release sign-off"), ("alice", "")):
+            with self.subTest(approval=approval), self.assertRaises(ValueError):
+                PlanApproval(*approval)
 
 
 class AdapterUnitTests(unittest.TestCase):
@@ -33,7 +66,7 @@ class AdapterUnitTests(unittest.TestCase):
     def _bound(self, engine: CausalityEngine, **overrides):
         params = dict(
             objective="do the thing",
-            verification=["pytest"],
+            verification=_verification(),
             stop_condition={"max_iterations": 3},
             non_goals=["delete production data"],
             allowed_tools=["Bash", "Edit"],
@@ -84,6 +117,24 @@ class AdapterUnitTests(unittest.TestCase):
                 )
             self.assertEqual(ctx.exception.result.decision, GateDecision.ESCALATE)
             self.assertEqual(ctx.exception.tool, "Browser")
+
+    def test_adapter_keeps_durable_permissions_after_live_object_widens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = CausalityEngine(Path(temp_dir))
+            bound = self._bound(engine, allowed_tools=["Bash"])
+            adapter = ExecutionAdapter(engine.runtime, bound.contract)
+            bound.contract.permissions = PermissionContract()
+            ran: list[str] = []
+
+            with self.assertRaises(ActionBlocked):
+                adapter.execute(
+                    tool="danger",
+                    action_kind="click",
+                    description="unauthorized action",
+                    run=lambda: ran.append("ran"),
+                )
+
+            self.assertEqual(ran, [])
 
     def test_irreversible_action_without_approval_blocks_with_escalate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -139,10 +190,10 @@ class EngineGatingTests(unittest.TestCase):
             run = engine.run_task(
                 objective="implement the parser",
                 work=self._gated_work(engine, description="run the unit tests"),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
-                allowed_tools=["Bash"],
+                allowed_tools=["Bash", "shell"],
                 non_goals=["delete production data"],
             )
             self.assertTrue(run.passed)
@@ -154,8 +205,8 @@ class EngineGatingTests(unittest.TestCase):
             run = engine.run_task(
                 objective="implement the parser",
                 work=self._gated_work(engine, description="delete production data"),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 allowed_tools=["Bash"],
                 non_goals=["delete production data"],
@@ -179,8 +230,8 @@ class EngineGatingTests(unittest.TestCase):
             run = engine.run_task(
                 objective="implement the parser",
                 work=self._gated_work(engine, description="open a page", tool="Browser"),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 allowed_tools=["Bash"],
             )
@@ -199,8 +250,8 @@ class EngineGatingTests(unittest.TestCase):
             run = engine.run_task(
                 objective="deploy the release to production",
                 work=work,
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 risk=Risk.IRREVERSIBLE,
             )
@@ -235,10 +286,10 @@ class EngineGatingTests(unittest.TestCase):
             run = engine.run_task(
                 objective="ship the high-risk change",
                 work=work,
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
-                allowed_tools=["Bash"],
+                allowed_tools=["Bash", "shell"],
                 risk=Risk.HIGH,
                 approve_plan=lambda c: PlanApproval("alice", "release sign-off"),
             )
@@ -264,8 +315,8 @@ class EngineGatingTests(unittest.TestCase):
             run = engine.run_task(
                 objective="ship the high-risk change",
                 work=work,
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 risk=Risk.HIGH,
                 approve_plan=lambda c: None,
@@ -287,8 +338,8 @@ class EngineGatingTests(unittest.TestCase):
                 run = engine.run_task(
                     objective="implement the parser",
                     work=work,
-                    verifiers=_passing_verifiers(),
-                    verification=["pytest"],
+                    verifiers=_passing_verifiers(engine),
+                    verification=_verification(),
                     stop_condition={"max_iterations": 3},
                     non_goals=["delete production data"],
                 )
@@ -322,8 +373,8 @@ class AcceptsAdapterTests(unittest.TestCase):
                 run = engine.run_task(
                     objective="implement the parser",
                     work=work,
-                    verifiers=_passing_verifiers(),
-                    verification=["python -m unittest"],
+                    verifiers=_passing_verifiers(engine),
+                    verification=_verification(),
                     stop_condition={"max_iterations": 1},
                 )
 

@@ -7,15 +7,48 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from causality.contracts import EvidenceKind, GateDecision, GoalContract, VerifierDecision
+from causality.contracts import (
+    AuditEventType,
+    EvidenceKind,
+    GateDecision,
+    GoalContract,
+    VerificationRequirement,
+    VerifierDecision,
+)
 from causality.engine import CausalityEngine, TaskRun
 from causality.agent_harness import TaskType
 
 
-def _passing_verifiers():
+def _verification() -> tuple[VerificationRequirement, ...]:
+    return (
+        VerificationRequirement(
+            id="unit",
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+        ),
+    )
+
+
+def _passing_verifiers(engine: CausalityEngine):
+    def decision(name: str, rationale: str):
+        def verify(contract):
+            result = [
+                event
+                for event in engine.runtime.ledger.events_for_contract(contract.goal_id)
+                if event.event_type == AuditEventType.EVIDENCE.value
+                and event.payload.get("kind") == "verification_result"
+            ][-1]
+            return VerifierDecision(
+                name,
+                "pass",
+                rationale,
+                evidence_refs=(result.entry_hash,),
+            )
+
+        return verify
+
     return [
-        lambda c: VerifierDecision("correctness", "pass", "looks right"),
-        lambda c: VerifierDecision("evidence", "pass", "evidence present"),
+        decision("correctness", "looks right"),
+        decision("evidence", "evidence present"),
     ]
 
 
@@ -35,10 +68,10 @@ class EngineTests(unittest.TestCase):
             run = engine.run_task(
                 objective="implement the parser",
                 work=self._work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
-                allowed_tools=["Edit", "Bash"],
+                allowed_tools=["Edit", "Bash", "shell"],
                 non_goals=["delete production data"],
             )
 
@@ -53,7 +86,7 @@ class EngineTests(unittest.TestCase):
             )
             # L2 contract clauses are frozen on the run.
             self.assertEqual(run.task.non_goals, ("delete production data",))
-            self.assertEqual(run.task.allowed_tools, ("Edit", "Bash"))
+            self.assertEqual(run.task.allowed_tools, ("Edit", "Bash", "shell"))
             # L3 loop completed via automated review.
             self.assertTrue(run.passed)
             self.assertEqual(run.loop.decision, GateDecision.PASS)
@@ -76,7 +109,7 @@ class EngineTests(unittest.TestCase):
                 objective="implement the parser",
                 work=self._work(engine),
                 verifiers=failing,
-                verification=["python -m unittest"],
+                verification=_verification(),
                 stop_condition={"max_iterations": 2, "no_progress_iterations": 99},
             )
 
@@ -87,14 +120,55 @@ class EngineTests(unittest.TestCase):
             # Reflect still runs and captures the failures.
             self.assertGreaterEqual(len(engine.memory.entries("failures")), 1)
 
+    def test_verifier_workspace_side_effect_blocks_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            engine = self._engine(temp_dir)
+
+            def result_hash(contract: GoalContract) -> str:
+                return [
+                    event.entry_hash
+                    for event in engine.runtime.ledger.events_for_contract(contract.goal_id)
+                    if event.event_type == AuditEventType.EVIDENCE.value
+                    and event.payload.get("kind") == "verification_result"
+                ][-1]
+
+            def mutating_verifier(contract: GoalContract) -> VerifierDecision:
+                (root / "source.txt").write_text("changed", encoding="utf-8")
+                return VerifierDecision(
+                    "mutating",
+                    "pass",
+                    "changed state",
+                    evidence_refs=(result_hash(contract),),
+                )
+
+            run = engine.run_task(
+                objective="implement the parser",
+                work=self._work(engine),
+                verifiers=[
+                    mutating_verifier,
+                    lambda c: VerifierDecision(
+                        "evidence",
+                        "pass",
+                        "cited",
+                        evidence_refs=(result_hash(c),),
+                    ),
+                ],
+                verification=_verification(),
+                stop_condition={"max_iterations": 2},
+            )
+
+            self.assertFalse(run.passed)
+            self.assertEqual(run.loop.decision, GateDecision.ESCALATE)
+
     def test_run_next_pulls_from_agenda_and_completes_on_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             engine = self._engine(temp_dir)
             self.assertIsNone(
                 engine.run_next(
                     work=self._work(engine),
-                    verifiers=_passing_verifiers(),
-                    verification=["python -m unittest"],
+                    verifiers=_passing_verifiers(engine),
+                    verification=_verification(),
                     stop_condition={"max_iterations": 3},
                 )
             )
@@ -103,8 +177,8 @@ class EngineTests(unittest.TestCase):
 
             run = engine.run_next(
                 work=self._work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
             )
 
@@ -123,8 +197,8 @@ class EngineTests(unittest.TestCase):
             run = engine.run_task(
                 objective="migrate the data store overnight",
                 work=self._work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 task_type="long_running",
             )
@@ -141,7 +215,7 @@ class EngineTests(unittest.TestCase):
             run = engine.run_next(
                 work=self._work(engine),
                 verifiers=failing,
-                verification=["python -m unittest"],
+                verification=_verification(),
                 stop_condition={"max_iterations": 2, "no_progress_iterations": 99},
             )
 

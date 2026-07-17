@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,8 @@ from causality.agent_bootstrap import (
 )
 
 
-SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
 
 
 class AgentBootstrapTests(unittest.TestCase):
@@ -700,7 +702,7 @@ class AgentBootstrapTests(unittest.TestCase):
 
             self.assertEqual(trusted, str(Path(sys.executable).resolve()))
 
-    def test_venv_interpreter_runs_external_project_handshake(self) -> None:
+    def test_installed_venv_runs_external_project_handshake_and_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
             environment = base / "venv"
@@ -716,29 +718,59 @@ class AgentBootstrapTests(unittest.TestCase):
                 "raise SystemExit(7)\n",
                 encoding="utf-8",
             )
-            venv.EnvBuilder(with_pip=False).create(environment)
+            package_source = base / "package source"
+            package_source.mkdir()
+            for name in ("pyproject.toml", "README.md", "LICENSE"):
+                shutil.copy2(REPO_ROOT / name, package_source / name)
+            shutil.copytree(
+                SRC_ROOT,
+                package_source / "src",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            venv.EnvBuilder(with_pip=True).create(environment)
             python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-            purelib = subprocess.run(
-                [str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            Path(purelib, "causality-local.pth").write_text(str(SRC_ROOT), encoding="utf-8")
             clean_env = os.environ.copy()
             clean_env["PYTHONPATH"] = str(project)
-            installer_launcher = (
-                "import runpy,sys;"
-                f"sys.path.insert(0,{str(SRC_ROOT)!r});"
-                "runpy.run_module('causality.cli',run_name='__main__')"
+            installed = subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--no-input",
+                    "--no-deps",
+                    str(package_source),
+                ],
+                capture_output=True,
+                text=True,
+                env=clean_env,
+                check=False,
+                timeout=120,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            imported = subprocess.run(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    "from pathlib import Path; import causality; print(Path(causality.__file__).resolve())",
+                ],
+                capture_output=True,
+                text=True,
+                env=clean_env,
+                check=True,
+            )
+            self.assertTrue(
+                Path(imported.stdout.strip()).is_relative_to(environment.resolve())
             )
 
             completed = subprocess.run(
                 [
                     str(python),
                     "-I",
-                    "-c",
-                    installer_launcher,
+                    "-m",
+                    "causality.cli",
                     "install-agent",
                     "--project",
                     str(project),
@@ -759,6 +791,41 @@ class AgentBootstrapTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             config = json.loads((project / ".causality" / "mcp.json").read_text(encoding="utf-8"))
             self.assertEqual(config["mcpServers"]["causality"]["command"], str(python))
+
+            lifecycle = subprocess.run(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    "\n".join(
+                        [
+                            "import json, sys",
+                            "from pathlib import Path",
+                            "from causality.contracts import GoalContract, VerificationRequirement, VerifierDecision",
+                            "from causality.orchestrator import Causality",
+                            "root = Path.cwd()",
+                            "runtime = Causality(root / '.causality' / 'ledger.jsonl')",
+                            "requirement = VerificationRequirement(id='host', argv=(sys.executable, '-c', \"from pathlib import Path; raise SystemExit(0 if Path('AGENTS.md').is_file() else 1)\"))",
+                            "contract = runtime.create_contract(GoalContract('external verification', 'installed host lifecycle', verification_requirements=(requirement,)))",
+                            "result = runtime.verify_requirement(contract, 'host', root=root)",
+                            "runtime.record_verifier(contract, VerifierDecision('correctness', 'pass', 'host check passed', evidence_refs=(result.event_hash,)))",
+                            "runtime.record_verifier(contract, VerifierDecision('evidence', 'pass', 'ledger checked', evidence_refs=(result.event_hash,)))",
+                            "print(json.dumps({'status': result.status, 'decision': runtime.complete(contract).decision.value, 'event_hash': result.event_hash}))",
+                        ]
+                    ),
+                ],
+                cwd=project,
+                capture_output=True,
+                text=True,
+                env=clean_env,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(lifecycle.returncode, 0, lifecycle.stderr)
+            lifecycle_output = json.loads(lifecycle.stdout)
+            self.assertEqual(lifecycle_output["status"], "pass")
+            self.assertEqual(lifecycle_output["decision"], "pass")
+            self.assertEqual(len(lifecycle_output["event_hash"]), 64)
 
 
 if __name__ == "__main__":

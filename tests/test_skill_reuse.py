@@ -8,16 +8,43 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from causality.contracts import EvidenceKind, VerifierDecision
+from causality.contracts import (
+    AuditEventType,
+    EvidenceKind,
+    VerificationRequirement,
+    VerifierDecision,
+)
 from causality.durable import DurableJsonl
 from causality.engine import CausalityEngine
 from causality.skills import SkillCandidate, SkillStore
 
 
-def _passing_verifiers():
+def _verification() -> tuple[VerificationRequirement, ...]:
+    return (
+        VerificationRequirement(
+            id="unit",
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+        ),
+    )
+
+
+def _result_hash(engine: CausalityEngine, contract) -> str:
     return [
-        lambda c: VerifierDecision("correctness", "pass", "ok"),
-        lambda c: VerifierDecision("evidence", "pass", "ok"),
+        event.entry_hash
+        for event in engine.runtime.ledger.events_for_contract(contract.goal_id)
+        if event.event_type == AuditEventType.EVIDENCE.value
+        and event.payload.get("kind") == "verification_result"
+    ][-1]
+
+
+def _passing_verifiers(engine: CausalityEngine):
+    return [
+        lambda c: VerifierDecision(
+            "correctness", "pass", "ok", evidence_refs=(_result_hash(engine, c),)
+        ),
+        lambda c: VerifierDecision(
+            "evidence", "pass", "ok", evidence_refs=(_result_hash(engine, c),)
+        ),
     ]
 
 
@@ -97,8 +124,8 @@ class EngineRecallTests(unittest.TestCase):
             run = engine.run_task(
                 objective="parse the grammar",
                 work=_evidence_work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
             )
             self.assertIn("s1", [s.skill_id for s in run.recalled_skills])
@@ -123,10 +150,10 @@ class EngineRecallTests(unittest.TestCase):
             run = engine.run_task(
                 objective="parse the grammar",
                 work=work,
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
-                allowed_tools=["Bash"],
+                allowed_tools=["Bash", "shell"],
             )
             self.assertEqual(seen["ids"], ["s1"])
             self.assertTrue(run.passed)
@@ -139,8 +166,8 @@ class EngineRecallTests(unittest.TestCase):
             run = engine.run_task(
                 objective="parse the grammar",
                 work=_evidence_work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 authored_skills=authored,
             )
@@ -154,8 +181,8 @@ class EngineRecallTests(unittest.TestCase):
             run = engine.run_task(
                 objective="parse the grammar",
                 work=_evidence_work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["pytest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
             )
             self.assertEqual(run.recalled_skills, ())

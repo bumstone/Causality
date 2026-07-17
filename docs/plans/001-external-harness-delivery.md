@@ -11,7 +11,7 @@ terminal state.
 
 1. [x] [Install activation](../specs/001-install-activation.md): safe client setup,
    interpreter pinning, and an explicit active/pending result.
-2. [ ] [Verification evidence](../specs/002-verification-evidence.md): execute
+2. [x] [Verification evidence](../specs/002-verification-evidence.md): execute
    declared checks and bind completion to requirement IDs, exit codes, and hashes.
 3. [ ] [MCP task lifecycle](../specs/003-mcp-task-lifecycle.md): create, approve,
    act, verify, complete, and reflect one persistent task.

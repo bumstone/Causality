@@ -38,9 +38,18 @@ class GateTests(unittest.TestCase):
             self.assertEqual(runtime.evaluate_plan(contract).decision, GateDecision.PASS)
             self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
 
-            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "passed"})
-            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "tests passed"))
-            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "evidence present"))
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "passed"}
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "pass", "tests passed", evidence_refs=refs),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("evidence", "pass", "evidence present", evidence_refs=refs),
+            )
 
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 
@@ -119,13 +128,65 @@ class GateTests(unittest.TestCase):
             runtime.approve(contract, "plan", "kbssk", "Plan reviewed")
             self.assertEqual(runtime.evaluate_plan(contract).decision, GateDecision.PASS)
 
-            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "passed"})
-            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "tests passed"))
-            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "evidence present"))
+            runtime.approve(contract, "final", "kbssk", "Too early")
+            evidence = runtime.record_evidence(
+                contract,
+                EvidenceKind.TEST_OUTPUT,
+                {"output": "passed"},
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision(
+                    "correctness",
+                    "pass",
+                    "tests passed",
+                    evidence_refs=refs,
+                ),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision(
+                    "evidence",
+                    "pass",
+                    "evidence present",
+                    evidence_refs=refs,
+                ),
+            )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.ESCALATE)
 
-            runtime.approve(contract, "final", "kbssk", "Raw evidence reviewed")
+            runtime.approve(
+                contract,
+                "final",
+                "kbssk",
+                "Raw evidence reviewed",
+                evidence_refs=refs,
+            )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
+
+            runtime.reject(contract, "final", "kbssk", "Approval withdrawn")
+            self.assertEqual(runtime.complete(contract).decision, GateDecision.ESCALATE)
+
+    def test_public_decisions_cannot_precede_durable_contract_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = GoalContract("Deploy", "not yet bound", risk=Risk.HIGH)
+
+            with self.assertRaises(ValueError):
+                runtime.approve(contract, "plan", "kbssk", "premature")
+            with self.assertRaises(ValueError):
+                runtime.record_verifier(
+                    contract,
+                    VerifierDecision("premature", "pass", "not bound"),
+                )
+            with self.assertRaises(ValueError):
+                runtime.transition(contract, "blocked", "not bound")
+
+            runtime.create_contract(contract)
+            self.assertEqual(
+                runtime.evaluate_plan(contract).decision,
+                GateDecision.ESCALATE,
+            )
 
     def test_irreversible_action_requires_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -157,6 +218,39 @@ class GateTests(unittest.TestCase):
             contract = runtime.create_contract(GoalContract("Open", "no tool limits"))
 
             self.assertEqual(runtime.check_tool_allowed(contract, "anything").decision, GateDecision.PASS)
+
+    def test_public_clause_gates_reject_live_contract_relaxation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            tool_contract = runtime.create_contract(
+                GoalContract(
+                    "Tool",
+                    "frozen allowlist",
+                    permissions=PermissionContract(allowed_tools=("git",)),
+                )
+            )
+            non_goal_contract = runtime.create_contract(
+                GoalContract("Scope", "frozen boundary", non_goals=("forbidden",))
+            )
+            stop_contract = runtime.create_contract(
+                GoalContract("Loop", "frozen limit", stopping_policy={"max_iterations": 1})
+            )
+
+            tool_contract.permissions = PermissionContract()
+            non_goal_contract.non_goals = ()
+            stop_contract.stopping_policy = {"max_iterations": 999}
+
+            for result in (
+                runtime.check_tool_allowed(tool_contract, "shell"),
+                runtime.check_non_goal(non_goal_contract, "forbidden operation"),
+                runtime.should_stop(stop_contract, {"iterations": 1}),
+            ):
+                with self.subTest(result=result):
+                    self.assertEqual(result.decision, GateDecision.REPAIR)
+                    self.assertIn(
+                        "live contract differs from durable contract snapshot",
+                        result.reasons,
+                    )
 
     def test_check_non_goal_stops_on_match(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -260,14 +354,34 @@ class GateTests(unittest.TestCase):
                     evidence_required=[EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "tests")],
                 )
             )
-            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
-            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "round 1"))
-            runtime.record_verifier(contract, VerifierDecision("correctness", "pass", "round 2"))
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "pass", "round 1", evidence_refs=refs),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "pass", "round 2", evidence_refs=refs),
+            )
 
             # One verifier, two events -> still only one independent pass.
             self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
 
-            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "second verifier"))
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "fresh review"}
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("correctness", "pass", "current verifier", evidence_refs=refs),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("evidence", "pass", "second verifier", evidence_refs=refs),
+            )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 
     def test_fixed_critical_failure_no_longer_blocks_completion(self) -> None:
@@ -282,15 +396,35 @@ class GateTests(unittest.TestCase):
                     evidence_required=[EvidenceRequirement(EvidenceKind.TEST_OUTPUT, "tests")],
                 )
             )
-            runtime.record_evidence(contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"})
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "ok"}
+            )
+            refs = (evidence.entry_hash,)
             runtime.record_verifier(
-                contract, VerifierDecision("safety", "fail", "unsafe", severity="critical")
+                contract,
+                VerifierDecision(
+                    "safety",
+                    "fail",
+                    "unsafe",
+                    severity="critical",
+                    evidence_refs=refs,
+                ),
             )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.REPAIR)
 
             # The same verifier now passes; a second independent verifier passes.
-            runtime.record_verifier(contract, VerifierDecision("safety", "pass", "now safe"))
-            runtime.record_verifier(contract, VerifierDecision("evidence", "pass", "evidence present"))
+            evidence = runtime.record_evidence(
+                contract, EvidenceKind.TEST_OUTPUT, {"output": "fixed"}
+            )
+            refs = (evidence.entry_hash,)
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("safety", "pass", "now safe", evidence_refs=refs),
+            )
+            runtime.record_verifier(
+                contract,
+                VerifierDecision("evidence", "pass", "evidence present", evidence_refs=refs),
+            )
             self.assertEqual(runtime.complete(contract).decision, GateDecision.PASS)
 
     def test_complete_with_empty_list_does_not_fall_back_to_ledger(self) -> None:

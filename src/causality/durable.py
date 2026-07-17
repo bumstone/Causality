@@ -51,6 +51,9 @@ _DIR_FSYNC_UNSUPPORTED = {
 }
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+_LOCK_STATE = threading.local()
+_ATOMIC_REPLACE_ATTEMPTS = 5 if os.name == "nt" else 1
+_ATOMIC_REPLACE_RETRY_SECONDS = 0.02
 
 
 def _assert_single_link(path: Path, *, label: str) -> None:
@@ -87,6 +90,18 @@ def _fsync_dir(directory: Path) -> None:
         os.close(dir_fd)
 
 
+def _replace_atomically(source: str | Path, target: str | Path) -> None:
+    """Replace a file, tolerating only bounded transient Windows sharing errors."""
+    for attempt in range(_ATOMIC_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 == _ATOMIC_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_ATOMIC_REPLACE_RETRY_SECONDS * (attempt + 1))
+
+
 @contextmanager
 def file_lock(path: str | Path) -> Iterator[None]:
     """Exclusive lock keyed on a ``<path>.lock`` sidecar, held for one write.
@@ -103,45 +118,59 @@ def file_lock(path: str | Path) -> Iterator[None]:
     _assert_single_link(lock_path, label="lock sidecar")
     thread_lock = _thread_lock_for(lock_path)
     with thread_lock:
-        flags = os.O_CREAT | os.O_RDWR
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        key = str(lock_path.resolve())
+        held = getattr(_LOCK_STATE, "held", None)
+        if held is None:
+            held = set()
+            _LOCK_STATE.held = held
+        if key in held:
+            yield
+            return
+        held.add(key)
         try:
-            fd = os.open(str(lock_path), flags, 0o644)
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise ValueError(f"lock sidecar must not be a symlink: {lock_path}") from exc
-            raise
-        try:
-            if os.fstat(fd).st_nlink > 1:
-                raise ValueError(f"lock sidecar must not be a hard link: {lock_path}")
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-            elif msvcrt is not None:  # pragma: no cover - Windows path
-                if os.path.getsize(lock_path) == 0:
-                    os.write(fd, b"\0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                while True:
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                fd = os.open(str(lock_path), flags, 0o644)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise ValueError(
+                        f"lock sidecar must not be a symlink: {lock_path}"
+                    ) from exc
+                raise
+            try:
+                if os.fstat(fd).st_nlink > 1:
+                    raise ValueError(f"lock sidecar must not be a hard link: {lock_path}")
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
                     try:
-                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                        break
-                    except OSError as exc:
-                        if exc.errno not in (errno.EACCES, errno.EDEADLK):
-                            raise
-                        time.sleep(0.05)
-                try:
-                    yield
-                finally:
+                        yield
+                    finally:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no cover - Windows path
+                    if os.path.getsize(lock_path) == 0:
+                        os.write(fd, b"\0")
                     os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            else:  # pragma: no cover - rare fallback
-                yield
+                    while True:
+                        try:
+                            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                            break
+                        except OSError as exc:
+                            if exc.errno not in (errno.EACCES, errno.EDEADLK):
+                                raise
+                            time.sleep(0.05)
+                    try:
+                        yield
+                    finally:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:  # pragma: no cover - rare fallback
+                    yield
+            finally:
+                os.close(fd)
         finally:
-            os.close(fd)
+            held.remove(key)
 
 
 def write_text_durably(path: str | Path, text: str, *, lock: bool = True) -> None:
@@ -164,7 +193,7 @@ def write_text_durably(path: str | Path, text: str, *, lock: bool = True) -> Non
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_name, file_path)
+            _replace_atomically(tmp_name, file_path)
         except BaseException:
             try:
                 os.unlink(tmp_name)

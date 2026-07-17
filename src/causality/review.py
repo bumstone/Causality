@@ -92,8 +92,9 @@ def run_review(
     # Collapse to one latest verdict per verifier name (same rule as complete()).
     latest: dict[str, VerifierDecision] = {}
     for decision in decisions:
-        latest[decision.verifier] = decision
-    verdicts = list(latest.values())
+        key = decision.verifier.strip().casefold() if isinstance(decision.verifier, str) else ""
+        latest[key] = decision
+    verdicts = [decision for key, decision in latest.items() if key]
 
     # Count only substantive passes, the same bar HITLGate.complete uses, so a
     # hollow rubber-stamp verifier cannot fake an independent pass (require_evidence

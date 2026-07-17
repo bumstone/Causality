@@ -21,15 +21,44 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from causality.contracts import AuditEventType, EvidenceKind, GateDecision, GoalContract, VerifierDecision
+from causality.contracts import (
+    AuditEventType,
+    EvidenceKind,
+    GateDecision,
+    GoalContract,
+    VerificationRequirement,
+    VerifierDecision,
+)
 from causality.engine import CausalityEngine
 from causality.tool_adapter import ToolAdapter
 
 
-def _passing_verifiers():
+def _verification() -> tuple[VerificationRequirement, ...]:
+    return (
+        VerificationRequirement(
+            id="unit",
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+        ),
+    )
+
+
+def _result_hash(engine: CausalityEngine, contract: GoalContract) -> str:
     return [
-        lambda c: VerifierDecision("correctness", "pass", "looks right"),
-        lambda c: VerifierDecision("evidence", "pass", "evidence present"),
+        event.entry_hash
+        for event in engine.runtime.ledger.events_for_contract(contract.goal_id)
+        if event.event_type == AuditEventType.EVIDENCE.value
+        and event.payload.get("kind") == "verification_result"
+    ][-1]
+
+
+def _passing_verifiers(engine: CausalityEngine):
+    return [
+        lambda c: VerifierDecision(
+            "correctness", "pass", "looks right", evidence_refs=(_result_hash(engine, c),)
+        ),
+        lambda c: VerifierDecision(
+            "evidence", "pass", "evidence present", evidence_refs=(_result_hash(engine, c),)
+        ),
     ]
 
 
@@ -58,10 +87,10 @@ class E2ELoopTests(unittest.TestCase):
             run = engine.run_task(
                 objective="implement the report writer",
                 work=work,
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
-                allowed_tools=["file.write"],  # the tool the adapter routes through
+                allowed_tools=["file.write", "shell"],  # work + declared verification
             )
 
             self.assertTrue(run.passed)
@@ -85,8 +114,8 @@ class E2ELoopTests(unittest.TestCase):
             run = engine.run_task(
                 objective="implement the writer",
                 work=work,
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 allowed_tools=["Edit"],  # "file.write" is outside scope -> ESCALATE
             )
@@ -104,8 +133,8 @@ class E2ELoopTests(unittest.TestCase):
             run1 = engine.run_task(
                 objective="implement the login parser",
                 work=self._work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
             )
             self.assertTrue(run1.passed)
@@ -127,8 +156,8 @@ class E2ELoopTests(unittest.TestCase):
             run2 = engine.run_task(
                 objective="implement the login validator",
                 work=self._work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
             )
             self.assertTrue(run2.passed)
@@ -139,8 +168,8 @@ class E2ELoopTests(unittest.TestCase):
             run3 = engine.run_task(
                 objective="publish the quarterly finance report",
                 work=self._work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
             )
             self.assertNotIn(skill_id, [s.skill_id for s in run3.recalled_skills])
@@ -156,7 +185,7 @@ class E2ELoopTests(unittest.TestCase):
                 objective="rework the billing retry logic",
                 work=self._work(engine),
                 verifiers=failing,
-                verification=["python -m unittest"],
+                verification=_verification(),
                 stop_condition={"max_iterations": 2, "no_progress_iterations": 99},
                 failure_scope="billing",
             )
@@ -174,8 +203,8 @@ class E2ELoopTests(unittest.TestCase):
             run2 = engine.run_task(
                 objective="add a billing dashboard widget",
                 work=self._work(engine),
-                verifiers=_passing_verifiers(),
-                verification=["python -m unittest"],
+                verifiers=_passing_verifiers(engine),
+                verification=_verification(),
                 stop_condition={"max_iterations": 3},
                 failure_scope="billing",
                 confirm_guardrails=confirm,
@@ -199,14 +228,25 @@ class E2ELoopTests(unittest.TestCase):
             def correctness(contract):
                 ok = state["iteration"] >= 2  # passes only from the 2nd iteration
                 return VerifierDecision(
-                    "correctness", "pass" if ok else "fail", "ready" if ok else "not yet"
+                    "correctness",
+                    "pass" if ok else "fail",
+                    "ready" if ok else "not yet",
+                    evidence_refs=(_result_hash(engine, contract),),
                 )
 
             run = engine.run_task(
                 objective="implement the retry backoff",
                 work=work,
-                verifiers=[correctness, lambda c: VerifierDecision("evidence", "pass", "present")],
-                verification=["python -m unittest"],
+                verifiers=[
+                    correctness,
+                    lambda c: VerifierDecision(
+                        "evidence",
+                        "pass",
+                        "present",
+                        evidence_refs=(_result_hash(engine, c),),
+                    ),
+                ],
+                verification=_verification(),
                 stop_condition={"max_iterations": 5, "no_progress_iterations": 5},
             )
             self.assertTrue(run.passed)

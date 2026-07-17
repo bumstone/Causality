@@ -1,33 +1,48 @@
 # Spec 002 — Verification Evidence
 
+Status: implemented (2026-07-11).
+
 ## Contract
 
-Declared verification is executable, not a free-text evidence-kind label. A
-task completes only when every required requirement has a fresh, passing,
-task-scoped result and independent substantive verifier passes.
+Completion needs every required ID's latest pass, fresh generic evidence, and
+two verdicts citing all current hashes. High-risk work also needs plan and final
+approval.
 
-## Data and migration
+## Model
 
-Add `VerificationRequirement`: `id`, `argv`, `expected_exit_codes`,
-`timeout_seconds`, `artifact_paths`, and `required`. Store it in `GoalContract`.
-Keep legacy `Sequence[str]` only for one minor release: convert each string to a
-unique requirement ID and emit `DeprecationWarning`; then remove it.
+Requirements freeze ID, argv, exits, timeout, required/manual, and artifact
+hashes under the workspace root. Manual checks need same-task evidence, a
+boolean verdict, and a named human.
 
-`causality_task_verify` executes argv without a shell through the action gate.
-It records requirement ID, argv, exit code, stdout/stderr sizes, artifact hashes,
-event hash, and completion timestamp. Manual checks require `manual: true`, an
-evidence hash, and a human verdict; they never satisfy executable requirements.
+Legacy strings parse to argv/`verify-NNN`, warn for one minor, and retain
+durable binding plus the two-verifier floor.
 
-## Completion
+## Execution
 
-Completion rejects missing IDs, failed exits, stale results, blank/foreign event
-hashes, duplicate verifier names, or missing final approval. It accepts only the
-latest result produced after the task's last relevant mutation and reports each
-unmet requirement.
+`verify_requirement(contract, id, root)` gates argv with `shell=False`, disables
+bytecode writes, and records argv, exits, output, artifacts, workspace digest,
+status, reason, and time. Each stream keeps 64 KiB plus its full UTF-8 byte
+count, SHA-256, and truncation flag.
+`VerificationResult.event_hash` equals the ledger event's `entry_hash`.
 
-## Acceptance
+Artifacts remain regular in-root files with recorded path, mode, and hash.
 
-- Nonexistent command, nonzero exit, wrong artifact, or cross-task evidence
-  cannot complete a task.
-- A passing command plus two independent cited verdicts completes it.
-- Timeout and blocked tool results are ledger evidence and leave the task blocked.
+## Freshness and durability
+
+Completion rechecks project, dependency, bytecode, symlink-target, and Git
+state. Mutations stale prior checks; latest results win. Duplicate verifier IDs
+or invalid citations fail.
+
+One durable lock serializes contract creation, actions, verification, and
+completion. Hash chain and tail anchor detect edits, rotation gaps, and segment
+deletion.
+
+## Boundary and acceptance
+
+`.causality/` and analysis caches are excluded. Outside-root effects, declared
+argv, and raw ledger writers are trusted; hostile commands need an external
+sandbox. The ignored ledger may contain output. Distinct verifier names are
+caller-attested; the runtime validates citations, not organizational provenance.
+
+Spec 003 adds task/MCP lifecycle binding. Unit, concurrency, rotation, engine,
+and installed-project E2E tests cover this phase.
