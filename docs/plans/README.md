@@ -8,6 +8,7 @@ See the [implementation-spec index](../specs/README.md) for phase contracts.
 | Order | Plan | Status |
 | --- | --- | --- |
 | 001 | [External harness delivery](001-external-harness-delivery.md) | implemented |
+| 002 | [Automatic orchestration](002-automatic-orchestration.md) | planned |
 
 Rules:
 

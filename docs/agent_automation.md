@@ -36,9 +36,13 @@ stop policy, durable evidence, and completion.
 python -I -m causality.mcp_server --project .
 ```
 
-MCP `begin` selects the `auto` workflow by default. Closed tools expose phase
-start/finish, hypothesis outcomes, actions, verify, verdict, complete, reflect,
-and scoped HTTP/browser operations. Reaching the frozen failed-hypothesis limit
-returns exact approval evidence; interrupted blocks need exact operation replay.
-Browser support requires an explicit protocol-v1 capability check. Network
-effects require exact server policy origins and approvals.
+MCP `init` installs and reports `active|pending|broken`; host adoption/trust is
+never guessed. `begin` selects `auto` workflow. Closed tools expose phases,
+actions, verify/verdict/complete/reflect, resume/context, and scoped HTTP.
+Browser operations appear only after an explicit protocol-v1 capability check;
+the default server does not advertise the browser tool.
+Verified reflection creates a local skill candidate. Three task-bound outcomes
+with at least two successes can reach proof-backed promotion; recall returns
+authored skills first and only audited promoted skills. Reaching the frozen
+hypothesis limit returns exact approval evidence. Uncertain effects require
+human resolution and are never replayed automatically.
