@@ -103,7 +103,10 @@ class _RecordingBrowserDriver:
         self.states: dict[str, str] = {}
 
     def __call__(
-        self, command: Sequence[str], environment: Mapping[str, str]
+        self,
+        command: Sequence[str],
+        environment: Mapping[str, str],
+        input_text: str | None,
     ) -> CommandResult:
         operation = command[1]
         self.calls.append(operation)
@@ -128,6 +131,11 @@ class _RecordingBrowserDriver:
         if operation == "snapshot":
             return CommandResult(0, snapshot, "")
         if operation in {"click", "fill", "hover", "press", "select"}:
+            if operation in {"fill", "press", "select"}:
+                if command[-1] != "--value-stdin" or input_text is None:
+                    raise AssertionError("sensitive browser input must use stdin")
+                if input_text in command:
+                    raise AssertionError("sensitive browser input leaked into argv")
             self.effects += 1
             self.states[session] = (
                 f'@e1 [button] "After {BROWSER_PAGE_SECRET}"\n@e2 [textbox] "Email"'

@@ -29,6 +29,21 @@ UNTRUSTED_BEGIN = "--- BEGIN UNTRUSTED EXTERNAL CONTENT ---"
 UNTRUSTED_END = "--- END UNTRUSTED EXTERNAL CONTENT ---"
 REF_RE = re.compile(r"@[ec]\d+")
 SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_DRIVER_ENV_ALLOWLIST = frozenset(
+    {
+        "COMSPEC",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "WINDIR",
+    }
+)
 
 
 class BrowserCommandError(RuntimeError):
@@ -212,7 +227,7 @@ class BrowserDeltas:
 
 
 Runner = Callable[
-    [Sequence[str], Mapping[str, str]],
+    [Sequence[str], Mapping[str, str], str | None],
     CommandResult | subprocess.CompletedProcess[str] | str,
 ]
 
@@ -457,8 +472,8 @@ class A11yBrowserAdapter:
             raise BrowserInputLimitError(value_bytes, self.max_action_value_bytes)
         command = [action.type, action.ref]
         if action.value is not None:
-            command.append(action.value)
-        return self._run(command, context=context)
+            command.append("--value-stdin")
+        return self._run(command, context=context, input_text=action.value)
 
     def assert_state(
         self,
@@ -696,12 +711,13 @@ class A11yBrowserAdapter:
         command: Sequence[str],
         *,
         context: BrowserContext | None = None,
+        input_text: str | None = None,
     ) -> CommandResult:
         operation = command[0] if command else "unknown"
         argv = (*self.browser_command, *command)
         environment = self._driver_environment(context)
         if self.runner:
-            raw = self.runner(argv, environment)
+            raw = self.runner(argv, environment, input_text)
             result = self._coerce_result(raw)
         else:
             with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
@@ -710,6 +726,11 @@ class A11yBrowserAdapter:
                         list(argv),
                         stdout=stdout,
                         stderr=stderr,
+                        input=(
+                            input_text.encode("utf-8")
+                            if input_text is not None
+                            else None
+                        ),
                         check=False,
                         env=environment,
                         timeout=self.timeout_seconds,
@@ -755,7 +776,7 @@ class A11yBrowserAdapter:
         environment = {
             key: value
             for key, value in os.environ.items()
-            if not key.upper().startswith("CAUSALITY_")
+            if key.upper() in _DRIVER_ENV_ALLOWLIST
         }
         if context is not None:
             environment["CAUSALITY_BROWSER_SESSION_ID"] = context.session_id

@@ -69,6 +69,8 @@ allowed_keys = {
 }
 if any(name.startswith("CAUSALITY_") and name not in allowed_keys for name in os.environ):
     raise SystemExit(13)
+if "AWS_SECRET_ACCESS_KEY" in os.environ:
+    raise SystemExit(16)
 session = os.environ["CAUSALITY_BROWSER_SESSION_ID"]
 profile = Path(os.environ["CAUSALITY_BROWSER_PROFILE_DIR"])
 origins = json.loads(os.environ["CAUSALITY_BROWSER_ALLOWED_ORIGINS_JSON"])
@@ -91,7 +93,10 @@ elif operation in {"click", "fill", "hover", "press", "select"}:
     current["effects"] += 1
     current["phase"] = "after"
     if operation in {"fill", "press", "select"}:
-        current["value_sha256"] = hashlib.sha256(args[-1].encode()).hexdigest()
+        if not args or args[-1] != "--value-stdin":
+            raise SystemExit(17)
+        value = sys.stdin.buffer.read().decode("utf-8")
+        current["value_sha256"] = hashlib.sha256(value.encode()).hexdigest()
     print("acted")
 elif operation == "console":
     print(CONSOLE_SECRET if current["effects"] else "")
@@ -221,6 +226,7 @@ class ExternalBrowserMCPTests(unittest.TestCase):
                 "-v",
             ]
             server_env = dict(clean_env)
+            server_env["AWS_SECRET_ACCESS_KEY"] = "must-not-reach-browser"
             server_env.update(
                 {
                     "CAUSALITY_BROWSER_COMMAND_JSON": json.dumps(

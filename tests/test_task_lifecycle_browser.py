@@ -54,7 +54,10 @@ class FakeBrowserDriver:
         self.states: dict[str, str] = {}
 
     def __call__(
-        self, command: Sequence[str], environment: Mapping[str, str]
+        self,
+        command: Sequence[str],
+        environment: Mapping[str, str],
+        input_text: str | None,
     ) -> CommandResult:
         operation = command[1]
         session = environment.get("CAUSALITY_BROWSER_SESSION_ID")
@@ -85,6 +88,8 @@ class FakeBrowserDriver:
                 return CommandResult(0, f'@e1 [button] "Scoped {PAGE_SECRET}"', "")
             return CommandResult(0, state, "")
         if operation in {"click", "fill", "hover", "press", "select"}:
+            if operation in {"fill", "press", "select"}:
+                self.assert_sensitive_input_transport(command, input_text)
             if self.fail_next_action:
                 self.fail_next_action = False
                 return CommandResult(7, "", f"driver stderr {FILL_SECRET}")
@@ -107,6 +112,13 @@ class FakeBrowserDriver:
             Path(command[-1]).write_bytes(b"fake-png")
             return CommandResult(0, "", "")
         return CommandResult(9, "", "unknown operation")
+
+    @staticmethod
+    def assert_sensitive_input_transport(
+        command: Sequence[str], input_text: str | None
+    ) -> None:
+        if command[-1] != "--value-stdin" or input_text is None or input_text in command:
+            raise AssertionError("sensitive browser input must use stdin")
 
 
 class BrowserLifecycleTests(unittest.TestCase):
@@ -170,7 +182,9 @@ class BrowserLifecycleTests(unittest.TestCase):
                 )
 
             def incapable(
-                _command: Sequence[str], _environment: Mapping[str, str]
+                _command: Sequence[str],
+                _environment: Mapping[str, str],
+                _input: str | None,
             ) -> CommandResult:
                 return CommandResult(
                     0,

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Mapping, Sequence
+from unittest.mock import patch
 
 from causality.browser_adapter import (
     A11yBrowserAdapter,
@@ -41,7 +42,7 @@ class BrowserAdapterTests(unittest.TestCase):
         calls: list[tuple[list[str], dict[str, str]]] = []
 
         def runner(
-            command: Sequence[str], environment: Mapping[str, str]
+            command: Sequence[str], environment: Mapping[str, str], _input: str | None
         ) -> CommandResult:
             calls.append((list(command), dict(environment)))
             return CommandResult(0, json.dumps(CAPABILITIES), "")
@@ -55,14 +56,18 @@ class BrowserAdapterTests(unittest.TestCase):
         calls: list[tuple[list[str], dict[str, str]]] = []
 
         def runner(
-            command: Sequence[str], environment: Mapping[str, str]
+            command: Sequence[str], environment: Mapping[str, str], _input: str | None
         ) -> CommandResult:
             calls.append((list(command), dict(environment)))
             return CommandResult(0, '@e1 [button] "Submit"\n@e2 [textbox] "Email"', "")
 
-        previous = os.environ.get("CAUSALITY_APPROVAL_TOKEN")
-        os.environ["CAUSALITY_APPROVAL_TOKEN"] = "must-not-leak"
-        try:
+        with patch.dict(
+            os.environ,
+            {
+                "CAUSALITY_APPROVAL_TOKEN": "must-not-leak",
+                "AWS_SECRET_ACCESS_KEY": "unrelated-secret",
+            },
+        ):
             adapter = A11yBrowserAdapter(("python", "driver.py"), runner=runner)
             observation = adapter.observe(
                 "interactive",
@@ -74,18 +79,13 @@ class BrowserAdapterTests(unittest.TestCase):
                     ("https://example.com",),
                 ),
             )
-        finally:
-            if previous is None:
-                os.environ.pop("CAUSALITY_APPROVAL_TOKEN", None)
-            else:
-                os.environ["CAUSALITY_APPROVAL_TOKEN"] = previous
-
         command, environment = calls[0]
         self.assertEqual(
             command,
             ["python", "driver.py", "snapshot", "-i", "-s", "@e2", "-D"],
         )
         self.assertNotIn("CAUSALITY_APPROVAL_TOKEN", environment)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
         self.assertEqual(environment["CAUSALITY_BROWSER_SESSION_ID"], "opaque-session")
         self.assertEqual(environment["CAUSALITY_BROWSER_PROFILE_DIR"], "profile-dir")
         self.assertEqual(
@@ -98,19 +98,21 @@ class BrowserAdapterTests(unittest.TestCase):
     def test_observe_rejects_non_ref_scope(self) -> None:
         adapter = A11yBrowserAdapter(
             "browse",
-            runner=lambda _command, _environment: CommandResult(0, "", ""),
+            runner=lambda _command, _environment, _input: CommandResult(0, "", ""),
         )
 
         with self.assertRaises(ValueError):
             adapter.observe(scope="#invented-selector")
 
     def test_act_rejects_invalid_ref_and_runs_ref_command(self) -> None:
-        commands: list[list[str]] = []
+        calls: list[tuple[list[str], str | None]] = []
 
         def runner(
-            command: Sequence[str], _environment: Mapping[str, str]
+            command: Sequence[str],
+            _environment: Mapping[str, str],
+            input_text: str | None,
         ) -> CommandResult:
-            commands.append(list(command))
+            calls.append((list(command), input_text))
             return CommandResult(0, "ok", "")
 
         adapter = A11yBrowserAdapter("browse", runner=runner)
@@ -118,13 +120,17 @@ class BrowserAdapterTests(unittest.TestCase):
             adapter.act(BrowserAction("#made-up", "click"))
 
         adapter.act(BrowserAction("@e3", "fill", "hello@example.com"))
-        self.assertEqual(commands[0], ["browse", "fill", "@e3", "hello@example.com"])
+        self.assertEqual(
+            calls[0],
+            (["browse", "fill", "@e3", "--value-stdin"], "hello@example.com"),
+        )
+        self.assertNotIn("hello@example.com", calls[0][0])
 
     def test_assert_and_inspect_accept_only_stable_refs(self) -> None:
         commands: list[list[str]] = []
 
         def runner(
-            command: Sequence[str], _environment: Mapping[str, str]
+            command: Sequence[str], _environment: Mapping[str, str], _input: str | None
         ) -> CommandResult:
             commands.append(list(command))
             return CommandResult(0, "value", "")
@@ -141,7 +147,7 @@ class BrowserAdapterTests(unittest.TestCase):
 
     def test_diagnostics_collect_console_and_network_deltas(self) -> None:
         def runner(
-            command: Sequence[str], _environment: Mapping[str, str]
+            command: Sequence[str], _environment: Mapping[str, str], _input: str | None
         ) -> CommandResult:
             return CommandResult(0, command[-1] + " delta", "")
 
@@ -156,7 +162,9 @@ class BrowserAdapterTests(unittest.TestCase):
         adapter = A11yBrowserAdapter(
             "browse",
             max_output_bytes=4,
-            runner=lambda _command, _environment: CommandResult(0, "secret page", ""),
+            runner=lambda _command, _environment, _input: CommandResult(
+                0, "secret page", ""
+            ),
         )
 
         with self.assertRaises(BrowserOutputLimitError) as caught:
@@ -168,7 +176,7 @@ class BrowserAdapterTests(unittest.TestCase):
         calls: list[list[str]] = []
 
         def runner(
-            command: Sequence[str], _environment: Mapping[str, str]
+            command: Sequence[str], _environment: Mapping[str, str], _input: str | None
         ) -> CommandResult:
             calls.append(list(command))
             return CommandResult(0, "", "")
@@ -190,7 +198,9 @@ class BrowserAdapterTests(unittest.TestCase):
             os.link(source, target)
 
             def runner(
-                command: Sequence[str], _environment: Mapping[str, str]
+                command: Sequence[str],
+                _environment: Mapping[str, str],
+                _input: str | None,
             ) -> CommandResult:
                 Path(command[-1]).write_bytes(b"new-image")
                 return CommandResult(0, "", "")
@@ -215,7 +225,9 @@ class BrowserAdapterTests(unittest.TestCase):
                 target = parent / "final.png"
 
                 def runner(
-                    command: Sequence[str], _environment: Mapping[str, str]
+                    command: Sequence[str],
+                    _environment: Mapping[str, str],
+                    _input: str | None,
                 ) -> CommandResult:
                     parent.rename(moved)
                     try:
