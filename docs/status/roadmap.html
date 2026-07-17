@@ -311,10 +311,10 @@
       </div>
     </div>
     <div class="caveat">
-      <p><strong>과장하면 안 되는 부분:</strong> 이것은 범용 자동 운영 플랫폼의 완성 선언이 아니다. 남은 핵심은 MCP task lifecycle, API/browser 실행 어댑터, playbook phase 자동 실행화, resume/skill 운영과 운영 품질이다.</p>
+      <p><strong>과장하면 안 되는 부분:</strong> 이것은 범용 자동 운영 플랫폼의 완성 선언이 아니다. 남은 핵심은 API/browser 실행 어댑터, playbook phase 자동 실행화, resume/skill 운영과 운영 품질이다.</p>
       <div class="tags">
         <span class="tag risk">API/browser 실행 미검증</span>
-        <span class="tag risk">MCP task lifecycle 미구현</span>
+        <span class="tag done">MCP task lifecycle 구현</span>
         <span class="tag risk">phase는 아직 지침</span>
         <span class="tag later">운영 자동화 설정 필요</span>
       </div>
@@ -520,12 +520,12 @@
         <tr>
           <td>02 · 검증 evidence (완료)</td>
           <td>고정 requirement ID와 argv를 shell 없이 실행하고 exit, artifact, workspace digest, evidence hash를 completion에 결합한다.</td>
-          <td><a href="../specs/002-verification-evidence.md">Spec 002</a> 수용 테스트 완료. 다음 구현은 03 task lifecycle이다.</td>
+          <td><a href="../specs/002-verification-evidence.md">Spec 002</a> 수용 테스트 완료.</td>
         </tr>
         <tr>
-          <td>03 · MCP task lifecycle</td>
-          <td>MCP는 init/context/evidence/workflow 조회만 제공한다. 계약, action, verdict, completion, reflection은 Python API에만 있다.</td>
-          <td><a href="../specs/003-mcp-task-lifecycle.md">Spec 003</a>: durable task state와 closed task tools.</td>
+          <td>03 · MCP task lifecycle (완료)</td>
+          <td>closed task tools가 계약, gated action, 검증, verdict, completion, recovery, reflection을 restart-safe ledger state로 제공한다.</td>
+          <td><a href="../specs/003-mcp-task-lifecycle.md">Spec 003</a> 원자성·외부 설치 E2E 완료. 다음 구현은 04 adapter다.</td>
         </tr>
         <tr>
           <td>04 · API/browser adapters</td>

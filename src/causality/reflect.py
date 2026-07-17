@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .contracts import AuditEventType, GateDecision, GoalContract
-from .ledger import EvidenceLedger, LedgerEvent
+from .ledger import EvidenceLedger, LedgerEvent, sha256_text
 from .memory import MemoryEntry, TypedMemory
 
 
@@ -55,6 +55,9 @@ def reflect_on_contract(
     *,
     failure_scope: str | None = None,
     failure_ttl_days: int | None = None,
+    reflection_id: str | None = None,
+    created_at: str | None = None,
+    source_event_hash: str | None = None,
 ) -> Reflection:
     """Distill ``contract``'s ledger trail into typed long-term memory.
 
@@ -74,7 +77,19 @@ def reflect_on_contract(
     guardrail expires from ``entries(active_only=True)`` instead of being offered
     forever; ``None`` records no TTL (the failure persists until swept/revoked).
     """
-    events = ledger.events_for_contract(contract.goal_id)
+    events = ledger.events_for_contract(contract.goal_id, all_segments=True)
+    if reflection_id is not None:
+        if not created_at or not source_event_hash:
+            raise ValueError(
+                "deterministic reflection requires created_at and source_event_hash"
+            )
+        cutoff = next(
+            (index for index, event in enumerate(events) if event.entry_hash == source_event_hash),
+            None,
+        )
+        if cutoff is None:
+            raise ValueError("reflection source_event_hash is not contract-scoped")
+        events = events[: cutoff + 1]
 
     evidence = [e for e in events if e.event_type == AuditEventType.EVIDENCE.value]
     verifiers = [e for e in events if e.event_type == AuditEventType.VERIFIER_DECISION.value]
@@ -105,12 +120,21 @@ def reflect_on_contract(
     # Provenance must be contract-scoped: the last event for THIS contract, not
     # ledger.latest_hash() which, in interleaved multi-contract runs, may belong
     # to another contract and break the audit trail (codex review r3382219479).
-    provenance = ledger.latest_hash_for_contract(contract.goal_id)
-    retrospective = memory.record(
-        "retrospectives",
-        summary,
-        provenance=provenance,
-    )
+    provenance = source_event_hash or ledger.latest_hash_for_contract(contract.goal_id)
+    if reflection_id is None:
+        retrospective = memory.record(
+            "retrospectives",
+            summary,
+            provenance=provenance,
+        )
+    else:
+        retrospective = memory.record_once(
+            "retrospectives",
+            summary,
+            entry_id=sha256_text(f"{reflection_id}:retrospective"),
+            created_at=created_at,
+            provenance=provenance,
+        )
 
     scope = failure_scope or f"contract:{contract.goal_id}"
     failures: list[MemoryEntry] = []
@@ -121,27 +145,52 @@ def reflect_on_contract(
         critical = event.payload.get("severity") == "critical"
         marker = "critical verifier failure" if critical else "verifier failure"
         failure_summary = f"{marker} from '{verifier}': {rationale}".strip()
-        failures.append(
-            memory.record_failure(
+        if reflection_id is None:
+            entry = memory.record_failure(
                 failure_summary,
                 scope=scope,
                 provenance=event.entry_hash,
                 ttl_days=failure_ttl_days,
             )
-        )
+        else:
+            metadata = {"scope": scope}
+            if failure_ttl_days is not None:
+                metadata["ttl_days"] = failure_ttl_days
+            entry = memory.record_once(
+                "failures",
+                failure_summary,
+                entry_id=sha256_text(f"{reflection_id}:failure:{event.entry_hash}"),
+                created_at=created_at,
+                provenance=event.entry_hash,
+                **metadata,
+            )
+        failures.append(entry)
 
     for event in gates:
         if event.payload.get("decision") != GateDecision.REPAIR.value:
             continue
         reasons = event.payload.get("reasons") or []
         reason = reasons[0] if reasons else "repair required"
-        failures.append(
-            memory.record_failure(
-                f"repair gate decision: {reason}",
+        failure_summary = f"repair gate decision: {reason}"
+        if reflection_id is None:
+            entry = memory.record_failure(
+                failure_summary,
                 scope=scope,
                 provenance=event.entry_hash,
                 ttl_days=failure_ttl_days,
             )
-        )
+        else:
+            metadata = {"scope": scope}
+            if failure_ttl_days is not None:
+                metadata["ttl_days"] = failure_ttl_days
+            entry = memory.record_once(
+                "failures",
+                failure_summary,
+                entry_id=sha256_text(f"{reflection_id}:failure:{event.entry_hash}"),
+                created_at=created_at,
+                provenance=event.entry_hash,
+                **metadata,
+            )
+        failures.append(entry)
 
     return Reflection(retrospective=retrospective, failures=tuple(failures))

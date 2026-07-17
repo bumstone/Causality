@@ -1,0 +1,2849 @@
+"""Read-only, event-sourced projection for durable MCP task sessions.
+
+The ledger is the only source of truth.  This module deliberately does not
+execute effects or append recovery events: an effect intent without a matching
+result is reported as blocked until a trusted caller records its resolution.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass, field, replace
+from enum import Enum
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
+from uuid import NAMESPACE_URL, uuid5
+
+from .contracts import (
+    AuditEventType,
+    EvidenceKind,
+    GateDecision,
+    GoalContract,
+    PermissionContract,
+    StateTransition,
+    VerifierDecision,
+    utc_now,
+)
+from .durable import file_lock
+from .execution import ActionBlocked, ExecutionAdapter
+from .gates import GateResult
+from .ledger import EvidenceLedger, LedgerEvent, sha256_file, sha256_text
+from .orchestrator import Causality
+from .memory import TypedMemory
+from .reflect import reflect_on_contract
+from .tool_adapter import ToolAdapter, utf8_size
+
+
+SCHEMA_VERSION = 1
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+TASK_STARTED = "task_started"
+TASK_OPERATION = "task_operation"
+TASK_ACTION_INTENT = "task_action_intent"
+TASK_ACTION_RESULT = "task_action_result"
+TASK_REFLECTION_INTENT = "task_reflection_intent"
+TASK_REFLECTED = "task_reflected"
+GOAL_CONTRACT = "goal_contract"
+STATE_TRANSITION = "state_transition"
+
+_TASK_EVENTS = frozenset(
+    {
+        TASK_STARTED,
+        TASK_OPERATION,
+        TASK_ACTION_INTENT,
+        TASK_ACTION_RESULT,
+        TASK_REFLECTION_INTENT,
+        TASK_REFLECTED,
+    }
+)
+
+
+def canonical_sha256(value: Any) -> str:
+    """Return the SHA-256 of canonical JSON, rejecting non-JSON numbers."""
+
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+def _idempotency_key(value: str) -> str:
+    if not isinstance(value, str) or not _IDEMPOTENCY_KEY.fullmatch(value):
+        raise _error(
+            "invalid_idempotency_key",
+            "idempotency_key must match [A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+        )
+    return value
+
+
+def _contract_request(contract: GoalContract) -> dict[str, Any]:
+    value = contract.to_dict()
+    for name in ("goal_id", "created_at", "workspace_root", "state", "approval_required"):
+        value.pop(name, None)
+    return value
+
+
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+@dataclass
+class TaskLifecycleError(Exception):
+    """Stable error envelope suitable for JSON-RPC adapters."""
+
+    code: str
+    message: str
+    retryable: bool = False
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.details = _freeze(dict(self.details))
+        self.args = (self.message,)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+            "details": _thaw(self.details),
+        }
+
+
+class TaskState(str, Enum):
+    PLANNED = "planned"
+    APPROVED = "approved"
+    EXECUTING = "executing"
+    BLOCKED = "blocked"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True)
+class TaskPolicy:
+    """Server-owned ceiling; a task contract may only narrow it."""
+
+    allowed_tools: frozenset[str] = frozenset({"shell", "file.read", "file.write"})
+    subprocess_argv_prefixes: tuple[tuple[str, ...], ...] = ()
+    verification_commands: tuple[tuple[str, ...], ...] = ()
+    verification_argv_prefixes: tuple[tuple[str, ...], ...] = ()
+    max_timeout_seconds: float = 300.0
+
+    def allows_subprocess(self, argv: tuple[str, ...]) -> bool:
+        return any(
+            len(argv) >= len(prefix) and argv[: len(prefix)] == prefix
+            for prefix in self.subprocess_argv_prefixes
+        )
+
+    def allows_verification(self, argv: tuple[str, ...]) -> bool:
+        return argv in self.verification_commands or any(
+            len(argv) >= len(prefix) and argv[: len(prefix)] == prefix
+            for prefix in self.verification_argv_prefixes
+        )
+
+
+EffectRunner = Callable[[dict[str, Any]], Mapping[str, Any]]
+ApprovalAuthorizer = Callable[[str, str, str | None], bool]
+
+
+_TRANSITIONS: Mapping[TaskState, frozenset[TaskState]] = MappingProxyType(
+    {
+        TaskState.PLANNED: frozenset(
+            {TaskState.APPROVED, TaskState.EXECUTING, TaskState.REJECTED}
+        ),
+        TaskState.APPROVED: frozenset(
+            {TaskState.EXECUTING, TaskState.BLOCKED, TaskState.REJECTED}
+        ),
+        TaskState.EXECUTING: frozenset(
+            {TaskState.VERIFIED, TaskState.BLOCKED, TaskState.REJECTED}
+        ),
+        TaskState.BLOCKED: frozenset({TaskState.EXECUTING, TaskState.REJECTED}),
+        TaskState.VERIFIED: frozenset(),
+        TaskState.REJECTED: frozenset(),
+    }
+)
+
+
+@dataclass(frozen=True)
+class IdempotencyRecord:
+    operation: str
+    idempotency_key: str
+    request_sha256: str
+    operation_id: str
+    request: Any = None
+    response: Any = None
+    outcome: str | None = None
+    event_hashes: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return self.outcome is not None
+
+@dataclass(frozen=True)
+class PendingIntent:
+    kind: str
+    operation: str
+    operation_id: str
+    idempotency_key: str
+    request_sha256: str
+    descriptor: Any
+    event_hash: str
+
+
+@dataclass(frozen=True)
+class TaskSession:
+    schema_version: int
+    task_id: str
+    contract_id: str
+    contract_snapshot: Mapping[str, Any]
+    contract_hash: str
+    state: TaskState
+    phase: str
+    requirement_results: Mapping[str, Any]
+    idempotency: Mapping[tuple[str, str], IdempotencyRecord]
+    unresolved_intents: tuple[PendingIntent, ...]
+    reflection: Mapping[str, Any] | None
+    event_hashes: tuple[str, ...]
+    terminal: bool
+    allowed_next: tuple[str, ...]
+    hypothesis_count: int = 0
+    blocked_reason: str | None = None
+
+    @property
+    def pending_intent(self) -> PendingIntent | None:
+        return self.unresolved_intents[0] if self.unresolved_intents else None
+
+    @property
+    def latest_event_hash(self) -> str:
+        return self.event_hashes[-1]
+
+    @property
+    def pending_operation_id(self) -> str | None:
+        intent = self.pending_intent
+        return intent.operation_id if intent is not None else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "task_id": self.task_id,
+            "contract_id": self.contract_id,
+            "contract_hash": self.contract_hash,
+            "state": self.state.value,
+            "phase": self.phase,
+            "approval_required": bool(self.contract_snapshot.get("approval_required")),
+            "requirement_results": _thaw(self.requirement_results),
+            "hypothesis_count": self.hypothesis_count,
+            "reflection_done": self.reflection is not None,
+            "pending_operation_id": self.pending_operation_id,
+            "latest_event_hash": self.latest_event_hash,
+            "terminal": self.terminal,
+            "allowed_next": list(self.allowed_next),
+        }
+
+
+def _error(
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+    **details: Any,
+) -> TaskLifecycleError:
+    return TaskLifecycleError(code, message, retryable, details)
+
+
+def _required_text(payload: Mapping[str, Any], name: str, event: LedgerEvent) -> str:
+    value = payload.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise _error(
+            "invalid_task_event",
+            f"{event.event_type}.{name} must be a non-blank string",
+            event_hash=event.entry_hash,
+            field=name,
+        )
+    return value.strip()
+
+
+def _request_digest(payload: Mapping[str, Any], event: LedgerEvent) -> str:
+    value = _required_text(payload, "request_sha256", event).lower()
+    if not _SHA256.fullmatch(value):
+        raise _error(
+            "invalid_task_event",
+            f"{event.event_type}.request_sha256 must be a lowercase SHA-256",
+            event_hash=event.entry_hash,
+        )
+    return value
+
+
+def _common_payload(event: LedgerEvent, task_id: str) -> Mapping[str, Any]:
+    payload = event.payload
+    if not isinstance(payload, Mapping):
+        raise _error(
+            "invalid_task_event",
+            f"{event.event_type} payload must be an object",
+            event_hash=event.entry_hash,
+        )
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise _error(
+            "unsupported_task_schema",
+            f"{event.event_type} requires schema_version 1",
+            event_hash=event.entry_hash,
+            schema_version=payload.get("schema_version"),
+        )
+    if payload.get("task_id") != task_id or event.contract_id != task_id:
+        raise _error(
+            "task_identity_mismatch",
+            "task event identity does not match its contract scope",
+            event_hash=event.entry_hash,
+            task_id=task_id,
+            payload_task_id=payload.get("task_id"),
+            contract_id=event.contract_id,
+        )
+    return payload
+
+
+def _response(payload: Mapping[str, Any], event: LedgerEvent) -> Any:
+    if "response" not in payload:
+        raise _error(
+            "invalid_task_event",
+            f"{event.event_type}.response is required",
+            event_hash=event.entry_hash,
+        )
+    return _freeze(payload["response"])
+
+
+def _outcome(payload: Mapping[str, Any], event: LedgerEvent) -> str:
+    value = payload.get("outcome")
+    if not isinstance(value, str) or not value.strip():
+        raise _error(
+            "invalid_task_event",
+            f"{event.event_type}.outcome must be a non-blank string",
+            event_hash=event.entry_hash,
+        )
+    return value.strip()
+
+
+def _state(value: Any, event: LedgerEvent, field_name: str) -> TaskState:
+    try:
+        return TaskState(value)
+    except (TypeError, ValueError) as exc:
+        raise _error(
+            "invalid_task_transition",
+            f"{field_name} is not a task state",
+            event_hash=event.entry_hash,
+            value=value,
+        ) from exc
+
+
+def _is_correlated_approval_rejection(event: LedgerEvent, task_id: str) -> bool:
+    payload = event.payload
+    return bool(
+        event.event_type == AuditEventType.HUMAN_DECISION.value
+        and isinstance(payload, Mapping)
+        and payload.get("task_id") == task_id
+        and payload.get("approved") is False
+        and payload.get("stage") in {"plan", "final"}
+        and payload.get("operation") in {None, "approve"}
+        and all(
+            isinstance(payload.get(name), str) and bool(payload[name].strip())
+            for name in (
+                "operation_id",
+                "idempotency_key",
+                "request_sha256",
+            )
+        )
+    )
+
+
+def _phase(
+    state: TaskState,
+    unresolved: tuple[PendingIntent, ...],
+    reflection: Mapping[str, Any] | None,
+) -> str:
+    if any(intent.kind == "action" for intent in unresolved):
+        return "recovery"
+    if state is TaskState.BLOCKED:
+        return "recovery"
+    if state is TaskState.PLANNED:
+        return "plan"
+    if state is TaskState.APPROVED:
+        return "approval"
+    if state is TaskState.EXECUTING:
+        return "execution"
+    if reflection is None:
+        return "reflection"
+    return "done"
+
+
+def _allowed_next(
+    state: TaskState,
+    unresolved: tuple[PendingIntent, ...],
+    reflection: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    if any(intent.kind == "action" for intent in unresolved):
+        return ("resolve",)
+    if any(intent.kind == "completion" for intent in unresolved):
+        return ("complete",)
+    if state is TaskState.PLANNED:
+        return ("approve", "action", "reject")
+    if state is TaskState.APPROVED:
+        return ("action", "verify", "reject")
+    if state is TaskState.EXECUTING:
+        return ("action", "verify", "verdict", "complete")
+    if state is TaskState.BLOCKED:
+        return ("approve",)
+    if reflection is None:
+        return ("reflect",)
+    return ()
+
+
+class TaskLifecycle:
+    """Write task events and reconstruct immutable state from the same ledger."""
+
+    def __init__(
+        self,
+        project_root: str | Path,
+        ledger_path: str | Path | None = None,
+        *,
+        policy: TaskPolicy | None = None,
+        approval_authorizer: ApprovalAuthorizer | None = None,
+        effect_runner: EffectRunner | None = None,
+    ):
+        self.project_root = Path(project_root).resolve()
+        self.ledger = EvidenceLedger(
+            Path(ledger_path).resolve()
+            if ledger_path is not None
+            else self.project_root / ".causality" / "ledger.jsonl"
+        )
+        self.runtime = Causality(self.ledger.path, project_root=self.project_root)
+        self.policy = policy or TaskPolicy()
+        # The public lifecycle is a security boundary too, not merely the MCP
+        # wrapper's implementation detail.  Absence of a trust provider must
+        # therefore deny approvals and recovery instead of silently trusting
+        # every caller.
+        self.approval_authorizer = approval_authorizer or (
+            lambda _approver, _stage, _proof: False
+        )
+        self.effect_runner = effect_runner
+
+    def session(self, task_id: str, recover: bool = True) -> TaskSession:
+        return self.get(task_id, recover=recover)
+
+    def _effective_contract(self, contract: GoalContract, task_id: str) -> GoalContract:
+        requested = set(contract.permissions.allowed_tools)
+        denied = requested - self.policy.allowed_tools
+        if denied:
+            raise _error(
+                "policy_denied",
+                "task requests tools outside server policy",
+                tools=sorted(denied),
+            )
+        for entry in contract.permissions.write_scope:
+            candidate = Path(entry)
+            if not candidate.is_absolute():
+                candidate = self.project_root / candidate
+            if not _within(candidate.resolve(), self.project_root):
+                raise _error(
+                    "scope_escape",
+                    "write_scope escapes the project root",
+                    path=str(entry),
+                )
+        undeclared_commands = [
+            list(requirement.argv)
+            for requirement in contract.verification_requirements
+            if not requirement.manual
+            and not self.policy.allows_verification(requirement.argv)
+        ]
+        if undeclared_commands:
+            raise _error(
+                "policy_denied",
+                "verification argv is not in the server-owned exact allowlist",
+                commands=undeclared_commands,
+            )
+        excessive_timeouts = [
+            requirement.id
+            for requirement in contract.verification_requirements
+            if not requirement.manual
+            and requirement.timeout_seconds > self.policy.max_timeout_seconds
+        ]
+        if excessive_timeouts:
+            raise _error(
+                "policy_denied",
+                "verification timeout exceeds the server policy ceiling",
+                requirements=excessive_timeouts,
+                max_timeout_seconds=self.policy.max_timeout_seconds,
+            )
+        return replace(
+            contract,
+            goal_id=task_id,
+            state=StateTransition.PLANNED,
+            workspace_root="",
+            permissions=PermissionContract(
+                allowed_tools=tuple(contract.permissions.allowed_tools),
+                write_scope=tuple(contract.permissions.write_scope),
+                network_scope=tuple(contract.permissions.network_scope),
+                auth_scope=tuple(contract.permissions.auth_scope),
+            ),
+        )
+
+    def begin(self, contract: GoalContract, *, idempotency_key: str) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        if not isinstance(contract, GoalContract):
+            raise _error("invalid_request", "begin requires a GoalContract")
+        request = _contract_request(contract)
+        digest = canonical_sha256(request)
+        task_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"causality:{str(self.project_root).casefold()}:{key}",
+            )
+        )
+        with self.runtime.execution_lock():
+            if not self.ledger.verify_chain():
+                raise _error("ledger_integrity_failed", "ledger hash chain verification failed")
+            for event in self.ledger.events(all_segments=True):
+                if event.event_type != TASK_STARTED or event.payload.get("idempotency_key") != key:
+                    continue
+                prior = event.payload.get("request_sha256")
+                if prior != digest:
+                    raise _error(
+                        "idempotency_conflict",
+                        "begin idempotency key is already bound to another request",
+                        idempotency_key=key,
+                    )
+                if not event.contract_id:
+                    raise _error("invalid_task_event", "task_started has no contract scope")
+                return self.get(event.contract_id)
+
+            snapshot = self.ledger.contract_snapshot(task_id)
+            if snapshot is not None:
+                if canonical_sha256(
+                    _contract_request(GoalContract.from_mapping(snapshot))
+                ) != digest:
+                    raise _error(
+                        "idempotency_conflict",
+                        "deterministic task identity is bound to another request",
+                        idempotency_key=key,
+                    )
+                bound = GoalContract.from_mapping(snapshot)
+            else:
+                bound = self.runtime.create_contract(
+                    self._effective_contract(contract, task_id)
+                )
+            self.ledger.append(
+                AuditEventType.TASK_STARTED,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "task_id": task_id,
+                    "idempotency_key": key,
+                    "request_sha256": digest,
+                    "request": request,
+                    "response": {"task_id": task_id, "contract_id": task_id},
+                },
+                contract_id=bound.goal_id,
+            )
+            return self.get(task_id)
+
+    @staticmethod
+    def _operation_id(task_id: str, operation: str, key: str, digest: str) -> str:
+        return str(uuid5(NAMESPACE_URL, f"{task_id}:{operation}:{key}:{digest}"))
+
+    def _operation_metadata(
+        self,
+        task_id: str,
+        operation: str,
+        key: str,
+        digest: str,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "task_id": task_id,
+            "operation": operation,
+            "operation_id": self._operation_id(task_id, operation, key, digest),
+            "idempotency_key": key,
+            "request_sha256": digest,
+        }
+
+    def _authoritative_event(
+        self,
+        task_id: str,
+        operation: str,
+        key: str,
+        digest: str,
+        event_type: AuditEventType,
+    ) -> LedgerEvent | None:
+        matches = []
+        for event in self.ledger.events_for_contract(task_id, all_segments=True):
+            payload = event.payload
+            if (
+                event.event_type == event_type.value
+                and payload.get("operation") == operation
+                and payload.get("idempotency_key") == key
+            ):
+                if payload.get("request_sha256") != digest:
+                    raise _error(
+                        "idempotency_conflict",
+                        "idempotency key is bound to another authoritative event",
+                        operation=operation,
+                        idempotency_key=key,
+                    )
+                matches.append(event)
+        if len(matches) > 1:
+            raise _error(
+                "invalid_task_event",
+                "duplicate authoritative events share one idempotency key",
+                operation=operation,
+                idempotency_key=key,
+            )
+        return matches[0] if matches else None
+
+    def _assert_completion_snapshot_current(
+        self,
+        task_id: str,
+        gate_event_hash: str,
+        *,
+        operation_event_hash: str | None = None,
+    ) -> None:
+        """Reject a completion decision if task history advanced after it.
+
+        A process may die after the gate append releases its lock but before
+        the terminal transition is durable.  Reusing that PASS after any other
+        task event would certify a state the gate never examined.
+        """
+
+        events = self.ledger.events_for_contract(task_id, all_segments=True)
+        positions = {event.entry_hash: index for index, event in enumerate(events)}
+        gate_index = positions.get(gate_event_hash)
+        if gate_index is None:
+            raise _error(
+                "invalid_task_event",
+                "completion operation cites a missing gate decision",
+                gate_event_hash=gate_event_hash,
+            )
+        gate_event = events[gate_index]
+        if (
+            gate_event.event_type != AuditEventType.GATE_DECISION.value
+            or gate_event.payload.get("operation") != "complete"
+        ):
+            raise _error(
+                "invalid_task_event",
+                "completion cites a non-completion gate event",
+                gate_event_hash=gate_event_hash,
+            )
+        expected_fingerprint = gate_event.payload.get(
+            "completion_workspace_fingerprint_sha256"
+        )
+        current_fingerprint = self._workspace_fingerprint_digest()
+        if gate_event.payload.get("decision") == GateDecision.PASS.value and (
+            not isinstance(expected_fingerprint, str)
+            or not _SHA256.fullmatch(expected_fingerprint)
+            or expected_fingerprint != current_fingerprint
+        ):
+            raise _error(
+                "completion_snapshot_stale",
+                "workspace differs from the completion decision; use a new "
+                "idempotency key after current verification",
+                retryable=False,
+                gate_event_hash=gate_event_hash,
+                expected_workspace_fingerprint_sha256=expected_fingerprint,
+                actual_workspace_fingerprint_sha256=current_fingerprint,
+            )
+
+        allowed_hashes: set[str] = set()
+        if operation_event_hash is not None:
+            operation_index = positions.get(operation_event_hash)
+            operation_event = (
+                events[operation_index] if operation_index is not None else None
+            )
+            operation_response = (
+                operation_event.payload.get("response")
+                if operation_event is not None
+                and isinstance(operation_event.payload, Mapping)
+                else None
+            )
+            if (
+                operation_event is None
+                or operation_index <= gate_index
+                or operation_event.event_type != TASK_OPERATION
+                or operation_event.payload.get("operation") != "complete"
+                or not isinstance(operation_response, Mapping)
+                or operation_response.get("gate_event_hash") != gate_event_hash
+            ):
+                raise _error(
+                    "invalid_task_event",
+                    "completion operation does not match its gate decision",
+                    gate_event_hash=gate_event_hash,
+                    operation_event_hash=operation_event_hash,
+                )
+            allowed_hashes.add(operation_event_hash)
+
+        invalidating = next(
+            (
+                event
+                for event in events[gate_index + 1 :]
+                if event.entry_hash not in allowed_hashes
+            ),
+            None,
+        )
+        if invalidating is not None:
+            raise _error(
+                "completion_snapshot_stale",
+                "task history advanced after the completion decision; use a new "
+                "idempotency key after current verification",
+                retryable=False,
+                gate_event_hash=gate_event_hash,
+                invalidating_event_hash=invalidating.entry_hash,
+                invalidating_event_type=invalidating.event_type,
+            )
+
+    def _workspace_fingerprint_digest(self) -> str:
+        from .verification import workspace_fingerprint, workspace_fingerprint_digest
+
+        return workspace_fingerprint_digest(
+            workspace_fingerprint(self.project_root, self.ledger.path)
+        )
+
+    @staticmethod
+    def _existing(
+        session: TaskSession,
+        operation: str,
+        key: str,
+        digest: str,
+    ) -> IdempotencyRecord | None:
+        record = session.idempotency.get((operation, key))
+        if record is None:
+            return None
+        if record.request_sha256 != digest:
+            raise _error(
+                "idempotency_conflict",
+                "idempotency key is bound to another request",
+                operation=operation,
+                idempotency_key=key,
+            )
+        if not record.complete:
+            raise _error(
+                "unresolved_action_intent",
+                "operation has a durable intent without a result",
+                operation_id=record.operation_id,
+            )
+        return record
+
+    def _append_transition(
+        self,
+        session: TaskSession,
+        target: TaskState,
+        *,
+        reason: str,
+        cause_event_hash: str,
+    ) -> LedgerEvent:
+        if target not in _TRANSITIONS[session.state]:
+            raise _error(
+                "invalid_transition",
+                f"illegal task state edge {session.state.value}->{target.value}",
+            )
+        return self.ledger.append(
+            AuditEventType.STATE_TRANSITION,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "task_id": session.task_id,
+                "from_state": session.state.value,
+                "state": target.value,
+                "reason": reason,
+                "cause_event_hash": cause_event_hash,
+            },
+            contract_id=session.task_id,
+        )
+
+    def _append_operation(
+        self,
+        session: TaskSession,
+        operation: str,
+        key: str,
+        digest: str,
+        request: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> LedgerEvent:
+        return self.ledger.append(
+            AuditEventType.TASK_OPERATION,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "task_id": session.task_id,
+                "operation": operation,
+                "operation_id": self._operation_id(session.task_id, operation, key, digest),
+                "idempotency_key": key,
+                "request_sha256": digest,
+                "request": dict(request),
+                "response": dict(response),
+                "outcome": "completed",
+            },
+            contract_id=session.task_id,
+        )
+
+    def _contract(self, session: TaskSession) -> GoalContract:
+        return GoalContract.from_mapping(_thaw(session.contract_snapshot))
+
+    def _ensure_executing(self, session: TaskSession) -> TaskSession:
+        if session.terminal:
+            raise _error("task_terminal", "terminal task cannot execute new work")
+        if session.state is TaskState.BLOCKED:
+            raise _error("task_blocked", "blocked task requires trusted resolution")
+        if session.state is TaskState.PLANNED:
+            gate = self.runtime.evaluate_plan(self._contract(session))
+            cause = self.ledger.latest_hash_for_contract(session.task_id)
+            if not gate.allowed or cause is None:
+                raise _error(
+                    "approval_required",
+                    gate.reasons[0] if gate.reasons else "plan approval required",
+                )
+            self._append_transition(
+                session,
+                TaskState.APPROVED,
+                reason="plan gate passed",
+                cause_event_hash=cause,
+            )
+            session = self.get(session.task_id)
+        if session.state is TaskState.APPROVED:
+            self._append_transition(
+                session,
+                TaskState.EXECUTING,
+                reason="task operation started",
+                cause_event_hash=session.latest_event_hash,
+            )
+            session = self.get(session.task_id)
+        if session.state is not TaskState.EXECUTING:
+            raise _error("invalid_transition", "task is not executable")
+        return session
+
+    def _resolve_project_path(self, value: str, *, field_name: str) -> Path:
+        if not isinstance(value, str) or not value.strip():
+            raise _error("validation_error", f"{field_name} must be non-blank")
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+        resolved = candidate.resolve()
+        if not _within(resolved, self.project_root):
+            raise _error("scope_escape", f"{field_name} escapes the project root")
+        return resolved
+
+    @staticmethod
+    def _subprocess_action_kind(argv: list[str]) -> str:
+        executable = Path(argv[0]).name.casefold()
+        lowered = [item.casefold() for item in argv[1:]]
+        if executable in {"rm", "rmdir", "del", "erase"}:
+            return "delete"
+        if executable in {"git", "git.exe"} and "push" in lowered:
+            return "external_send"
+        if any(item in {"deploy", "publish", "release"} for item in lowered):
+            return "deploy"
+        return "tool_call"
+
+    def _normalize_action(
+        self,
+        session: TaskSession,
+        action: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], str, str, str]:
+        if not isinstance(action, Mapping):
+            raise _error("validation_error", "action must be an object")
+        kind = action.get("kind", action.get("type"))
+        contract = self._contract(session)
+        allowed = set(contract.permissions.allowed_tools) & self.policy.allowed_tools
+        if kind == "file_read":
+            path = self._resolve_project_path(action.get("path", ""), field_name="path")
+            tool, action_kind = "file.read", "tool_call"
+            descriptor = {"kind": kind, "path": str(path)}
+            description = f"read file {path}"
+        elif kind == "file_write":
+            path = self._resolve_project_path(action.get("path", ""), field_name="path")
+            content = action.get("content")
+            if not isinstance(content, str):
+                raise _error("validation_error", "file_write.content must be a string")
+            scopes = tuple(contract.permissions.write_scope)
+            if not scopes:
+                raise _error("action_blocked", "empty write_scope grants no MCP write")
+            resolved_scopes = tuple(
+                self._resolve_project_path(entry, field_name="write_scope")
+                for entry in scopes
+            )
+            if not any(_within(path, scope) for scope in resolved_scopes):
+                raise _error("action_blocked", "file path is outside write_scope")
+            tool, action_kind = "file.write", "write"
+            descriptor = {
+                "kind": kind,
+                "path": str(path),
+                "content": content,
+            }
+            description = f"write file {path}"
+        elif kind == "subprocess":
+            raw_argv = action.get("argv")
+            if isinstance(raw_argv, (str, bytes)) or not isinstance(raw_argv, (list, tuple)):
+                raise _error("validation_error", "subprocess.argv must be a string array")
+            argv = list(raw_argv)
+            if not argv or any(not isinstance(item, str) or not item for item in argv):
+                raise _error("validation_error", "subprocess.argv must contain non-blank strings")
+            if not self.policy.allows_subprocess(tuple(argv)):
+                raise _error(
+                    "policy_denied",
+                    "subprocess argv is outside the server-owned allowlist",
+                )
+            cwd = self._resolve_project_path(action.get("cwd", "."), field_name="cwd")
+            timeout = action.get("timeout_seconds", action.get("timeout", 30.0))
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                raise _error("validation_error", "timeout must be numeric")
+            timeout = float(timeout)
+            if timeout <= 0 or timeout > self.policy.max_timeout_seconds:
+                raise _error("validation_error", "timeout is outside server policy")
+            tool, action_kind = "shell", self._subprocess_action_kind(argv)
+            descriptor = {
+                "kind": kind,
+                "argv": argv,
+                "cwd": str(cwd),
+                "timeout_seconds": timeout,
+            }
+            description = "run argv: " + " ".join(argv)
+        else:
+            raise _error("validation_error", "unknown action kind")
+        if tool not in allowed:
+            raise _error("action_blocked", f"tool is outside effective policy: {tool}")
+        return descriptor, tool, action_kind, description
+
+    def action(
+        self,
+        task_id: str,
+        action: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            descriptor, tool, action_kind, description = self._normalize_action(session, action)
+            digest = canonical_sha256(descriptor)
+            prior = self._existing(session, "action", key, digest)
+            if prior is not None:
+                if prior.outcome == "error" and session.state is TaskState.EXECUTING:
+                    self._append_transition(
+                        session,
+                        TaskState.BLOCKED,
+                        reason="action outcome is uncertain",
+                        cause_event_hash=prior.event_hashes[-1],
+                    )
+                    return self.get(task_id)
+                return session
+            session = self._ensure_executing(session)
+            operation_id = self._operation_id(task_id, "action", key, digest)
+            intent: LedgerEvent | None = None
+
+            def before_effect() -> None:
+                nonlocal intent
+                if intent is not None:
+                    raise RuntimeError("effect hook executed more than once")
+                intent = self.ledger.append(
+                    AuditEventType.TASK_ACTION_INTENT,
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "task_id": task_id,
+                        "operation": "action",
+                        "operation_id": operation_id,
+                        "idempotency_key": key,
+                        "request_sha256": digest,
+                        "descriptor": descriptor,
+                    },
+                    contract_id=task_id,
+                )
+
+            execution = ExecutionAdapter(self.runtime, self._contract(session))
+            provenance: str | None = None
+            try:
+                if self.effect_runner is not None:
+                    def run_injected() -> Mapping[str, Any]:
+                        before_effect()
+                        return self.effect_runner(_thaw(_freeze(descriptor)))
+
+                    raw = execution.execute(
+                        tool=tool,
+                        action_kind=action_kind,
+                        description=description,
+                        run=run_injected,
+                    )
+                    if not isinstance(raw, Mapping):
+                        raise ValueError("effect_runner must return a mapping")
+                    result = _thaw(_freeze(dict(raw)))
+                    canonical_sha256(result)
+                    event = self.ledger.append(
+                        AuditEventType.TOOL_CALL,
+                        {
+                            "tool": tool,
+                            "action_kind": action_kind,
+                            "result_sha256": canonical_sha256(result),
+                            "mutates_task": descriptor["kind"] != "file_read",
+                        },
+                        contract_id=task_id,
+                    )
+                    provenance = event.entry_hash
+                else:
+                    tools = ToolAdapter(self.ledger, execution, root=self.project_root)
+                    if descriptor["kind"] == "file_read":
+                        content = tools.read_text(descriptor["path"], before_effect=before_effect)
+                        result = {
+                            "kind": "file_read",
+                            "path": descriptor["path"],
+                            "bytes": utf8_size(content),
+                            "sha256": sha256_text(content),
+                        }
+                    elif descriptor["kind"] == "file_write":
+                        target = tools.write_text(
+                            descriptor["path"],
+                            descriptor["content"],
+                            before_effect=before_effect,
+                        )
+                        result = {
+                            "kind": "file_write",
+                            "path": str(target),
+                            "bytes": utf8_size(descriptor["content"]),
+                            "sha256": sha256_file(target),
+                        }
+                    else:
+                        completed = tools.run(
+                            descriptor["argv"],
+                            timeout=descriptor["timeout_seconds"],
+                            cwd=descriptor["cwd"],
+                            action_kind=action_kind,
+                            before_effect=before_effect,
+                        )
+                        result = {
+                            "kind": "subprocess",
+                            "exit_code": completed.exit_code,
+                            "stdout_bytes": utf8_size(completed.stdout),
+                            "stderr_bytes": utf8_size(completed.stderr),
+                            "stdout_sha256": sha256_text(completed.stdout),
+                            "stderr_sha256": sha256_text(completed.stderr),
+                        }
+                    provenance = tools.last_event_hash
+            except ActionBlocked as exc:
+                raise _error(
+                    "approval_required"
+                    if exc.result.decision is GateDecision.ESCALATE
+                    else "action_blocked",
+                    str(exc),
+                ) from exc
+            except Exception as exc:
+                if intent is not None:
+                    self.ledger.append(
+                        AuditEventType.TOOL_CALL,
+                        {
+                            "schema_version": SCHEMA_VERSION,
+                            "task_id": task_id,
+                            "tool": tool,
+                            "action_kind": action_kind,
+                            "operation_id": operation_id,
+                            "idempotency_key": key,
+                            "request_sha256": digest,
+                            "outcome": "uncertain",
+                            "error_type": type(exc).__name__,
+                            "mutates_task": True,
+                        },
+                        contract_id=task_id,
+                    )
+                raise _error("action_failed", f"action failed: {type(exc).__name__}: {exc}") from exc
+
+            if intent is None or provenance is None:
+                raise RuntimeError("action completed without durable intent/provenance")
+            self.ledger.append(
+                AuditEventType.TASK_ACTION_RESULT,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "task_id": task_id,
+                    "operation": "action",
+                    "operation_id": operation_id,
+                    "idempotency_key": key,
+                    "request_sha256": digest,
+                    "descriptor": descriptor,
+                    "outcome": "completed",
+                    "result": result,
+                    "response": result,
+                    "provenance_event_hashes": [provenance],
+                },
+                contract_id=task_id,
+            )
+            return self.get(task_id)
+
+    def _durable_state(self, task_id: str) -> TaskState:
+        snapshot = self.ledger.contract_snapshot(task_id)
+        if snapshot is None:
+            raise _error("task_not_found", f"task not found: {task_id}")
+        state = TaskState(snapshot.get("state", TaskState.PLANNED.value))
+        for event in self.ledger.events_for_contract(task_id, all_segments=True):
+            if event.event_type == STATE_TRANSITION:
+                state = TaskState(event.payload["state"])
+        return state
+
+    def resolve(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        resolution: str,
+        approver: str,
+        rationale: str,
+        idempotency_key: str,
+        proof: str | None = None,
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        if resolution not in {"applied", "not_applied", "reject"}:
+            raise _error("validation_error", "invalid recovery resolution")
+        if not isinstance(approver, str) or not approver.strip():
+            raise _error("validation_error", "approver must be non-blank")
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise _error("validation_error", "rationale must be non-blank")
+        request = {
+            "operation_id": operation_id,
+            "resolution": resolution,
+            "approver": approver.strip(),
+            "rationale": rationale.strip(),
+        }
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            events = self.ledger.events_for_contract(task_id, all_segments=True)
+            completed_recoveries = {
+                event.payload.get("operation_id")
+                for event in events
+                if event.event_type == TASK_OPERATION
+                and event.payload.get("operation") == "resolve"
+            }
+            pending_recoveries = [
+                event
+                for event in events
+                if event.event_type == AuditEventType.HUMAN_DECISION.value
+                and event.payload.get("task_id") == task_id
+                and event.payload.get("stage") == "recovery"
+                and event.payload.get("operation") in {None, "resolve"}
+                and event.payload.get("operation_id") not in completed_recoveries
+            ]
+            if len(pending_recoveries) > 1:
+                raise _error(
+                    "invalid_recovery",
+                    "task contains multiple unfinished recovery decisions",
+                )
+            if pending_recoveries:
+                reserved = pending_recoveries[0].payload
+                if (
+                    reserved.get("idempotency_key") != key
+                    or reserved.get("request_sha256") != digest
+                ):
+                    raise _error(
+                        "recovery_in_progress",
+                        "another trusted recovery decision already owns this effect",
+                        operation_id=reserved.get("target_operation_id"),
+                        idempotency_key=reserved.get("idempotency_key"),
+                    )
+            prior = self._existing(session, "resolve", key, digest)
+            if prior is not None:
+                if resolution == "not_applied" and session.state is TaskState.BLOCKED:
+                    self._append_transition(
+                        session,
+                        TaskState.EXECUTING,
+                        reason="operator confirmed effect was not applied",
+                        cause_event_hash=prior.event_hashes[-1],
+                    )
+                    return self.get(task_id)
+                if resolution == "reject" and session.state is TaskState.BLOCKED:
+                    self._append_transition(
+                        session,
+                        TaskState.REJECTED,
+                        reason="operator rejected task during recovery",
+                        cause_event_hash=prior.event_hashes[-1],
+                    )
+                    return self.get(task_id)
+                return session
+            pending = next(
+                (item for item in session.unresolved_intents if item.operation_id == operation_id),
+                None,
+            )
+            if pending is None or pending.kind != "action":
+                raise _error("unresolved_action_intent", "recovery target is not pending")
+            stored = self._durable_state(task_id)
+            if stored is not TaskState.BLOCKED:
+                base = replace(session, state=stored)
+                self._append_transition(
+                    base,
+                    TaskState.BLOCKED,
+                    reason="unresolved action intent requires recovery",
+                    cause_event_hash=pending.event_hash,
+                )
+                session = self.get(task_id)
+            decision = (
+                pending_recoveries[0]
+                if pending_recoveries
+                else self._authoritative_event(
+                    task_id,
+                    "resolve",
+                    key,
+                    digest,
+                    AuditEventType.HUMAN_DECISION,
+                )
+            )
+            if decision is None:
+                self._authorize(approver.strip(), "recovery", proof)
+                decision = self.ledger.append(
+                    AuditEventType.HUMAN_DECISION,
+                    {
+                        **self._operation_metadata(
+                            task_id,
+                            "resolve",
+                            key,
+                            digest,
+                        ),
+                        "stage": "recovery",
+                        "approved": resolution != "reject",
+                        "approver": approver.strip(),
+                        "rationale": rationale.strip(),
+                        "resolution": resolution,
+                        "target_operation_id": operation_id,
+                    },
+                    contract_id=task_id,
+                )
+            operation = self._append_operation(
+                session,
+                "resolve",
+                key,
+                digest,
+                request,
+                {
+                    "operation_id": operation_id,
+                    "resolution": resolution,
+                    "decision_event_hash": decision.entry_hash,
+                },
+            )
+            session = self.get(task_id)
+            if resolution == "not_applied":
+                self._append_transition(
+                    session,
+                    TaskState.EXECUTING,
+                    reason="operator confirmed effect was not applied",
+                    cause_event_hash=operation.entry_hash,
+                )
+            elif resolution == "reject":
+                self._append_transition(
+                    session,
+                    TaskState.REJECTED,
+                    reason="operator rejected task during recovery",
+                    cause_event_hash=operation.entry_hash,
+                )
+            return self.get(task_id)
+
+    def _authorize(
+        self,
+        approver: str,
+        stage: str,
+        proof: str | None,
+    ) -> None:
+        if not self.approval_authorizer(approver, stage, proof):
+            raise _error("approval_required", "approval proof was not trusted")
+
+    def _scoped_hashes(self, task_id: str) -> set[str]:
+        return {
+            event.entry_hash
+            for event in self.ledger.events_for_contract(task_id, all_segments=True)
+        }
+
+    def _validate_evidence_refs(
+        self,
+        task_id: str,
+        evidence_refs: tuple[str, ...],
+    ) -> None:
+        if len(evidence_refs) != len(set(evidence_refs)):
+            raise _error("evidence_scope_mismatch", "evidence_refs must be unique")
+        scoped = self._scoped_hashes(task_id)
+        if any(not _SHA256.fullmatch(ref) or ref not in scoped for ref in evidence_refs):
+            raise _error(
+                "evidence_scope_mismatch",
+                "evidence reference is not in this task",
+            )
+
+    def _current_evidence(self, session: TaskSession) -> tuple[str, ...]:
+        contract = self._contract(session)
+        events = self.ledger.events_for_contract(session.task_id, all_segments=True)
+        last_mutation = max(
+            (
+                index
+                for index, event in enumerate(events)
+                if event.payload.get("mutates_task") is True
+            ),
+            default=-1,
+        )
+        issues, _, hashes = self.runtime.gate._structured_requirement_issues(
+            contract.verification_requirements,
+            events,
+            workspace_root=contract.workspace_root,
+            last_mutation=last_mutation,
+        )
+        generic_issues, _, generic_hashes = (
+            self.runtime.gate._structured_generic_evidence_issues(
+                contract,
+                events,
+                workspace_root=contract.workspace_root,
+                last_mutation=last_mutation,
+            )
+        )
+        issues.extend(generic_issues)
+        hashes.update(generic_hashes)
+        if issues or not hashes:
+            raise _error(
+                "evidence_scope_mismatch",
+                "current required evidence is incomplete",
+                issues=issues,
+            )
+        return tuple(sorted(hashes))
+
+    def approve(
+        self,
+        task_id: str,
+        *,
+        stage: str,
+        approved: bool,
+        approver: str,
+        rationale: str,
+        evidence_refs: tuple[str, ...] = (),
+        idempotency_key: str,
+        proof: str | None = None,
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        if stage not in {"plan", "final"}:
+            raise _error("validation_error", "approval stage must be plan or final")
+        if not isinstance(approved, bool):
+            raise _error("validation_error", "approved must be a boolean")
+        if not isinstance(approver, str) or not approver.strip():
+            raise _error("validation_error", "approver must be non-blank")
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise _error("validation_error", "rationale must be non-blank")
+        refs = tuple(evidence_refs)
+        request = {
+            "stage": stage,
+            "approved": approved,
+            "approver": approver.strip(),
+            "rationale": rationale.strip(),
+            "evidence_refs": list(refs),
+        }
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            prior = self._existing(session, "approve", key, digest)
+            if prior is not None:
+                if not approved:
+                    if session.state is TaskState.REJECTED:
+                        return session
+                    stored_state = self._durable_state(task_id)
+                    if stored_state is not TaskState.REJECTED:
+                        self._append_transition(
+                            replace(session, state=stored_state),
+                            TaskState.REJECTED,
+                            reason=f"trusted {stage} rejection recorded",
+                            cause_event_hash=prior.event_hashes[-1],
+                        )
+                        return self.get(task_id)
+                    return session
+                if (
+                    stage == "plan"
+                    and approved
+                    and session.state is TaskState.PLANNED
+                ):
+                    self._append_transition(
+                        session,
+                        TaskState.APPROVED,
+                        reason="trusted plan approval recorded",
+                        cause_event_hash=prior.event_hashes[-1],
+                    )
+                    return self.get(task_id)
+                if (
+                    stage == "final"
+                    and approved
+                    and session.state is TaskState.BLOCKED
+                    and not session.unresolved_intents
+                ):
+                    self._append_transition(
+                        session,
+                        TaskState.EXECUTING,
+                        reason="trusted final approval resolved completion escalation",
+                        cause_event_hash=prior.event_hashes[-1],
+                    )
+                    return self.get(task_id)
+                return session
+
+            decision = self._authoritative_event(
+                task_id,
+                "approve",
+                key,
+                digest,
+                AuditEventType.HUMAN_DECISION,
+            )
+            if decision is None:
+                if session.terminal:
+                    raise _error("task_terminal", "terminal task cannot be approved")
+                if stage == "plan" and session.state is not TaskState.PLANNED:
+                    raise _error("invalid_transition", "plan decision requires planned state")
+                if stage == "final" and session.state not in {
+                    TaskState.EXECUTING,
+                    TaskState.BLOCKED,
+                }:
+                    raise _error(
+                        "invalid_transition",
+                        "final decision requires executing or completion-blocked state",
+                    )
+                if (
+                    stage == "final"
+                    and session.state is TaskState.BLOCKED
+                    and session.unresolved_intents
+                ):
+                    raise _error(
+                        "unresolved_action_intent",
+                        "final approval cannot resolve an uncertain action",
+                    )
+                self._authorize(approver.strip(), stage, proof)
+                self._validate_evidence_refs(task_id, refs)
+                if stage == "final" and approved and set(refs) != set(
+                    self._current_evidence(session)
+                ):
+                    raise _error(
+                        "evidence_scope_mismatch",
+                        "final approval must cite the exact current evidence set",
+                    )
+                metadata = self._operation_metadata(
+                    task_id,
+                    "approve",
+                    key,
+                    digest,
+                )
+                if approved:
+                    decision = self.runtime.approve(
+                        self._contract(session),
+                        stage,
+                        approver.strip(),
+                        rationale.strip(),
+                        evidence_refs=refs,
+                        metadata=metadata,
+                    )
+                else:
+                    decision = self.runtime.reject(
+                        self._contract(session),
+                        stage,
+                        approver.strip(),
+                        rationale.strip(),
+                        metadata=metadata,
+                    )
+            if not approved:
+                self._append_transition(
+                    session,
+                    TaskState.REJECTED,
+                    reason=f"trusted {stage} rejection recorded",
+                    cause_event_hash=decision.entry_hash,
+                )
+                return self.get(task_id)
+            if stage == "final" and session.state is TaskState.BLOCKED:
+                operation = self._append_operation(
+                    session,
+                    "approve",
+                    key,
+                    digest,
+                    request,
+                    {
+                        "stage": stage,
+                        "approved": True,
+                        "decision_event_hash": decision.entry_hash,
+                    },
+                )
+                self._append_transition(
+                    session,
+                    TaskState.EXECUTING,
+                    reason="trusted final approval resolved completion escalation",
+                    cause_event_hash=operation.entry_hash,
+                )
+                return self.get(task_id)
+            if stage == "plan" and session.state is TaskState.PLANNED:
+                self._append_transition(
+                    session,
+                    TaskState.APPROVED,
+                    reason="trusted plan approval recorded",
+                    cause_event_hash=decision.entry_hash,
+                )
+                session = self.get(task_id)
+            self._append_operation(
+                session,
+                "approve",
+                key,
+                digest,
+                request,
+                {
+                    "stage": stage,
+                    "approved": approved,
+                    "decision_event_hash": decision.entry_hash,
+                },
+            )
+            return self.get(task_id)
+
+    def verify(
+        self,
+        task_id: str,
+        requirement_id: str,
+        *,
+        idempotency_key: str,
+        mode: str = "execute",
+        evidence_hash: str | None = None,
+        approved: bool | None = None,
+        approver: str | None = None,
+        rationale: str | None = None,
+        proof: str | None = None,
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        if not isinstance(requirement_id, str) or not requirement_id.strip():
+            raise _error("validation_error", "requirement_id must be non-blank")
+        if mode not in {"execute", "manual"}:
+            raise _error("validation_error", "verify mode must be execute or manual")
+        request: dict[str, Any] = {
+            "requirement_id": requirement_id.strip(),
+            "mode": mode,
+        }
+        if mode == "manual":
+            request.update(
+                {
+                    "evidence_hash": evidence_hash,
+                    "approved": approved,
+                    "approver": approver,
+                    "rationale": rationale,
+                }
+            )
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            prior = self._existing(session, "verify", key, digest)
+            if prior is not None:
+                response = prior.response if isinstance(prior.response, Mapping) else {}
+                evidence_hash_value = response.get("event_hash")
+                evidence_event = next(
+                    (
+                        event
+                        for event in self.ledger.events_for_contract(
+                            task_id, all_segments=True
+                        )
+                        if event.entry_hash == evidence_hash_value
+                    ),
+                    None,
+                )
+                must_block = response.get("status") in {
+                    "blocked",
+                    "timeout",
+                    "error",
+                } or bool(
+                    evidence_event
+                    and evidence_event.payload.get("mutates_task") is True
+                )
+                if must_block and session.state is TaskState.EXECUTING:
+                    self._append_transition(
+                        session,
+                        TaskState.BLOCKED,
+                        reason=f"verification ended with {response.get('status')}",
+                        cause_event_hash=prior.event_hashes[-1],
+                    )
+                    return self.get(task_id)
+                return session
+            session = self._ensure_executing(session)
+            contract = self._contract(session)
+            requirement = next(
+                (
+                    item
+                    for item in contract.verification_requirements
+                    if item.id == requirement_id.strip()
+                ),
+                None,
+            )
+            if requirement is None:
+                raise _error("requirement_not_found", "verification requirement not found")
+            if requirement.manual != (mode == "manual"):
+                raise _error("requirement_mode_mismatch", "verification mode differs from contract")
+            if not requirement.manual and not self.policy.allows_verification(
+                requirement.argv
+            ):
+                raise _error(
+                    "policy_denied",
+                    "verification argv is not in the current server allowlist",
+                )
+            operation_id = self._operation_id(task_id, "verify", key, digest)
+            if mode == "manual":
+                if (
+                    not isinstance(evidence_hash, str)
+                    or evidence_hash not in self._scoped_hashes(task_id)
+                    or not isinstance(approved, bool)
+                    or not isinstance(approver, str)
+                    or not approver.strip()
+                    or not isinstance(rationale, str)
+                    or not rationale.strip()
+                ):
+                    raise _error("validation_error", "manual verification fields are invalid")
+                decision = self._authoritative_event(
+                    task_id,
+                    "verify",
+                    key,
+                    digest,
+                    AuditEventType.HUMAN_DECISION,
+                )
+                if decision is None:
+                    self._authorize(approver.strip(), "verification", proof)
+                    decision = self.runtime.record_manual_verification(
+                        contract,
+                        requirement.id,
+                        evidence_hash=evidence_hash,
+                        approved=approved,
+                        approver=approver.strip(),
+                        rationale=rationale.strip(),
+                        metadata=self._operation_metadata(
+                            task_id,
+                            "verify",
+                            key,
+                            digest,
+                        ),
+                    )
+                self._append_operation(
+                    session,
+                    "verify",
+                    key,
+                    digest,
+                    request,
+                    {
+                        "requirement_id": requirement.id,
+                        "status": "pass" if approved else "fail",
+                        "evidence_hash": evidence_hash,
+                        "decision_hash": decision.entry_hash,
+                    },
+                )
+                return self.get(task_id)
+
+            intent: LedgerEvent | None = None
+            descriptor = {"kind": "verify", "requirement_id": requirement.id}
+
+            def before_effect() -> None:
+                nonlocal intent
+                intent = self.ledger.append(
+                    AuditEventType.TASK_ACTION_INTENT,
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "task_id": task_id,
+                        "operation": "verify",
+                        "operation_id": operation_id,
+                        "idempotency_key": key,
+                        "request_sha256": digest,
+                        "descriptor": descriptor,
+                    },
+                    contract_id=task_id,
+                )
+
+            result = self.runtime.verify_requirement(
+                contract,
+                requirement.id,
+                before_effect=before_effect,
+                transition_on_failure=False,
+            )
+            if intent is None:
+                raise RuntimeError("verification completed without durable intent")
+            result_event = self.ledger.append(
+                AuditEventType.TASK_ACTION_RESULT,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "task_id": task_id,
+                    "operation": "verify",
+                    "operation_id": operation_id,
+                    "idempotency_key": key,
+                    "request_sha256": digest,
+                    "descriptor": descriptor,
+                    "outcome": "completed",
+                    "result": result.to_dict(),
+                    "response": result.to_dict(),
+                    "provenance_event_hashes": [result.event_hash],
+                },
+                contract_id=task_id,
+            )
+            evidence_event = next(
+                (
+                    event
+                    for event in self.ledger.events_for_contract(task_id, all_segments=True)
+                    if event.entry_hash == result.event_hash
+                ),
+                None,
+            )
+            unsafe = bool(evidence_event and evidence_event.payload.get("mutates_task") is True)
+            if result.status in {"blocked", "timeout", "error"} or unsafe:
+                self._append_transition(
+                    self.get(task_id),
+                    TaskState.BLOCKED,
+                    reason=f"verification ended with {result.status}",
+                    cause_event_hash=result_event.entry_hash,
+                )
+            return self.get(task_id)
+
+    def verdict(
+        self,
+        task_id: str,
+        *,
+        verifier: str,
+        status: str,
+        rationale: str,
+        severity: str = "normal",
+        evidence_refs: tuple[str, ...] = (),
+        idempotency_key: str,
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        if status not in {"pass", "fail"} or severity not in {"normal", "critical"}:
+            raise _error("validation_error", "invalid verifier status or severity")
+        if not isinstance(verifier, str) or not verifier.strip():
+            raise _error("validation_error", "verifier must be non-blank")
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise _error("validation_error", "verifier rationale must be non-blank")
+        refs = tuple(evidence_refs)
+        request = {
+            "verifier": verifier.strip(),
+            "status": status,
+            "rationale": rationale.strip(),
+            "severity": severity,
+            "evidence_refs": list(refs),
+        }
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            if self._existing(session, "verdict", key, digest) is not None:
+                return session
+            session = self._ensure_executing(session)
+            self._validate_evidence_refs(task_id, refs)
+            decision = VerifierDecision(
+                verifier.strip(),
+                status,
+                rationale.strip(),
+                severity=severity,
+                evidence_refs=refs,
+            )
+            event = self._authoritative_event(
+                task_id,
+                "verdict",
+                key,
+                digest,
+                AuditEventType.VERIFIER_DECISION,
+            )
+            if event is None:
+                current_refs = self._current_evidence(session)
+                if status == "pass" and set(refs) != set(current_refs):
+                    raise _error(
+                        "evidence_scope_mismatch",
+                        "pass verdict must cite the exact current evidence set",
+                    )
+                event = self.runtime.record_verifier(
+                    self._contract(session),
+                    decision,
+                    metadata=self._operation_metadata(
+                        task_id,
+                        "verdict",
+                        key,
+                        digest,
+                    ),
+                )
+            else:
+                current_refs = refs
+            self._append_operation(
+                session,
+                "verdict",
+                key,
+                digest,
+                request,
+                {
+                    "decision": decision.to_dict(),
+                    "decision_event_hash": event.entry_hash,
+                    "current_evidence_refs": list(current_refs),
+                },
+            )
+            return self.get(task_id)
+
+    def complete(self, task_id: str, *, idempotency_key: str) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        request: dict[str, Any] = {}
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            prior = self._existing(session, "complete", key, digest)
+            if prior is not None:
+                response = prior.response
+                if not isinstance(response, Mapping):
+                    raise _error(
+                        "invalid_task_event",
+                        "complete operation response must be an object",
+                    )
+                gate_response = response.get("gate")
+                gate_event_hash = response.get("gate_event_hash")
+                if (
+                    not isinstance(gate_response, Mapping)
+                    or not isinstance(gate_event_hash, str)
+                ):
+                    raise _error(
+                        "invalid_task_event",
+                        "complete operation must cite its gate response",
+                    )
+                gate_value = gate_response.get("decision")
+                if (
+                    gate_value
+                    in {GateDecision.ESCALATE.value, GateDecision.STOP.value}
+                    and session.state is TaskState.BLOCKED
+                    and any(
+                        intent.kind == "completion"
+                        and intent.operation_id == prior.operation_id
+                        for intent in session.unresolved_intents
+                    )
+                ):
+                    stored_state = self._durable_state(task_id)
+                    if stored_state is not TaskState.BLOCKED:
+                        self._append_transition(
+                            replace(session, state=stored_state),
+                            TaskState.BLOCKED,
+                            reason="completion gate requires intervention",
+                            cause_event_hash=prior.event_hashes[-1],
+                        )
+                        return self.get(task_id)
+                    return session
+                if session.state is not TaskState.EXECUTING:
+                    return session
+                self._assert_completion_snapshot_current(
+                    task_id,
+                    gate_event_hash,
+                    operation_event_hash=prior.event_hashes[-1],
+                )
+                if gate_value == GateDecision.PASS.value:
+                    self._append_transition(
+                        session,
+                        TaskState.VERIFIED,
+                        reason="completion gate passed",
+                        cause_event_hash=prior.event_hashes[-1],
+                    )
+                    return self.get(task_id)
+                if (
+                    gate_value in {GateDecision.ESCALATE.value, GateDecision.STOP.value}
+                ):
+                    self._append_transition(
+                        session,
+                        TaskState.BLOCKED,
+                        reason="completion gate requires intervention",
+                        cause_event_hash=prior.event_hashes[-1],
+                    )
+                    return self.get(task_id)
+                return session
+            if session.terminal:
+                raise _error("task_terminal", "terminal task cannot complete again")
+            gate_event = self._authoritative_event(
+                task_id,
+                "complete",
+                key,
+                digest,
+                AuditEventType.GATE_DECISION,
+            )
+            if gate_event is None:
+                session = self._ensure_executing(session)
+                if session.unresolved_intents:
+                    raise _error("task_blocked", "unresolved intent blocks completion")
+                metadata = self._operation_metadata(
+                    task_id,
+                    "complete",
+                    key,
+                    digest,
+                )
+                metadata["completion_workspace_fingerprint_sha256"] = (
+                    self._workspace_fingerprint_digest()
+                )
+                gate = self.runtime.complete(
+                    self._contract(session),
+                    min_passes=2,
+                    event_metadata=metadata,
+                )
+                gate_event = next(
+                    event
+                    for event in reversed(
+                        self.ledger.events_for_contract(task_id, all_segments=True)
+                    )
+                    if event.event_type == AuditEventType.GATE_DECISION.value
+                    and event.payload.get("operation") == "complete"
+                    and event.payload.get("idempotency_key") == key
+                )
+            else:
+                matching_completion = tuple(
+                    intent
+                    for intent in session.unresolved_intents
+                    if intent.kind == "completion"
+                    and intent.operation_id
+                    == gate_event.payload.get("operation_id")
+                )
+                if session.unresolved_intents and len(matching_completion) != len(
+                    session.unresolved_intents
+                ):
+                    raise _error("task_blocked", "another unresolved intent blocks completion")
+                gate = GateResult(
+                    GateDecision(gate_event.payload["decision"]),
+                    tuple(gate_event.payload.get("reasons", ())),
+                )
+            self._assert_completion_snapshot_current(
+                task_id,
+                gate_event.entry_hash,
+            )
+            operation = self._append_operation(
+                session,
+                "complete",
+                key,
+                digest,
+                request,
+                {"gate": gate.to_dict(), "gate_event_hash": gate_event.entry_hash},
+            )
+            session = self.get(task_id)
+            durable_state = self._durable_state(task_id)
+            transition_session = replace(session, state=durable_state)
+            self._assert_completion_snapshot_current(
+                    task_id,
+                gate_event.entry_hash,
+                operation_event_hash=operation.entry_hash,
+            )
+            if gate.decision is GateDecision.PASS:
+                self._append_transition(
+                    transition_session,
+                    TaskState.VERIFIED,
+                    reason="completion gate passed",
+                    cause_event_hash=operation.entry_hash,
+                )
+            elif gate.decision in {GateDecision.ESCALATE, GateDecision.STOP}:
+                if durable_state is not TaskState.BLOCKED:
+                    self._append_transition(
+                        transition_session,
+                        TaskState.BLOCKED,
+                        reason="completion gate requires intervention",
+                        cause_event_hash=operation.entry_hash,
+                    )
+            return self.get(task_id)
+
+    def append_evidence(
+        self,
+        task_id: str,
+        kind: str,
+        payload: Mapping[str, Any],
+        *,
+        artifact_paths: tuple[str | Path, ...] = (),
+        idempotency_key: str,
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        safe_kinds = {
+            EvidenceKind.TEST_OUTPUT.value,
+            EvidenceKind.BROWSER_DIFF.value,
+            EvidenceKind.ARTIFACT_HASH.value,
+            EvidenceKind.TOOL_OUTPUT.value,
+            EvidenceKind.A11Y_REPORT.value,
+        }
+        if kind not in safe_kinds or not isinstance(payload, Mapping):
+            raise _error("evidence_kind_not_declared", "evidence kind is not MCP-safe")
+        allowed_payload = {"summary", "status", "details"}
+        if set(payload) - allowed_payload:
+            raise _error(
+                "validation_error",
+                "evidence payload contains reserved or unknown fields",
+                fields=sorted(set(payload) - allowed_payload),
+            )
+        summary = payload.get("summary")
+        status = payload.get("status")
+        details = payload.get("details", {})
+        if not isinstance(summary, str) or not summary.strip():
+            raise _error("validation_error", "evidence summary must be non-blank")
+        if status not in {"pass", "fail", "info"}:
+            raise _error("validation_error", "evidence status must be pass, fail, or info")
+        if not isinstance(details, Mapping):
+            raise _error("validation_error", "evidence details must be an object")
+        safe_payload = {
+            "summary": summary.strip(),
+            "status": status,
+            "details": dict(details),
+            "mutates_task": False,
+        }
+        request = {
+            "kind": kind,
+            "payload": safe_payload,
+            "artifact_paths": [str(item) for item in artifact_paths],
+        }
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            if self._existing(session, "append_evidence", key, digest) is not None:
+                return session
+            session = self._ensure_executing(session)
+            contract = self._contract(session)
+            declared = {item.kind_value for item in contract.evidence_required}
+            if kind not in declared:
+                raise _error(
+                    "evidence_kind_not_declared",
+                    "evidence kind is not declared by the frozen contract",
+                )
+            resolved = tuple(
+                self._resolve_project_path(path, field_name="artifact_path")
+                for path in artifact_paths
+            )
+            event = self._authoritative_event(
+                task_id,
+                "append_evidence",
+                key,
+                digest,
+                AuditEventType.EVIDENCE,
+            )
+            if event is None:
+                event = self.runtime.record_evidence(
+                    contract,
+                    kind,
+                    {
+                        **safe_payload,
+                        **self._operation_metadata(
+                            task_id,
+                            "append_evidence",
+                            key,
+                            digest,
+                        ),
+                    },
+                    artifact_paths=resolved,
+                )
+            self._append_operation(
+                session,
+                "append_evidence",
+                key,
+                digest,
+                request,
+                {"kind": kind, "evidence_hash": event.entry_hash},
+            )
+            return self.get(task_id)
+
+    def reflect(
+        self,
+        task_id: str,
+        *,
+        idempotency_key: str,
+        failure_scope: str | None = None,
+        failure_ttl_days: int | None = None,
+    ) -> TaskSession:
+        key = _idempotency_key(idempotency_key)
+        if failure_ttl_days is not None and (
+            isinstance(failure_ttl_days, bool)
+            or not isinstance(failure_ttl_days, int)
+            or failure_ttl_days < 1
+        ):
+            raise _error("validation_error", "failure_ttl_days must be a positive integer")
+        request = {
+            "failure_scope": failure_scope,
+            "failure_ttl_days": failure_ttl_days,
+        }
+        digest = canonical_sha256(request)
+        with self.runtime.execution_lock():
+            session = self.get(task_id)
+            intents = [
+                event
+                for event in self.ledger.events_for_contract(task_id, all_segments=True)
+                if event.event_type == TASK_REFLECTION_INTENT
+            ]
+            if session.reflection is not None:
+                intent = intents[-1] if intents else None
+                if (
+                    intent is None
+                    or intent.payload.get("idempotency_key") != key
+                    or intent.payload.get("request_sha256") != digest
+                ):
+                    raise _error("reflection_conflict", "task was reflected with other options")
+                return session
+            if not session.terminal:
+                raise _error("invalid_transition", "only terminal tasks may reflect")
+            pending = next(
+                (item for item in session.unresolved_intents if item.kind == "reflection"),
+                None,
+            )
+            if pending is not None:
+                if pending.idempotency_key != key or pending.request_sha256 != digest:
+                    raise _error("reflection_conflict", "reflection is already in progress")
+                reflection_id = pending.operation_id
+                source_hash = str(pending.descriptor["source_event_hash"])
+                intent_event = next(
+                    event for event in intents if event.payload.get("reflection_id") == reflection_id
+                )
+                created_at = str(intent_event.payload["created_at"])
+            else:
+                terminal_events = [
+                    event
+                    for event in self.ledger.events_for_contract(task_id, all_segments=True)
+                    if event.event_type == STATE_TRANSITION
+                    and event.payload.get("state")
+                    in {TaskState.VERIFIED.value, TaskState.REJECTED.value}
+                ]
+                if not terminal_events:
+                    terminal_events = [
+                        event
+                        for event in self.ledger.events_for_contract(
+                            task_id, all_segments=True
+                        )
+                        if _is_correlated_approval_rejection(event, task_id)
+                    ]
+                if not terminal_events:
+                    raise _error(
+                        "invalid_transition",
+                        "terminal task has no durable terminal transition",
+                    )
+                source_hash = terminal_events[-1].entry_hash
+                reflection_id = sha256_text(f"{task_id}:{source_hash}:reflection:v1")
+                created_at = utc_now()
+                self.ledger.append(
+                    AuditEventType.TASK_REFLECTION_INTENT,
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "task_id": task_id,
+                        "reflection_id": reflection_id,
+                        "source_event_hash": source_hash,
+                        "created_at": created_at,
+                        "idempotency_key": key,
+                        "request_sha256": digest,
+                    },
+                    contract_id=task_id,
+                )
+            reflection = reflect_on_contract(
+                self.ledger,
+                TypedMemory(self.project_root),
+                self._contract(session),
+                failure_scope=failure_scope,
+                failure_ttl_days=failure_ttl_days,
+                reflection_id=reflection_id,
+                created_at=created_at,
+                source_event_hash=source_hash,
+            )
+            response = reflection.to_dict()
+            self.ledger.append(
+                AuditEventType.TASK_REFLECTED,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "task_id": task_id,
+                    "reflection_id": reflection_id,
+                    "source_event_hash": source_hash,
+                    "memory_entry_ids": [
+                        response["retrospective"]["entry_id"],
+                        *[item["entry_id"] for item in response["failures"]],
+                    ],
+                    "response": response,
+                },
+                contract_id=task_id,
+            )
+            return self.get(task_id)
+
+    def get(self, task_id: str, recover: bool = True) -> TaskSession:
+        """Return the durable projection; recovery is derivation-only.
+
+        ``recover`` is retained for the write-capable service layer.  This
+        projection never appends: both modes report an orphan action intent as
+        blocked, while the caller decides whether to record a trusted recovery.
+        """
+
+        if not isinstance(recover, bool):
+            raise _error("invalid_request", "recover must be a boolean")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise _error("invalid_task_id", "task_id must be a non-blank string")
+        task_id = task_id.strip()
+
+        # Verification and the all-segment snapshot must be atomic with respect
+        # to append/rotation; file_lock is re-entrant for verify_chain().
+        with file_lock(self.ledger.path):
+            if not self.ledger.verify_chain():
+                raise _error(
+                    "ledger_integrity_failed",
+                    "ledger hash chain verification failed",
+                    retryable=False,
+                )
+            events = self.ledger.events(all_segments=True)
+
+        return self._project(task_id, events)
+
+    def _project(self, task_id: str, events: list[LedgerEvent]) -> TaskSession:
+        # Detect both directions of a cross-task splice instead of merely
+        # filtering it away.
+        scoped: list[LedgerEvent] = []
+        for event in events:
+            payload_task = event.payload.get("task_id") if isinstance(event.payload, Mapping) else None
+            relevant_type = event.event_type in _TASK_EVENTS
+            if relevant_type and (event.contract_id == task_id or payload_task == task_id):
+                if event.contract_id != task_id or payload_task != task_id:
+                    raise _error(
+                        "task_identity_mismatch",
+                        "task event crosses contract scope",
+                        event_hash=event.entry_hash,
+                        task_id=task_id,
+                        payload_task_id=payload_task,
+                        contract_id=event.contract_id,
+                    )
+            if event.contract_id == task_id:
+                scoped.append(event)
+
+        contracts = [event for event in scoped if event.event_type == GOAL_CONTRACT]
+        starts = [event for event in scoped if event.event_type == TASK_STARTED]
+        if not contracts and not starts:
+            raise _error("task_not_found", f"task not found: {task_id}")
+        if len(contracts) != 1 or len(starts) != 1:
+            raise _error(
+                "invalid_task_cardinality",
+                "task requires exactly one goal_contract and one task_started event",
+                task_id=task_id,
+                goal_contract_count=len(contracts),
+                task_started_count=len(starts),
+            )
+
+        contract_event = contracts[0]
+        start_event = starts[0]
+        if scoped.index(contract_event) > scoped.index(start_event):
+            raise _error(
+                "invalid_task_order",
+                "goal_contract must precede task_started",
+                task_id=task_id,
+            )
+        contract = contract_event.payload
+        if contract.get("goal_id") != task_id:
+            raise _error(
+                "task_identity_mismatch",
+                "goal_contract.goal_id differs from task_id",
+                task_id=task_id,
+                goal_id=contract.get("goal_id"),
+            )
+        try:
+            initial_state = TaskState(contract.get("state", TaskState.PLANNED.value))
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                "invalid_task_contract",
+                "goal_contract.state is not a task state",
+                state=contract.get("state"),
+            ) from exc
+        if initial_state is not TaskState.PLANNED:
+            raise _error(
+                "invalid_task_contract",
+                "task lifecycle contracts must start in planned state",
+                state=initial_state.value,
+            )
+
+        started = _common_payload(start_event, task_id)
+        begin_key = _required_text(started, "idempotency_key", start_event)
+        begin_digest = _request_digest(started, start_event)
+        begin_response = _response(started, start_event)
+
+        idempotency: dict[tuple[str, str], IdempotencyRecord] = {
+            ("begin", begin_key): IdempotencyRecord(
+                operation="begin",
+                idempotency_key=begin_key,
+                request_sha256=begin_digest,
+                operation_id=task_id,
+                request=_freeze(started.get("request")),
+                response=begin_response,
+                outcome="completed",
+                event_hashes=(start_event.entry_hash,),
+            )
+        }
+        operation_ids: dict[str, tuple[str, str]] = {task_id: ("begin", begin_key)}
+        pending: dict[str, PendingIntent] = {}
+        completion_intents: dict[str, PendingIntent] = {}
+        completion_blocks: dict[str, PendingIntent] = {}
+        authoritative_rejections: dict[str, LedgerEvent] = {}
+        requirement_results: dict[str, Any] = {}
+        for requirement in contract.get("verification_requirements", ()):
+            if isinstance(requirement, Mapping):
+                requirement_id = requirement.get("id")
+                if isinstance(requirement_id, str) and requirement_id:
+                    requirement_results[requirement_id] = _freeze({"status": "pending"})
+
+        state = initial_state
+        terminal_hash: str | None = None
+        reflection: Mapping[str, Any] | None = None
+        reflection_intent: PendingIntent | None = None
+        seen_hashes: set[str] = set()
+        started_seen = False
+
+        for event in scoped:
+            seen_hashes.add(event.entry_hash)
+            if event is start_event:
+                started_seen = True
+                continue
+            if event is contract_event:
+                continue
+            if not started_seen and (
+                event.event_type in _TASK_EVENTS or event.event_type == STATE_TRANSITION
+            ):
+                raise _error(
+                    "invalid_task_order",
+                    "task lifecycle event precedes task_started",
+                    event_hash=event.entry_hash,
+                )
+
+            if event.event_type == STATE_TRANSITION:
+                payload = event.payload
+                if payload.get("task_id") != task_id:
+                    raise _error(
+                        "task_identity_mismatch",
+                        "state transition lacks the matching task_id",
+                        event_hash=event.entry_hash,
+                    )
+                source = _state(payload.get("from_state"), event, "from_state")
+                target = _state(payload.get("state"), event, "state")
+                cause = _required_text(payload, "cause_event_hash", event)
+                if source is not state:
+                    raise _error(
+                        "invalid_task_transition",
+                        "state transition from_state differs from projected state",
+                        event_hash=event.entry_hash,
+                        expected=state.value,
+                        actual=source.value,
+                    )
+                if target not in _TRANSITIONS[source]:
+                    raise _error(
+                        "invalid_task_transition",
+                        f"illegal task state edge {source.value}->{target.value}",
+                        event_hash=event.entry_hash,
+                    )
+                if cause not in seen_hashes - {event.entry_hash}:
+                    raise _error(
+                        "invalid_task_transition",
+                        "cause_event_hash does not cite an earlier task event",
+                        event_hash=event.entry_hash,
+                        cause_event_hash=cause,
+                    )
+                state = target
+                if target is TaskState.BLOCKED:
+                    completed_id = next(
+                        (
+                            operation_id
+                            for operation_id, intent in completion_blocks.items()
+                            if intent.event_hash == cause
+                        ),
+                        None,
+                    )
+                    if completed_id is not None:
+                        completion_blocks.pop(completed_id)
+                if state in {TaskState.VERIFIED, TaskState.REJECTED}:
+                    terminal_hash = event.entry_hash
+                continue
+
+            if (
+                event.event_type == AuditEventType.GATE_DECISION.value
+                and event.payload.get("operation") == "complete"
+                and event.payload.get("decision")
+                in {GateDecision.ESCALATE.value, GateDecision.STOP.value}
+            ):
+                payload = _common_payload(event, task_id)
+                operation_id = _required_text(payload, "operation_id", event)
+                key = _required_text(payload, "idempotency_key", event)
+                digest = _request_digest(payload, event)
+                if operation_id in completion_intents:
+                    raise _error(
+                        "idempotency_conflict",
+                        "completion decision operation_id was already recorded",
+                        event_hash=event.entry_hash,
+                    )
+                completion_intents[operation_id] = PendingIntent(
+                    kind="completion",
+                    operation="complete",
+                    operation_id=operation_id,
+                    idempotency_key=key,
+                    request_sha256=digest,
+                    descriptor=_freeze(
+                        {
+                            "decision": payload["decision"],
+                            "gate_event_hash": event.entry_hash,
+                        }
+                    ),
+                    event_hash=event.entry_hash,
+                )
+                continue
+
+            if _is_correlated_approval_rejection(event, task_id):
+                payload = _common_payload(event, task_id)
+                operation_id = _required_text(payload, "operation_id", event)
+                key = _required_text(payload, "idempotency_key", event)
+                digest = _request_digest(payload, event)
+                stage = _required_text(payload, "stage", event)
+                if stage not in {"plan", "final"}:
+                    raise _error(
+                        "invalid_task_event",
+                        "approval rejection has an invalid stage",
+                        event_hash=event.entry_hash,
+                    )
+                _required_text(payload, "approver", event)
+                _required_text(payload, "rationale", event)
+                scope = ("approve", key)
+                if scope in idempotency or operation_id in operation_ids:
+                    raise _error(
+                        "idempotency_conflict",
+                        "approval rejection key or operation_id was already recorded",
+                        event_hash=event.entry_hash,
+                    )
+                idempotency[scope] = IdempotencyRecord(
+                    operation="approve",
+                    idempotency_key=key,
+                    request_sha256=digest,
+                    operation_id=operation_id,
+                    response=_freeze(
+                        {
+                            "stage": stage,
+                            "approved": False,
+                            "decision_event_hash": event.entry_hash,
+                        }
+                    ),
+                    outcome="completed",
+                    event_hashes=(event.entry_hash,),
+                )
+                operation_ids[operation_id] = scope
+                authoritative_rejections[operation_id] = event
+                terminal_hash = event.entry_hash
+                continue
+
+            if event.event_type == TASK_OPERATION:
+                payload = _common_payload(event, task_id)
+                operation = _required_text(payload, "operation", event)
+                operation_id = _required_text(payload, "operation_id", event)
+                key = _required_text(payload, "idempotency_key", event)
+                digest = _request_digest(payload, event)
+                scope = (operation, key)
+                if scope in idempotency or operation_id in operation_ids:
+                    rejection = authoritative_rejections.get(operation_id)
+                    existing = idempotency.get(scope)
+                    response = _response(payload, event)
+                    if (
+                        rejection is not None
+                        and existing is not None
+                        and operation == "approve"
+                        and existing.operation_id == operation_id
+                        and existing.request_sha256 == digest
+                        and isinstance(response, Mapping)
+                        and response.get("approved") is False
+                        and response.get("decision_event_hash")
+                        == rejection.entry_hash
+                    ):
+                        idempotency[scope] = replace(
+                            existing,
+                            response=response,
+                            outcome=_outcome(payload, event),
+                            event_hashes=existing.event_hashes + (event.entry_hash,),
+                        )
+                        continue
+                    if state in {TaskState.VERIFIED, TaskState.REJECTED}:
+                        raise _error(
+                            "invalid_terminal_task",
+                            "terminal task contains a new task operation",
+                            event_hash=event.entry_hash,
+                        )
+                    raise _error(
+                        "idempotency_conflict",
+                        "task operation key or operation_id was already recorded",
+                        event_hash=event.entry_hash,
+                        operation=operation,
+                        idempotency_key=key,
+                        operation_id=operation_id,
+                    )
+                if state in {TaskState.VERIFIED, TaskState.REJECTED}:
+                    raise _error(
+                        "invalid_terminal_task",
+                        "terminal task contains a new task operation",
+                        event_hash=event.entry_hash,
+                    )
+                response = _response(payload, event)
+                record = IdempotencyRecord(
+                    operation=operation,
+                    idempotency_key=key,
+                    request_sha256=digest,
+                    operation_id=operation_id,
+                    request=_freeze(payload.get("request")),
+                    response=response,
+                    outcome=_outcome(payload, event),
+                    event_hashes=(event.entry_hash,),
+                )
+                idempotency[scope] = record
+                operation_ids[operation_id] = scope
+
+                if operation == "complete":
+                    completion_intent = completion_intents.get(operation_id)
+                    response_map = response if isinstance(response, Mapping) else {}
+                    if completion_intent is not None:
+                        if (
+                            completion_intent.idempotency_key != key
+                            or completion_intent.request_sha256 != digest
+                            or response_map.get("gate_event_hash")
+                            != completion_intent.event_hash
+                        ):
+                            raise _error(
+                                "invalid_task_event",
+                                "complete operation differs from its escalation decision",
+                                event_hash=event.entry_hash,
+                        )
+                        completion_intents.pop(operation_id)
+                    gate_response = response_map.get("gate")
+                    if (
+                        isinstance(gate_response, Mapping)
+                        and gate_response.get("decision")
+                        in {GateDecision.ESCALATE.value, GateDecision.STOP.value}
+                    ):
+                        completion_blocks[operation_id] = PendingIntent(
+                            kind="completion",
+                            operation="complete",
+                            operation_id=operation_id,
+                            idempotency_key=key,
+                            request_sha256=digest,
+                            descriptor=_freeze(
+                                {
+                                    "decision": gate_response["decision"],
+                                    "gate_event_hash": response_map.get(
+                                        "gate_event_hash"
+                                    ),
+                                }
+                            ),
+                            event_hash=event.entry_hash,
+                        )
+                elif operation == "verify":
+                    response_map = response if isinstance(response, Mapping) else {}
+                    requirement_id = payload.get("requirement_id") or response_map.get(
+                        "requirement_id"
+                    )
+                    if not isinstance(requirement_id, str) or not requirement_id.strip():
+                        raise _error(
+                            "invalid_task_event",
+                            "verify operation must identify requirement_id",
+                            event_hash=event.entry_hash,
+                        )
+                    requirement_results[requirement_id.strip()] = _freeze(
+                        {
+                            "outcome": record.outcome,
+                            "response": _thaw(response),
+                            "event_hash": event.entry_hash,
+                        }
+                    )
+                elif operation == "resolve":
+                    response_map = response if isinstance(response, Mapping) else {}
+                    target_id = response_map.get("operation_id") or response_map.get(
+                        "target_operation_id"
+                    )
+                    resolution = response_map.get("resolution")
+                    if target_id not in pending or resolution not in {
+                        "applied",
+                        "not_applied",
+                        "reject",
+                    }:
+                        raise _error(
+                            "invalid_recovery",
+                            "resolve must target one pending action with a valid resolution",
+                            event_hash=event.entry_hash,
+                            operation_id=target_id,
+                            resolution=resolution,
+                        )
+                    intent = pending.pop(target_id)
+                    original_scope = (intent.operation, intent.idempotency_key)
+                    original = idempotency[original_scope]
+                    idempotency[original_scope] = replace(
+                        original,
+                        response=_freeze(
+                            {
+                                "resolution": resolution,
+                                "resolution_event_hash": event.entry_hash,
+                            }
+                        ),
+                        outcome=f"resolved:{resolution}",
+                        event_hashes=original.event_hashes + (event.entry_hash,),
+                    )
+                continue
+
+            if event.event_type == TASK_ACTION_INTENT:
+                payload = _common_payload(event, task_id)
+                if state is not TaskState.EXECUTING:
+                    raise _error(
+                        "invalid_task_state",
+                        "action intent requires executing state",
+                        event_hash=event.entry_hash,
+                        state=state.value,
+                    )
+                operation = _required_text(payload, "operation", event)
+                operation_id = _required_text(payload, "operation_id", event)
+                key = _required_text(payload, "idempotency_key", event)
+                digest = _request_digest(payload, event)
+                if "descriptor" not in payload:
+                    raise _error(
+                        "invalid_task_event",
+                        "task_action_intent.descriptor is required",
+                        event_hash=event.entry_hash,
+                    )
+                scope = (operation, key)
+                if scope in idempotency or operation_id in operation_ids:
+                    raise _error(
+                        "idempotency_conflict",
+                        "action key or operation_id was already recorded",
+                        event_hash=event.entry_hash,
+                    )
+                descriptor = _freeze(payload["descriptor"])
+                intent = PendingIntent(
+                    kind="action",
+                    operation=operation,
+                    operation_id=operation_id,
+                    idempotency_key=key,
+                    request_sha256=digest,
+                    descriptor=descriptor,
+                    event_hash=event.entry_hash,
+                )
+                pending[operation_id] = intent
+                idempotency[scope] = IdempotencyRecord(
+                    operation=operation,
+                    idempotency_key=key,
+                    request_sha256=digest,
+                    operation_id=operation_id,
+                    request=descriptor,
+                    event_hashes=(event.entry_hash,),
+                )
+                operation_ids[operation_id] = scope
+                continue
+
+            if event.event_type == TASK_ACTION_RESULT:
+                payload = _common_payload(event, task_id)
+                operation = _required_text(payload, "operation", event)
+                operation_id = _required_text(payload, "operation_id", event)
+                key = _required_text(payload, "idempotency_key", event)
+                digest = _request_digest(payload, event)
+                intent = pending.get(operation_id)
+                if intent is None:
+                    raise _error(
+                        "orphan_action_result",
+                        "action result has no pending intent",
+                        event_hash=event.entry_hash,
+                        operation_id=operation_id,
+                    )
+                if (
+                    intent.operation != operation
+                    or intent.idempotency_key != key
+                    or intent.request_sha256 != digest
+                ):
+                    raise _error(
+                        "action_result_mismatch",
+                        "action result identity differs from its intent",
+                        event_hash=event.entry_hash,
+                        operation_id=operation_id,
+                    )
+                if (
+                    "descriptor" not in payload
+                    or _freeze(payload["descriptor"]) != intent.descriptor
+                ):
+                    raise _error(
+                        "action_result_mismatch",
+                        "action result descriptor differs from its intent",
+                        event_hash=event.entry_hash,
+                        operation_id=operation_id,
+                    )
+                provenance = payload.get("provenance_event_hashes")
+                if not isinstance(provenance, list) or not provenance or any(
+                    not isinstance(item, str) or item not in seen_hashes - {event.entry_hash}
+                    for item in provenance
+                ):
+                    raise _error(
+                        "invalid_action_provenance",
+                        "action result must cite earlier ledger evidence",
+                        event_hash=event.entry_hash,
+                        operation_id=operation_id,
+                    )
+                if "result" not in payload:
+                    raise _error(
+                        "invalid_task_event",
+                        "task_action_result.result is required",
+                        event_hash=event.entry_hash,
+                    )
+                scope = (operation, key)
+                original = idempotency[scope]
+                idempotency[scope] = replace(
+                    original,
+                    response=_response(payload, event),
+                    outcome=_outcome(payload, event),
+                    event_hashes=original.event_hashes + (event.entry_hash,),
+                )
+                pending.pop(operation_id)
+                continue
+
+            if event.event_type == TASK_REFLECTION_INTENT:
+                payload = _common_payload(event, task_id)
+                reflection_id = _required_text(payload, "reflection_id", event)
+                source_hash = _required_text(payload, "source_event_hash", event)
+                if terminal_hash is None or source_hash != terminal_hash:
+                    raise _error(
+                        "invalid_reflection",
+                        "reflection must cite the current terminal transition",
+                        event_hash=event.entry_hash,
+                        source_event_hash=source_hash,
+                        terminal_event_hash=terminal_hash,
+                    )
+                if reflection is not None or reflection_intent is not None:
+                    raise _error(
+                        "reflection_conflict",
+                        "task already has a reflection intent or manifest",
+                        event_hash=event.entry_hash,
+                    )
+                key = payload.get("idempotency_key", reflection_id)
+                digest = payload.get(
+                    "request_sha256", canonical_sha256({"source_event_hash": source_hash})
+                )
+                if not isinstance(key, str) or not key.strip() or not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+                    raise _error(
+                        "invalid_task_event",
+                        "reflection idempotency fields are invalid",
+                        event_hash=event.entry_hash,
+                    )
+                reflection_intent = PendingIntent(
+                    kind="reflection",
+                    operation="reflect",
+                    operation_id=reflection_id,
+                    idempotency_key=key.strip(),
+                    request_sha256=digest,
+                    descriptor=_freeze({"source_event_hash": source_hash}),
+                    event_hash=event.entry_hash,
+                )
+                continue
+
+            if event.event_type == TASK_REFLECTED:
+                payload = _common_payload(event, task_id)
+                reflection_id = _required_text(payload, "reflection_id", event)
+                source_hash = _required_text(payload, "source_event_hash", event)
+                if (
+                    reflection_intent is None
+                    or reflection_intent.operation_id != reflection_id
+                    or reflection_intent.descriptor["source_event_hash"] != source_hash
+                ):
+                    raise _error(
+                        "orphan_reflection_result",
+                        "reflection manifest has no matching intent",
+                        event_hash=event.entry_hash,
+                    )
+                memory_ids = payload.get("memory_entry_ids")
+                if not isinstance(memory_ids, list) or any(
+                    not isinstance(item, str) or not item.strip() for item in memory_ids
+                ) or len(memory_ids) != len(set(memory_ids)):
+                    raise _error(
+                        "invalid_reflection",
+                        "memory_entry_ids must be a unique string array",
+                        event_hash=event.entry_hash,
+                    )
+                reflection = _freeze(
+                    {
+                        "reflection_id": reflection_id,
+                        "source_event_hash": source_hash,
+                        "memory_entry_ids": list(memory_ids),
+                        "response": _thaw(_response(payload, event)),
+                        "event_hash": event.entry_hash,
+                    }
+                )
+                reflection_intent = None
+                continue
+
+            # Evidence written by Spec 002 is also useful when a process died
+            # before its task_operation result was recorded.
+            if event.event_type == "evidence" and event.payload.get("kind") == "verification_result":
+                requirement_id = event.payload.get("requirement_id")
+                if isinstance(requirement_id, str) and requirement_id.strip():
+                    requirement_results[requirement_id.strip()] = _freeze(
+                        {
+                            "status": event.payload.get("status", "recorded"),
+                            "evidence_event_hash": event.entry_hash,
+                        }
+                    )
+
+        unresolved = tuple(pending.values())
+        unresolved += tuple(completion_intents.values())
+        unresolved += tuple(completion_blocks.values())
+        if reflection_intent is not None:
+            unresolved += (reflection_intent,)
+        action_orphan = any(intent.kind == "action" for intent in unresolved)
+        completion_orphan = any(
+            intent.kind == "completion" for intent in unresolved
+        )
+        rejection_event = (
+            tuple(authoritative_rejections.values())[-1]
+            if authoritative_rejections
+            else None
+        )
+        if action_orphan and (
+            state in {TaskState.VERIFIED, TaskState.REJECTED}
+            or rejection_event is not None
+        ):
+            raise _error(
+                "invalid_terminal_task",
+                "terminal task contains an unresolved action intent",
+                task_id=task_id,
+            )
+        if completion_orphan and state in {
+            TaskState.VERIFIED,
+            TaskState.REJECTED,
+        }:
+            raise _error(
+                "invalid_terminal_task",
+                "terminal task contains an unfinished completion decision",
+                task_id=task_id,
+            )
+        if rejection_event is not None:
+            projected_state = TaskState.REJECTED
+            terminal_hash = terminal_hash or rejection_event.entry_hash
+        elif action_orphan or completion_orphan:
+            projected_state = TaskState.BLOCKED
+        else:
+            projected_state = state
+
+        frozen_idempotency = MappingProxyType(dict(idempotency))
+        frozen_requirements = MappingProxyType(dict(requirement_results))
+        frozen_contract = _freeze(dict(contract))
+        return TaskSession(
+            schema_version=SCHEMA_VERSION,
+            task_id=task_id,
+            contract_id=task_id,
+            contract_snapshot=frozen_contract,
+            contract_hash=canonical_sha256(contract),
+            state=projected_state,
+            phase=_phase(projected_state, unresolved, reflection),
+            requirement_results=frozen_requirements,
+            idempotency=frozen_idempotency,
+            unresolved_intents=unresolved,
+            reflection=reflection,
+            event_hashes=tuple(event.entry_hash for event in scoped),
+            terminal=projected_state in {TaskState.VERIFIED, TaskState.REJECTED},
+            allowed_next=_allowed_next(projected_state, unresolved, reflection),
+            blocked_reason=(
+                "unresolved action intent"
+                if action_orphan
+                else "unfinished completion decision"
+                if completion_orphan
+                else None
+            ),
+        )
+
+
+__all__ = [
+    "IdempotencyRecord",
+    "PendingIntent",
+    "TaskLifecycle",
+    "TaskLifecycleError",
+    "TaskSession",
+    "TaskState",
+    "canonical_sha256",
+]

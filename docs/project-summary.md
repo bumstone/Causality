@@ -1,12 +1,11 @@
 # Causality Project Summary
 
-Baseline: `406` tests pass; Git and ledger retain commit history.
+Baseline: `453` tests pass; Git and ledger retain commit history.
 
 ## What It Is
 
-Causality is a local-first control harness for agent work. It binds a goal
-contract, gates execution, records evidence, then reflects verified outcomes
-into memory and skills.
+Causality is a local-first agent control harness. It binds a goal contract,
+gates execution, records evidence, and reflects verified outcomes.
 
 ## Current Truth
 
@@ -22,11 +21,11 @@ into memory and skills.
 | Skills | Earned skills can be distilled, promoted, deduped, recalled, and injected. |
 | Redaction | Skill distillation masks sensitive keys, nested secrets, tokens, and auth headers. |
 | Install | Client-native MCP config, host-safe adoption, handshake/report; context omits raw ledger payloads and paths reject symlink escape. |
+| MCP lifecycle | Closed tools persist task actions, verification, completion, recovery, and reflection. |
 
 ## Still Not Proven
 
 - API/browser execution through the file/subprocess contract path.
-- Durable MCP task lifecycle operations for begin, action, verification, and completion.
 - Engine execution of vendored playbook phases; they currently guide the agent.
 - Durable MCP resume and earned-skill outcome/promotion operations.
 

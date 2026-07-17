@@ -141,6 +141,19 @@ class ReflectTests(unittest.TestCase):
             for failure in reflection.failures:
                 self.assertEqual(failure.metadata["scope"], scope)
 
+    def test_reflect_reads_contract_events_across_rotated_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime, memory, contract = self._setup(temp_dir)
+            self.assertIsNotNone(runtime.ledger.rotate())
+
+            reflection = reflect_on_contract(runtime.ledger, memory, contract)
+
+            self.assertIn("1 evidence", reflection.retrospective.summary)
+            self.assertIn("2 pass", reflection.retrospective.summary)
+            self.assertIn("1 fail", reflection.retrospective.summary)
+            self.assertIn("repair=1", reflection.retrospective.summary)
+            self.assertEqual(len(reflection.failures), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

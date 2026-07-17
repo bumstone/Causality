@@ -13,7 +13,7 @@ terminal state.
    interpreter pinning, and an explicit active/pending result.
 2. [x] [Verification evidence](../specs/002-verification-evidence.md): execute
    declared checks and bind completion to requirement IDs, exit codes, and hashes.
-3. [ ] [MCP task lifecycle](../specs/003-mcp-task-lifecycle.md): create, approve,
+3. [x] [MCP task lifecycle](../specs/003-mcp-task-lifecycle.md): create, approve,
    act, verify, complete, and reflect one persistent task.
 4. [ ] [API/browser adapters](../specs/004-api-browser-adapters.md): route API and
    A11y actions through the same task gates and evidence model.

@@ -43,6 +43,15 @@ from .doc_budget import (
     over_budget,
 )
 from .browser_adapter import A11yBrowserAdapter
+from .task_lifecycle import (
+    IdempotencyRecord,
+    PendingIntent,
+    TaskLifecycle,
+    TaskLifecycleError,
+    TaskPolicy,
+    TaskSession,
+    TaskState,
+)
 
 __all__ = [
     "ActionType",
@@ -74,6 +83,7 @@ __all__ = [
     "MemoryEntry",
     "MemoryGovernanceError",
     "PermissionContract",
+    "PendingIntent",
     "Reflection",
     "ReviewBatch",
     "ReviewResult",
@@ -84,13 +94,19 @@ __all__ = [
     "StateTransition",
     "StepOutcome",
     "TaskContract",
+    "TaskLifecycle",
+    "TaskLifecycleError",
+    "TaskPolicy",
     "TaskRun",
+    "TaskSession",
+    "TaskState",
     "TaskType",
     "TypedMemory",
     "VerificationRequirement",
     "VerificationResult",
     "Verifier",
     "VerifierDecision",
+    "IdempotencyRecord",
     "check_docs",
     "format_plan",
     "over_budget",
