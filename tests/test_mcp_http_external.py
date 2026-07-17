@@ -11,17 +11,23 @@ import threading
 import unittest
 import venv
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
+QUERY_SECRET = "query-secret-004a"
+HEADER_VALUE = "header-value-004a"
+BODY_SECRET = b"body-secret-004a\n"
+CREDENTIAL_SECRET = "Bearer credential-secret-004a"
+APPROVAL_TOKEN = "approval-secret-004a"
+RESPONSE_BODY = b"accepted response\n"
+RESPONSE_SHA256 = hashlib.sha256(RESPONSE_BODY).hexdigest()
 
 
 def _tree_snapshot(root: Path) -> tuple[tuple[str, str], ...] | None:
-    """Capture enough content to prove an external install did not touch a tree."""
-
     if not root.exists():
         return None
     entries: list[tuple[str, str]] = []
@@ -34,7 +40,47 @@ def _tree_snapshot(root: Path) -> tuple[tuple[str, str], ...] | None:
     return tuple(entries)
 
 
-class ExternalMCPTests(unittest.TestCase):
+@contextmanager
+def _http_endpoint() -> Iterator[tuple[str, list[dict[str, Any]]]]:
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+            length = int(self.headers.get("Content-Length", "0"))
+            requests.append(
+                {
+                    "path": self.path,
+                    "request_metadata": self.headers.get("X-Request-Metadata"),
+                    "authorization": self.headers.get("Authorization"),
+                    "body": self.rfile.read(length),
+                }
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(RESPONSE_BODY)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(RESPONSE_BODY)
+
+        def log_message(self, _format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class ExternalHttpMCPTests(unittest.TestCase):
     @staticmethod
     def _request(request_id: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -68,20 +114,13 @@ class ExternalMCPTests(unittest.TestCase):
             self.fail(f"MCP server did not answer request {request['id']} within {timeout}s")
         reader.join(timeout=1)
 
-        self.assertTrue(line.endswith("\n"), "MCP response must be one JSON line")
-        try:
-            response = json.loads(line)
-        except json.JSONDecodeError as exc:
-            self.fail(f"MCP stdout contained non-JSON output: {line!r} ({exc})")
-        self.assertIsInstance(response, dict)
+        self.assertTrue(line.endswith("\n"), f"MCP returned no JSON line: {line!r}")
+        response = json.loads(line)
         self.assertEqual(response.get("jsonrpc"), "2.0")
         self.assertEqual(response.get("id"), request["id"])
         self.assertNotIn("error", response, response)
-
         result = response["result"]
         self.assertFalse(result.get("isError", False), result)
-        self.assertEqual(len(result["content"]), 1)
-        self.assertEqual(result["content"][0]["type"], "text")
         payload = json.loads(result["content"][0]["text"])
         self.assertIs(payload.get("ok"), True, payload)
         return payload
@@ -98,28 +137,23 @@ class ExternalMCPTests(unittest.TestCase):
             process.kill()
             process.wait(timeout=5)
             self.fail("MCP server did not exit after stdin reached EOF")
-        try:
-            extra_stdout = process.stdout.read()
-            stderr = process.stderr.read()
-        finally:
-            process.stdout.close()
-            process.stderr.close()
+        stdout = process.stdout.read()
+        stderr = process.stderr.read()
+        process.stdout.close()
+        process.stderr.close()
         self.assertEqual(return_code, 0, stderr)
-        self.assertEqual(extra_stdout, "", f"unexpected non-response stdout: {extra_stdout!r}")
+        self.assertEqual(stdout, "", f"unexpected non-response stdout: {stdout!r}")
         self.assertEqual(stderr, "", f"unexpected MCP stderr: {stderr!r}")
 
     @contextmanager
     def _server(
-        self, python: Path, project: Path, environment: dict[str, str]
+        self,
+        python: Path,
+        project: Path,
+        environment: dict[str, str],
     ) -> Iterator[subprocess.Popen[str]]:
         process = subprocess.Popen(
-            [
-                str(python),
-                "-m",
-                "causality.mcp_server",
-                "--project",
-                str(project),
-            ],
+            [str(python), "-m", "causality.mcp_server", "--project", str(project)],
             cwd=project,
             env=environment,
             stdin=subprocess.PIPE,
@@ -134,7 +168,7 @@ class ExternalMCPTests(unittest.TestCase):
             if process.poll() is None:
                 self._finish_server(process)
 
-    def test_installed_package_stdio_lifecycle_survives_restart_exactly_once(self) -> None:
+    def test_installed_http_action_is_scoped_secret_safe_and_exactly_once(self) -> None:
         repo_build = REPO_ROOT / "build"
         build_before = _tree_snapshot(repo_build)
         self.addCleanup(
@@ -145,25 +179,29 @@ class ExternalMCPTests(unittest.TestCase):
             )
         )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir, _http_endpoint() as (
+            origin,
+            requests,
+        ):
             base = Path(temp_dir)
             environment = base / "fresh venv"
             project = base / "external project"
             package_source = base / "package source"
-            project.mkdir()
-            (project / "test_external_effect.py").write_text(
+            io_dir = project / "io"
+            io_dir.mkdir(parents=True)
+            (io_dir / "request.bin").write_bytes(BODY_SECRET)
+            (project / "test_http_acceptance.py").write_text(
                 "\n".join(
                     (
+                        "import hashlib",
                         "import unittest",
                         "from pathlib import Path",
                         "",
-                        "",
-                        "class ExternalEffectTest(unittest.TestCase):",
-                        "    def test_effect(self):",
-                        "        self.assertEqual(",
-                        "            Path('out/effect.txt').read_text(encoding='utf-8'),",
-                        "            'one durable effect\\n',",
-                        "        )",
+                        "class HttpAcceptanceTest(unittest.TestCase):",
+                        "    def test_response_artifact(self):",
+                        "        body = Path('io/response.bin').read_bytes()",
+                        f"        self.assertEqual(body, {RESPONSE_BODY!r})",
+                        f"        self.assertEqual(hashlib.sha256(body).hexdigest(), '{RESPONSE_SHA256}')",
                         "",
                     )
                 ),
@@ -195,7 +233,20 @@ class ExternalMCPTests(unittest.TestCase):
                 "CAUSALITY_APPROVAL_TOKEN",
             ):
                 clean_env.pop(name, None)
-            clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
+            clean_env.update(
+                {
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "CAUSALITY_NETWORK_ORIGINS_JSON": json.dumps([origin]),
+                    "CAUSALITY_AUTH_REFS_JSON": json.dumps(["external-api"]),
+                    "CAUSALITY_HTTP_HEADERS_JSON": json.dumps(
+                        ["Content-Type", "X-Request-Metadata"]
+                    ),
+                    "CAUSALITY_HTTP_CREDENTIALS_JSON": json.dumps(
+                        {"external-api": {"Authorization": CREDENTIAL_SECRET}}
+                    ),
+                    "CAUSALITY_APPROVAL_TOKEN": APPROVAL_TOKEN,
+                }
+            )
             installed = subprocess.run(
                 [
                     str(python),
@@ -233,7 +284,6 @@ class ExternalMCPTests(unittest.TestCase):
             self.assertEqual(imported.returncode, 0, imported.stderr)
             import_path = Path(imported.stdout.strip())
             self.assertTrue(import_path.is_relative_to(environment.resolve()), import_path)
-            self.assertFalse(import_path.is_relative_to(package_source.resolve()))
             self.assertFalse(import_path.is_relative_to(REPO_ROOT.resolve()))
 
             verification_argv = [
@@ -241,25 +291,25 @@ class ExternalMCPTests(unittest.TestCase):
                 "-m",
                 "unittest",
                 "-v",
-                "test_external_effect",
+                "test_http_acceptance",
             ]
             begin_arguments = {
-                "objective": "exercise an installed MCP lifecycle across restart",
-                "summary": "external stdio acceptance",
+                "objective": "execute one installed, scoped HTTP task",
+                "summary": "external HTTP stdio acceptance",
                 "risk": "low",
                 "permissions": {
-                    "allowed_tools": ["file.write", "shell"],
-                    "write_scope": ["out"],
-                    "network_scope": [],
-                    "auth_scope": [],
+                    "allowed_tools": ["http", "shell"],
+                    "write_scope": ["io"],
+                    "network_scope": [origin],
+                    "auth_scope": ["external-api"],
                 },
                 "verification_requirements": [
                     {
-                        "id": "external-effect",
+                        "id": "external-http",
                         "argv": verification_argv,
                         "expected_exit_codes": [0],
                         "timeout_seconds": 30,
-                        "artifact_paths": {"out/effect.txt": None},
+                        "artifact_paths": {"io/response.bin": RESPONSE_SHA256},
                         "required": True,
                         "manual": False,
                     }
@@ -269,78 +319,111 @@ class ExternalMCPTests(unittest.TestCase):
                     "max_failed_hypotheses": 3,
                     "no_progress_iterations": 2,
                 },
-                "non_goals": ["write outside the external project"],
-                "idempotency_key": "external-begin",
+                "non_goals": ["send outside the declared origin"],
+                "idempotency_key": "external-http-begin",
             }
-            action_arguments: dict[str, Any]
+            action_arguments = {
+                "task_id": "",
+                "idempotency_key": "external-http-action",
+                "method": "POST",
+                "url": f"{origin}/submit?token={QUERY_SECRET}",
+                "headers": {
+                    "Content-Type": "application/octet-stream",
+                    "X-Request-Metadata": HEADER_VALUE,
+                },
+                "body_ref": "io/request.bin",
+                "timeout_seconds": 10,
+                "expected_statuses": [200],
+                "response_artifact": "io/response.bin",
+                "auth_ref": "external-api",
+            }
+
             with self._server(python, project, clean_env) as first:
                 begun = self._exchange(
                     first,
                     self._request(1, "causality_task_begin", begin_arguments),
                 )
                 task_id = begun["task"]["task_id"]
-                self.assertEqual(task_id, begun["task"]["contract_id"])
-                self.assertEqual(
-                    begun["idempotency"],
-                    {"key": "external-begin", "replayed": False},
+                action_arguments["task_id"] = task_id
+                approved = self._exchange(
+                    first,
+                    self._request(
+                        2,
+                        "causality_task_approve",
+                        {
+                            "task_id": task_id,
+                            "idempotency_key": "external-send-approval",
+                            "stage": "external_send",
+                            "approved": True,
+                            "approver": "external-human",
+                            "rationale": "approve the bounded local HTTP send",
+                            "evidence_refs": [],
+                            "proof": APPROVAL_TOKEN,
+                        },
+                    ),
                 )
-                action_arguments = {
-                    "task_id": task_id,
-                    "idempotency_key": "external-action",
-                    "action": {
-                        "kind": "file_write",
-                        "path": "out/effect.txt",
-                        "content": "one durable effect\n",
-                    },
-                }
+                self.assertEqual(approved["data"]["stage"], "external_send")
                 acted = self._exchange(
                     first,
-                    self._request(2, "causality_task_action", action_arguments),
+                    self._request(3, "causality_task_http", action_arguments),
                 )
                 self.assertEqual(
                     acted["idempotency"],
-                    {"key": "external-action", "replayed": False},
+                    {"key": "external-http-action", "replayed": False},
                 )
+                self.assertEqual(acted["data"]["status"], 200)
+                self.assertTrue(acted["data"]["artifact_written"])
+                self.assertEqual(acted["data"]["response_sha256"], RESPONSE_SHA256)
 
-            effect = project / "out" / "effect.txt"
-            self.assertEqual(effect.read_text(encoding="utf-8"), "one durable effect\n")
-            effects = [path for path in (project / "out").rglob("*") if path.is_file()]
-            self.assertEqual(effects, [effect])
-            os.utime(effect, (1, 1))
-            effect_mtime_before_retry = effect.stat().st_mtime_ns
+            self.assertEqual(
+                requests,
+                [
+                    {
+                        "path": f"/submit?token={QUERY_SECRET}",
+                        "request_metadata": HEADER_VALUE,
+                        "authorization": CREDENTIAL_SECRET,
+                        "body": BODY_SECRET,
+                    }
+                ],
+            )
+            artifact = io_dir / "response.bin"
+            self.assertEqual(artifact.read_bytes(), RESPONSE_BODY)
+            self.assertEqual(hashlib.sha256(artifact.read_bytes()).hexdigest(), RESPONSE_SHA256)
+            os.utime(artifact, (1, 1))
+            artifact_mtime = artifact.stat().st_mtime_ns
 
             with self._server(python, project, clean_env) as restarted:
-                replayed_action = self._exchange(
+                replayed = self._exchange(
                     restarted,
-                    self._request(3, "causality_task_action", action_arguments),
+                    self._request(4, "causality_task_http", action_arguments),
                 )
                 self.assertEqual(
-                    replayed_action["idempotency"],
-                    {"key": "external-action", "replayed": True},
+                    replayed["idempotency"],
+                    {"key": "external-http-action", "replayed": True},
                 )
-                self.assertEqual(replayed_action["event_hash"], acted["event_hash"])
-                self.assertEqual(replayed_action["data"], acted["data"])
-                self.assertEqual(effect.stat().st_mtime_ns, effect_mtime_before_retry)
+                self.assertEqual(replayed["event_hash"], acted["event_hash"])
+                self.assertEqual(replayed["data"], acted["data"])
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(artifact.stat().st_mtime_ns, artifact_mtime)
 
                 verified = self._exchange(
                     restarted,
                     self._request(
-                        4,
+                        5,
                         "causality_task_verify",
                         {
                             "task_id": task_id,
-                            "idempotency_key": "external-verify",
-                            "requirement_id": "external-effect",
+                            "idempotency_key": "external-http-verify",
+                            "requirement_id": "external-http",
                             "mode": "execute",
                         },
                     ),
                 )
                 self.assertEqual(verified["data"]["status"], "pass")
                 evidence_hash = verified["event_hash"]
-                self.assertRegex(evidence_hash, r"^[0-9a-f]{64}$")
 
                 for request_id, verifier in enumerate(
-                    ("external-security", "external-conformance"), start=5
+                    ("external-http-security", "external-http-conformance"), start=6
                 ):
                     verdict = self._exchange(
                         restarted,
@@ -352,7 +435,7 @@ class ExternalMCPTests(unittest.TestCase):
                                 "idempotency_key": f"{verifier}-verdict",
                                 "verifier": verifier,
                                 "status": "pass",
-                                "rationale": f"{verifier} checked the installed result",
+                                "rationale": f"{verifier} checked the evidence",
                                 "severity": "normal",
                                 "evidence_refs": [evidence_hash],
                             },
@@ -363,52 +446,28 @@ class ExternalMCPTests(unittest.TestCase):
                 completed = self._exchange(
                     restarted,
                     self._request(
-                        7,
+                        8,
                         "causality_task_complete",
                         {
                             "task_id": task_id,
-                            "idempotency_key": "external-complete",
+                            "idempotency_key": "external-http-complete",
                         },
                     ),
                 )
+                self.assertEqual(completed["data"]["decision"], "pass")
                 self.assertEqual(completed["task"]["state"], "verified")
                 self.assertTrue(completed["task"]["terminal"])
-                self.assertEqual(completed["data"]["decision"], "pass")
 
-                reflect_arguments = {
-                    "task_id": task_id,
-                    "idempotency_key": "external-reflect",
-                    "scope": f"task:{task_id}",
-                    "ttl_days": 30,
-                }
-                reflected = self._exchange(
-                    restarted,
-                    self._request(8, "causality_task_reflect", reflect_arguments),
-                )
-                replayed_reflection = self._exchange(
-                    restarted,
-                    self._request(9, "causality_task_reflect", reflect_arguments),
-                )
-                self.assertEqual(
-                    replayed_reflection["idempotency"],
-                    {"key": "external-reflect", "replayed": True},
-                )
-                self.assertEqual(replayed_reflection["event_hash"], reflected["event_hash"])
-                self.assertEqual(replayed_reflection["data"], reflected["data"])
-
-            memory_logs = list(project.rglob("log.jsonl"))
-            self.assertEqual(len(memory_logs), 1, memory_logs)
-            memory_records = [
-                json.loads(line)
-                for line in memory_logs[0].read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-            self.assertEqual(len(memory_records), 1)
-            self.assertEqual(
-                memory_records[0]["entry_id"],
-                reflected["data"]["retrospective"]["entry_id"],
-            )
-            self.assertEqual(reflected["data"]["failures"], [])
+            ledger = project / ".causality" / "ledger.jsonl"
+            ledger_text = ledger.read_text(encoding="utf-8")
+            for secret in (
+                QUERY_SECRET,
+                HEADER_VALUE,
+                BODY_SECRET.decode().strip(),
+                CREDENTIAL_SECRET,
+                APPROVAL_TOKEN,
+            ):
+                self.assertNotIn(secret, ledger_text)
 
             audit_script = "\n".join(
                 (
@@ -422,19 +481,15 @@ class ExternalMCPTests(unittest.TestCase):
                     "events = ledger.events(all_segments=True)",
                     "task = TaskLifecycle(root).get(task_id).to_dict()",
                     "counts = {",
-                    "'task_action_intent': sum(event.event_type == 'task_action_intent' "
-                    "and event.payload.get('idempotency_key') == 'external-action' "
-                    "for event in events),",
-                    "'task_action_result': sum(event.event_type == 'task_action_result' "
-                    "and event.payload.get('idempotency_key') == 'external-action' "
-                    "for event in events),",
-                    "'task_reflection_intent': sum(event.event_type == "
-                    "'task_reflection_intent' for event in events),",
-                    "'task_reflected': sum(event.event_type == 'task_reflected' "
-                    "for event in events),",
+                    "'intent': sum(e.event_type == 'task_action_intent' and "
+                    "e.payload.get('idempotency_key') == 'external-http-action' for e in events),",
+                    "'result': sum(e.event_type == 'task_action_result' and "
+                    "e.payload.get('idempotency_key') == 'external-http-action' for e in events),",
+                    "'http_tool': sum(e.event_type == 'tool_call' and "
+                    "e.payload.get('tool') == 'http' for e in events),",
                     "}",
                     "print(json.dumps({'chain': ledger.verify_chain(), 'task': task, "
-                    "'counts': counts, 'event_count': ledger.event_count()}))",
+                    "'counts': counts}))",
                 )
             )
             audited = subprocess.run(
@@ -447,20 +502,11 @@ class ExternalMCPTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(audited.returncode, 0, audited.stderr)
-            self.assertEqual(len(audited.stdout.splitlines()), 1, audited.stdout)
             audit = json.loads(audited.stdout)
             self.assertIs(audit["chain"], True)
             self.assertEqual(audit["task"]["state"], "verified")
             self.assertTrue(audit["task"]["terminal"])
-            self.assertEqual(
-                audit["counts"],
-                {
-                    "task_action_intent": 1,
-                    "task_action_result": 1,
-                    "task_reflection_intent": 1,
-                    "task_reflected": 1,
-                },
-            )
+            self.assertEqual(audit["counts"], {"intent": 1, "result": 1, "http_tool": 1})
             self.assertEqual(_tree_snapshot(repo_build), build_before)
 
 

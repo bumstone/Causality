@@ -331,6 +331,16 @@ class Causality:
     def check_non_goal(self, contract: GoalContract, action_desc: str) -> GateResult:
         return self.gate.check_non_goal(contract, action_desc)
 
+    def check_network_scope(self, contract: GoalContract, origin: str) -> GateResult:
+        return self.gate.check_network_scope(contract, origin)
+
+    def check_auth_scope(
+        self,
+        contract: GoalContract,
+        auth_ref: str | None,
+    ) -> GateResult:
+        return self.gate.check_auth_scope(contract, auth_ref)
+
     def should_stop(
         self,
         contract: GoalContract,

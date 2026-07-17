@@ -268,6 +268,47 @@ class GateTests(unittest.TestCase):
                 GateDecision.PASS,
             )
 
+    def test_network_and_auth_scopes_are_exact_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Causality(Path(temp_dir) / "ledger.jsonl")
+            contract = runtime.create_contract(
+                GoalContract(
+                    "HTTP",
+                    "scoped request",
+                    permissions=PermissionContract(
+                        network_scope=("https://api.example.com",),
+                        auth_scope=("ci-token",),
+                    ),
+                )
+            )
+
+            self.assertEqual(
+                runtime.check_network_scope(contract, "https://api.example.com").decision,
+                GateDecision.PASS,
+            )
+            self.assertEqual(
+                runtime.check_network_scope(contract, "https://sub.api.example.com").decision,
+                GateDecision.STOP,
+            )
+            self.assertEqual(
+                runtime.check_auth_scope(contract, None).decision,
+                GateDecision.PASS,
+            )
+            self.assertEqual(
+                runtime.check_auth_scope(contract, "ci-token").decision,
+                GateDecision.PASS,
+            )
+            self.assertEqual(
+                runtime.check_auth_scope(contract, "other-token").decision,
+                GateDecision.STOP,
+            )
+
+            deny_all = runtime.create_contract(GoalContract("HTTP", "no network"))
+            self.assertEqual(
+                runtime.check_network_scope(deny_all, "https://api.example.com").decision,
+                GateDecision.STOP,
+            )
+
     def test_should_stop_reads_stopping_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime = Causality(Path(temp_dir) / "ledger.jsonl")

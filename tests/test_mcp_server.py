@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -11,10 +12,12 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from causality.mcp_server import CausalityMCPServer
+from causality.http_adapter import HttpResult
 from causality.task_lifecycle import TaskLifecycle, TaskPolicy
 
 
@@ -22,6 +25,7 @@ LIFECYCLE_TOOLS = {
     "causality_task_begin",
     "causality_task_approve",
     "causality_task_action",
+    "causality_task_http",
     "causality_task_verify",
     "causality_task_verdict",
     "causality_task_complete",
@@ -34,6 +38,45 @@ WIRE_COMMAND = (sys.executable, "-c", "print('wire-pass')")
 
 class SimulatedProcessDeath(BaseException):
     """Leave a durable action intent without an action result."""
+
+
+class _RecordingHttpAdapter:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.max_request_bytes = 1024 * 1024
+        self.max_response_bytes = 4 * 1024 * 1024
+
+    def send(
+        self,
+        request: Any,
+        *,
+        credential_headers: Any = None,
+        before_effect: Any = None,
+    ) -> HttpResult:
+        if before_effect is not None:
+            before_effect()
+        body = b"wire-response"
+        if request.artifact_path is not None:
+            request.artifact_path.write_bytes(body)
+        self.calls.append(
+            {
+                "method": request.method,
+                "url": request.url,
+                "headers": dict(request.headers),
+                "credential_headers": dict(credential_headers or {}),
+            }
+        )
+        digest = hashlib.sha256(body).hexdigest()
+        return HttpResult(
+            method=request.method,
+            origin="https://api.example",
+            status=201,
+            request_bytes=len(request.body or b""),
+            response_bytes=len(body),
+            response_sha256=digest,
+            artifact_written=request.artifact_path is not None,
+            artifact_sha256=digest if request.artifact_path is not None else None,
+        )
 
 
 class MCPServerTests(unittest.TestCase):
@@ -297,6 +340,28 @@ class MCPServerTests(unittest.TestCase):
             self.assertEqual(process["properties"]["argv"]["type"], "array")
             self.assertEqual(process["properties"]["argv"]["items"]["type"], "string")
 
+            http = tools["causality_task_http"]["inputSchema"]
+            self.assertTrue(
+                {
+                    "task_id",
+                    "idempotency_key",
+                    "method",
+                    "url",
+                    "expected_statuses",
+                }.issubset(http["required"])
+            )
+            self.assertNotIn("kind", http["properties"])
+            self.assertNotIn("action", http["properties"])
+            self.assertEqual(
+                http["properties"]["method"]["enum"],
+                ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            )
+            self.assertEqual(
+                http["properties"]["headers"]["additionalProperties"],
+                {"type": "string"},
+            )
+            self.assertTrue(http["properties"]["expected_statuses"]["uniqueItems"])
+
             verify = tools["causality_task_verify"]["inputSchema"]
             self.assertTrue({"requirement_id", "mode"}.issubset(verify["required"]))
             self.assertEqual(verify["properties"]["mode"]["enum"], ["execute", "manual"])
@@ -307,6 +372,18 @@ class MCPServerTests(unittest.TestCase):
             )
 
             approve = tools["causality_task_approve"]["inputSchema"]
+            self.assertEqual(
+                set(approve["properties"]["stage"]["enum"]),
+                {
+                    "plan",
+                    "final",
+                    "delete",
+                    "deploy",
+                    "payment",
+                    "external_send",
+                    "permission_change",
+                },
+            )
             self.assertTrue(
                 {
                     "stage",
@@ -343,6 +420,184 @@ class MCPServerTests(unittest.TestCase):
                 )
             )
             self.assertNotIn("contract_id", evidence["properties"])
+
+    def test_http_environment_policy_is_explicit_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {}, clear=True
+        ):
+            server = CausalityMCPServer(temp_dir)
+            self.assertNotIn("http", server.lifecycle.policy.allowed_tools)
+            self.assertEqual(server.lifecycle.policy.allowed_network_origins, frozenset())
+            self.assertEqual(server.lifecycle.policy.allowed_auth_refs, frozenset())
+            self.assertEqual(dict(server.lifecycle.http_credentials), {})
+
+        configured = {
+            "CAUSALITY_NETWORK_ORIGINS_JSON": json.dumps(
+                ["https://API.EXAMPLE:443"]
+            ),
+            "CAUSALITY_AUTH_REFS_JSON": json.dumps(["service-token"]),
+            "CAUSALITY_HTTP_HEADERS_JSON": json.dumps(["X-Public"]),
+            "CAUSALITY_HTTP_CREDENTIALS_JSON": json.dumps(
+                {"service-token": {"Authorization": "Bearer environment-secret"}}
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, configured, clear=True
+        ):
+            server = CausalityMCPServer(temp_dir)
+            self.assertIn("http", server.lifecycle.policy.allowed_tools)
+            self.assertEqual(
+                server.lifecycle.policy.allowed_network_origins,
+                frozenset({"https://api.example"}),
+            )
+            self.assertEqual(
+                server.lifecycle.policy.allowed_auth_refs,
+                frozenset({"service-token"}),
+            )
+            self.assertEqual(
+                server.lifecycle.policy.allowed_http_headers,
+                frozenset({"x-public"}),
+            )
+            self.assertEqual(
+                dict(server.lifecycle.http_credentials["service-token"]),
+                {"Authorization": "Bearer environment-secret"},
+            )
+
+        unauthorized = dict(configured)
+        unauthorized["CAUSALITY_AUTH_REFS_JSON"] = "[]"
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, unauthorized, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "explicitly allowed"):
+                CausalityMCPServer(temp_dir)
+
+        malformed = dict(configured)
+        malformed["CAUSALITY_NETWORK_ORIGINS_JSON"] = json.dumps(
+            ["https://api.example/path"]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, malformed, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "exact HTTP origins"):
+                CausalityMCPServer(temp_dir)
+
+    def test_http_tool_dispatch_redacts_and_replays_as_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "out").mkdir()
+            adapter = _RecordingHttpAdapter()
+            policy = TaskPolicy(
+                allowed_tools=frozenset({"http"}),
+                allowed_network_origins=frozenset({"https://api.example"}),
+                allowed_auth_refs=frozenset({"service-token"}),
+                allowed_http_headers=frozenset({"x-public"}),
+                verification_commands=(WIRE_COMMAND,),
+            )
+            credentials = {
+                "service-token": {
+                    "Authorization": "Bearer credential-secret",
+                }
+            }
+            server = CausalityMCPServer(
+                root,
+                approval_token="trusted-secret",
+                policy=policy,
+                http_credentials=credentials,
+                http_adapter=adapter,
+            )
+            begin = self._begin_arguments(key="http-wire-begin")
+            begin["permissions"] = {
+                "allowed_tools": ["http"],
+                "write_scope": ["out"],
+                "network_scope": ["https://api.example"],
+                "auth_scope": ["service-token"],
+            }
+            begin_result, begun = self._call(
+                server, "causality_task_begin", begin, request_id=3
+            )
+            self._assert_success(begin_result, begun, key="http-wire-begin")
+            task_id = begun["task"]["task_id"]
+            approve_result, approved = self._call(
+                server,
+                "causality_task_approve",
+                {
+                    "task_id": task_id,
+                    "idempotency_key": "http-wire-approval",
+                    "stage": "external_send",
+                    "approved": True,
+                    "approver": "operator",
+                    "rationale": "approve one scoped request",
+                    "evidence_refs": [],
+                    "proof": "trusted-secret",
+                },
+                request_id=4,
+            )
+            self._assert_success(
+                approve_result, approved, key="http-wire-approval"
+            )
+            arguments = {
+                "task_id": task_id,
+                "idempotency_key": "http-wire-send",
+                "method": "POST",
+                "url": "https://api.example/send?token=query-secret",
+                "headers": {"X-Public": "header-secret"},
+                "expected_statuses": [201],
+                "response_artifact": "out/response.bin",
+                "auth_ref": "service-token",
+            }
+
+            result, payload = self._call(
+                server, "causality_task_http", arguments, request_id=5
+            )
+            self._assert_success(result, payload, key="http-wire-send")
+            self.assertEqual(payload["data"]["status"], 201)
+            self.assertTrue(payload["data"]["expected"])
+            self.assertEqual(len(adapter.calls), 1)
+            self.assertEqual(
+                adapter.calls[0]["credential_headers"],
+                {"Authorization": "Bearer credential-secret"},
+            )
+            self.assertEqual((root / "out" / "response.bin").read_bytes(), b"wire-response")
+
+            restarted = CausalityMCPServer(
+                root,
+                approval_token="trusted-secret",
+                policy=policy,
+                http_credentials=credentials,
+                http_adapter=adapter,
+            )
+            replay_result, replay = self._call(
+                restarted, "causality_task_http", copy.deepcopy(arguments), request_id=6
+            )
+            self._assert_success(
+                replay_result, replay, key="http-wire-send", replayed=True
+            )
+            self.assertEqual(replay["event_hash"], payload["event_hash"])
+            self.assertEqual(replay["data"], payload["data"])
+            self.assertEqual(len(adapter.calls), 1)
+
+            serialized = json.dumps(payload, sort_keys=True)
+            ledger_text = restarted.ledger.path.read_text(encoding="utf-8")
+            for secret in (
+                "query-secret",
+                "header-secret",
+                "credential-secret",
+                "wire-response",
+            ):
+                self.assertNotIn(secret, serialized)
+                self.assertNotIn(secret, ledger_text)
+
+            count = restarted.ledger.event_count()
+            invalid = dict(arguments)
+            invalid["idempotency_key"] = "http-wire-invalid"
+            invalid["credential"] = "caller-secret"
+            invalid_result, invalid_payload = self._call(
+                restarted, "causality_task_http", invalid, request_id=7
+            )
+            self._assert_domain_error(
+                invalid_result, invalid_payload, code="validation_error"
+            )
+            self.assertEqual(restarted.ledger.event_count(), count)
 
     def test_begin_retry_replays_and_conflicting_request_is_a_domain_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

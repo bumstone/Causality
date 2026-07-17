@@ -311,9 +311,10 @@
       </div>
     </div>
     <div class="caveat">
-      <p><strong>과장하면 안 되는 부분:</strong> 이것은 범용 자동 운영 플랫폼의 완성 선언이 아니다. 남은 핵심은 API/browser 실행 어댑터, playbook phase 자동 실행화, resume/skill 운영과 운영 품질이다.</p>
+      <p><strong>과장하면 안 되는 부분:</strong> 이것은 범용 자동 운영 플랫폼의 완성 선언이 아니다. 남은 핵심은 browser 실행 어댑터, playbook phase 자동 실행화, resume/skill 운영과 운영 품질이다.</p>
       <div class="tags">
-        <span class="tag risk">API/browser 실행 미검증</span>
+        <span class="tag done">HTTP lifecycle 구현</span>
+        <span class="tag risk">browser 실행 미검증</span>
         <span class="tag done">MCP task lifecycle 구현</span>
         <span class="tag risk">phase는 아직 지침</span>
         <span class="tag later">운영 자동화 설정 필요</span>
@@ -466,6 +467,10 @@
         <p>PR #29로 <code>ToolAdapter</code>가 <code>run</code>, <code>write_text</code>, <code>read_text</code>를 제공한다. allowed tool, non-goal, risk, write scope를 통과한 호출만 실행하고 tool/evidence 이벤트를 남긴다.</p>
       </article>
       <article class="card done-card">
+        <h3><span class="tag done">완료</span> 004A HTTP 어댑터</h3>
+        <p><code>causality_task_http</code>가 exact origin/auth scope, external-send 승인, redacted intent/result, 명시적 response artifact와 restart-safe replay를 같은 task lifecycle에 묶는다.</p>
+      </article>
+      <article class="card done-card">
         <h3><span class="tag done">완료</span> L1 playbook vendoring</h3>
         <p>L1 <code>_ROUTING</code>의 번들 라벨이 더 이상 빈 문자열이 아니라 <code>causality.playbooks</code>의 구조화된 <code>Playbook</code>(순서 있는 phase·step)으로 vendoring됐다. 라우팅된 모든 라벨이 실재 playbook으로 resolve되거나 raise하며, <code>TaskRun.playbooks</code>로 run에 노출된다.</p>
       </article>
@@ -528,9 +533,9 @@
           <td><a href="../specs/003-mcp-task-lifecycle.md">Spec 003</a> 원자성·외부 설치 E2E 완료. 다음 구현은 04 adapter다.</td>
         </tr>
         <tr>
-          <td>04 · API/browser adapters</td>
-          <td>파일/서브프로세스 adapter만 run 안에서 검증됐다. API와 browser action은 같은 계약/증거 모델로 실행되지 않는다.</td>
-          <td><a href="../specs/004-api-browser-adapters.md">Spec 004</a>: scope-gated API/A11y actions와 E2E evidence.</td>
+          <td>04 · API/browser adapters (004A 완료)</td>
+          <td>HTTP는 scope, 승인, redaction, artifact, restart E2E가 닫혔다. Browser action의 task lifecycle 연결은 남았다.</td>
+          <td><a href="../specs/004-api-browser-adapters.md">Spec 004</a>: 다음 구현은 004B capability-gated A11y/browser다.</td>
         </tr>
         <tr>
           <td>05 · workflow/debug loop</td>
@@ -559,7 +564,7 @@
       </article>
       <article class="card wide risk-card">
         <h3><span class="tag risk">주의</span> 완성 선언 문서로는 부적합</h3>
-        <p>API/browser 실행, playbook phase 자동화, resume/skill operations와 운영 검증이 남아 있으므로 “프로젝트 완성”이라고 말하면 과장이다.</p>
+        <p>Browser 실행, playbook phase 자동화, resume/skill operations와 운영 검증이 남아 있으므로 “프로젝트 완성”이라고 말하면 과장이다.</p>
       </article>
       <article class="card wide later-card">
         <h3><span class="tag later">개선 여지</span> 자동 생성 가능성</h3>

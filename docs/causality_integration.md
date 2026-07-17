@@ -10,7 +10,8 @@ Interfaces and acceptance tests: [spec index](specs/README.md).
 | `GoalContract` | risk, permissions, evidence, state, stop policy |
 | `EvidenceLedger` | append-only hash chain and artifact hashes |
 | `HITLGate` | plan/action/completion policy enforcement |
-| `A11yBrowserAdapter` | observe, act, assert, inspect, visual primitives |
+| `HttpAdapter` | bounded no-redirect transport behind task gates |
+| `A11yBrowserAdapter` | primitives only; task lifecycle wiring is pending |
 | `WorkflowTemplate` | planning, subagent, verification, TDD, root-cause contracts |
 
 ## State policy

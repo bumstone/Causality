@@ -63,6 +63,8 @@ class _Gated(Protocol):
     def execution_lock(self) -> AbstractContextManager[None]: ...
     def check_non_goal(self, contract: GoalContract, action_desc: str) -> GateResult: ...
     def check_tool_allowed(self, contract: GoalContract, tool: str) -> GateResult: ...
+    def check_network_scope(self, contract: GoalContract, origin: str) -> GateResult: ...
+    def check_auth_scope(self, contract: GoalContract, auth_ref: str | None) -> GateResult: ...
     def can_execute_action(self, contract: GoalContract, action_kind: str) -> GateResult: ...
 
 
@@ -113,6 +115,8 @@ class ExecutionAdapter:
         action_kind: str,
         description: str,
         run: Callable[[], T],
+        network_origin: str | None = None,
+        auth_ref: str | None = None,
     ) -> T:
         """Run ``run`` only if the contract's per-action gates all pass.
 
@@ -125,11 +129,20 @@ class ExecutionAdapter:
         returned.
         """
         with self.runtime.execution_lock():
-            checks = (
+            checks = [
                 lambda: self.runtime.check_non_goal(self.contract, description),
                 lambda: self.runtime.check_tool_allowed(self.contract, tool),
-                lambda: self.runtime.can_execute_action(self.contract, action_kind),
-            )
+            ]
+            if network_origin is not None:
+                checks.append(
+                    lambda: self.runtime.check_network_scope(
+                        self.contract,
+                        network_origin,
+                    )
+                )
+            if network_origin is not None or auth_ref is not None:
+                checks.append(lambda: self.runtime.check_auth_scope(self.contract, auth_ref))
+            checks.append(lambda: self.runtime.can_execute_action(self.contract, action_kind))
             for check in checks:
                 result = check()
                 if not result.allowed:

@@ -183,7 +183,14 @@ class ToolAdapter:
                 check=False,
                 timeout=timeout,
                 cwd=str(workdir),
-                env={**os.environ, **environment_overrides},
+                env={
+                    **{
+                        name: value
+                        for name, value in os.environ.items()
+                        if not name.startswith("CAUSALITY_")
+                    },
+                    **environment_overrides,
+                },
             )
             return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
