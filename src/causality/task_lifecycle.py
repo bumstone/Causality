@@ -1130,7 +1130,8 @@ class TaskLifecycle:
             if not body_path.is_file():
                 raise _error("validation_error", "body_ref must name an existing file")
             try:
-                body = body_path.read_bytes()
+                with body_path.open("rb") as stream:
+                    body = stream.read(self.policy.max_http_request_bytes + 1)
             except OSError as exc:
                 raise _error("validation_error", "body_ref could not be read") from exc
             if len(body) > self.policy.max_http_request_bytes:
@@ -1297,23 +1298,44 @@ class TaskLifecycle:
         key = _idempotency_key(idempotency_key)
         with self.runtime.execution_lock():
             session = self.get(task_id)
+            http_digest: str | None = None
+            if isinstance(action, Mapping) and action.get("kind") == "http":
+                try:
+                    http_digest = canonical_sha256(action)
+                except (TypeError, ValueError) as exc:
+                    raise _error(
+                        "validation_error",
+                        "HTTP action is not canonically serializable",
+                    ) from exc
+                prior = self._existing(session, "action", key, http_digest)
+                if prior is not None:
+                    if prior.outcome == "error" and session.state is TaskState.EXECUTING:
+                        self._append_transition(
+                            session,
+                            TaskState.BLOCKED,
+                            reason="action outcome is uncertain",
+                            cause_event_hash=prior.event_hashes[-1],
+                        )
+                        return self.get(task_id)
+                    return session
             plan = self._normalize_action(session, action)
             descriptor = plan.descriptor
             tool = plan.tool
             action_kind = plan.action_kind
             description = plan.description
-            digest = canonical_sha256(descriptor)
-            prior = self._existing(session, "action", key, digest)
-            if prior is not None:
-                if prior.outcome == "error" and session.state is TaskState.EXECUTING:
-                    self._append_transition(
-                        session,
-                        TaskState.BLOCKED,
-                        reason="action outcome is uncertain",
-                        cause_event_hash=prior.event_hashes[-1],
-                    )
-                    return self.get(task_id)
-                return session
+            digest = http_digest or canonical_sha256(descriptor)
+            if http_digest is None:
+                prior = self._existing(session, "action", key, digest)
+                if prior is not None:
+                    if prior.outcome == "error" and session.state is TaskState.EXECUTING:
+                        self._append_transition(
+                            session,
+                            TaskState.BLOCKED,
+                            reason="action outcome is uncertain",
+                            cause_event_hash=prior.event_hashes[-1],
+                        )
+                        return self.get(task_id)
+                    return session
             self._enforce_current_http_policy(plan)
             session = self._ensure_executing(session)
             operation_id = self._operation_id(task_id, "action", key, digest)

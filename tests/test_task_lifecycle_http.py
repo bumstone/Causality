@@ -7,6 +7,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -332,13 +333,17 @@ class HttpLifecycleActionTests(unittest.TestCase):
             completed = lifecycle.action(
                 task.task_id, action, idempotency_key="redact-send"
             )
-            replay = lifecycle.action(
+            self.assertEqual(artifact.read_bytes(), b"response-secret")
+            body.unlink()
+            artifact.unlink()
+            io.rmdir()
+            restarted = self._lifecycle(root, origin)
+            replay = restarted.action(
                 task.task_id, action, idempotency_key="redact-send"
             )
 
             self.assertEqual(completed, replay)
             self.assertEqual(server.calls, 1)  # type: ignore[attr-defined]
-            self.assertEqual(artifact.read_bytes(), b"response-secret")
             self.assertEqual(
                 server.received,  # type: ignore[attr-defined]
                 {
@@ -361,6 +366,42 @@ class HttpLifecycleActionTests(unittest.TestCase):
                 "credential-secret",
             ):
                 self.assertNotIn(secret, ledger_text)
+
+    def test_http_body_read_is_bounded_by_server_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            io = root / "io"
+            io.mkdir()
+            (io / "request.bin").write_bytes(b"placeholder")
+            origin = "https://api.example"
+            lifecycle = TaskLifecycle(
+                root,
+                policy=TaskPolicy(
+                    allowed_tools=frozenset({"http"}),
+                    allowed_network_origins=frozenset({origin}),
+                    max_http_request_bytes=4,
+                ),
+            )
+            stream = MagicMock()
+            stream.__enter__.return_value = stream
+            stream.read.return_value = b"12345"
+
+            with patch.object(Path, "open", return_value=stream), self.assertRaises(
+                TaskLifecycleError
+            ) as caught:
+                lifecycle._normalize_http_action(
+                    self._contract(origin),
+                    {
+                        "kind": "http",
+                        "method": "POST",
+                        "url": origin,
+                        "body_ref": "io/request.bin",
+                        "expected_statuses": [200],
+                    },
+                )
+
+            self.assertEqual(caught.exception.code, "validation_error")
+            stream.read.assert_called_once_with(5)
 
     def test_http_rejects_sensitive_headers_and_scope_escape_before_intent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, _HttpServer() as server:
