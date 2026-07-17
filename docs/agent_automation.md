@@ -43,7 +43,8 @@ loaded from the matching on-demand workflow or skill.
 python -I -m causality.mcp_server --project .
 ```
 
-It exposes closed task lifecycle tools, including scoped HTTP, plus context and
-workflow metadata. State remains local and the runtime has no third-party
-Python dependencies. HTTP stays disabled until server policy names exact
-origins and credential aliases.
+It exposes closed task lifecycle tools, scoped HTTP, context, and workflow
+metadata. The browser tool appears only when an explicit protocol-v1 wrapper
+passes capability checks; there is no `PATH` discovery. State remains local and
+the runtime has no third-party Python dependencies. HTTP/browser network effects
+remain disabled until server policy names exact origins and required approvals.

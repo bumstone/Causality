@@ -15,9 +15,9 @@ terminal state.
    declared checks and bind completion to requirement IDs, exit codes, and hashes.
 3. [x] [MCP task lifecycle](../specs/003-mcp-task-lifecycle.md): create, approve,
    act, verify, complete, and reflect one persistent task.
-4. [ ] [API/browser adapters](../specs/004-api-browser-adapters.md):
+4. [x] [API/browser adapters](../specs/004-api-browser-adapters.md):
    - [x] 004A: scoped HTTP action, MCP wire, installed-project E2E.
-   - [ ] 004B: capability-gated A11y/browser lifecycle.
+   - [x] 004B: capability-gated, isolated A11y/browser lifecycle.
 5. [ ] [Workflow and debug loop](../specs/005-workflow-debug-loop.md): persist phase
    state, route debugging, count failed hypotheses, and deduplicate failures.
 6. [ ] [Resume and skill operations](../specs/006-resume-and-skill-operations.md):

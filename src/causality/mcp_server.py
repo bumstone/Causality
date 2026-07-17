@@ -15,6 +15,7 @@ from .agent_bootstrap import (
     _private_tracking_issue,
     install_agent_files,
 )
+from .browser_adapter import A11yBrowserAdapter, wrap_untrusted
 from .contracts import (
     EvidenceKind,
     EvidenceRequirement,
@@ -79,7 +80,17 @@ _KEY = {
     "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
 }
 _HASH = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+_REF = {"type": "string", "pattern": "^@[ec][0-9]+$"}
 _COMMON = {"task_id": _TEXT, "idempotency_key": _KEY}
+_BROWSER_TOOLS = frozenset(
+    {
+        "browser.observe",
+        "browser.act",
+        "browser.assert",
+        "browser.inspect",
+        "browser.visual",
+    }
+)
 _MCP_EVIDENCE_KINDS = tuple(
     kind.value
     for kind in (
@@ -97,7 +108,7 @@ def _tool(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]
     return {"name": name, "description": description, "inputSchema": schema}
 
 
-def _command_policy_from_env() -> TaskPolicy:
+def _command_policy_from_env(*, browser_enabled: bool = False) -> TaskPolicy:
     def commands(name: str) -> tuple[tuple[str, ...], ...]:
         raw = os.environ.get(name)
         if not raw:
@@ -128,6 +139,8 @@ def _command_policy_from_env() -> TaskPolicy:
     allowed_tools = frozenset({"shell", "file.read", "file.write"})
     if origins:
         allowed_tools |= {"http"}
+    if browser_enabled:
+        allowed_tools |= _BROWSER_TOOLS
     return TaskPolicy(
         allowed_tools=allowed_tools,
         allowed_network_origins=origins,
@@ -141,6 +154,24 @@ def _command_policy_from_env() -> TaskPolicy:
             *commands("CAUSALITY_VERIFICATION_PREFIXES_JSON"),
         ),
     )
+
+
+def _browser_command_from_env() -> tuple[str, ...] | None:
+    name = "CAUSALITY_BROWSER_COMMAND_JSON"
+    raw = os.environ.get(name)
+    if raw:
+        value = json.loads(raw)
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(not isinstance(item, str) or not item for item in value)
+        ):
+            raise ValueError(f"{name} must be a non-empty argv array")
+        return tuple(value)
+    legacy = os.environ.get("CAUSALITY_BROWSER_BIN")
+    if legacy:
+        return (legacy,)
+    return None
 
 
 def _http_credentials_from_env() -> dict[str, dict[str, str]]:
@@ -181,6 +212,7 @@ class CausalityMCPServer:
         policy: TaskPolicy | None = None,
         http_credentials: Mapping[str, Mapping[str, str]] | None = None,
         http_adapter: HttpAdapter | None = None,
+        browser_adapter: A11yBrowserAdapter | None = None,
     ):
         self.project = Path(project).resolve()
         tracking_issue = _private_tracking_issue(self.project)
@@ -198,7 +230,15 @@ class CausalityMCPServer:
         self._approval_token = approval_token or os.environ.get(
             "CAUSALITY_APPROVAL_TOKEN"
         )
-        effective_policy = policy or _command_policy_from_env()
+        browser_command = (
+            None if browser_adapter is not None else _browser_command_from_env()
+        )
+        effective_browser = browser_adapter or (
+            A11yBrowserAdapter(browser_command) if browser_command is not None else None
+        )
+        effective_policy = policy or _command_policy_from_env(
+            browser_enabled=effective_browser is not None
+        )
         credentials = (
             _http_credentials_from_env()
             if http_credentials is None
@@ -216,6 +256,7 @@ class CausalityMCPServer:
             approval_authorizer=self._authorize,
             http_credentials=credentials,
             http_adapter=http_adapter,
+            browser_adapter=effective_browser,
         )
 
     def _authorize(self, _principal: str, _stage: str, proof: str | None) -> bool:
@@ -306,7 +347,90 @@ class CausalityMCPServer:
             ]
         }
         common_required = ("task_id", "idempotency_key")
-        return [
+        browser_branches = [
+            _closed(
+                {
+                    **_COMMON,
+                    "operation": {"const": "observe"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["interactive", "compact", "full"],
+                    },
+                    "scope": _REF,
+                    "annotate": {"type": "boolean"},
+                },
+                (*common_required, "operation"),
+            ),
+            _closed(
+                {
+                    **_COMMON,
+                    "operation": {"const": "act"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["click", "fill", "hover", "press", "select"],
+                    },
+                    "ref": _REF,
+                    "value": {"type": "string"},
+                    "expected_state_hash": _HASH,
+                },
+                (*common_required, "operation", "action", "ref", "expected_state_hash"),
+            ),
+            _closed(
+                {
+                    **_COMMON,
+                    "operation": {"const": "assert"},
+                    "property": {
+                        "type": "string",
+                        "enum": ["visible", "enabled", "checked"],
+                    },
+                    "ref": _REF,
+                    "expected_state_hash": _HASH,
+                },
+                (*common_required, "operation", "property", "ref", "expected_state_hash"),
+            ),
+            _closed(
+                {
+                    **_COMMON,
+                    "operation": {"const": "inspect"},
+                    "inspection": {
+                        "type": "string",
+                        "enum": ["attrs", "html", "css"],
+                    },
+                    "ref": _REF,
+                    "expected_state_hash": _HASH,
+                },
+                (*common_required, "operation", "inspection", "ref", "expected_state_hash"),
+            ),
+            _closed(
+                {
+                    **_COMMON,
+                    "operation": {"const": "visual"},
+                    "ref": _REF,
+                    "expected_state_hash": _HASH,
+                },
+                (*common_required, "operation", "expected_state_hash"),
+            ),
+        ]
+        browser_schema = _closed(
+            {
+                **_COMMON,
+                "operation": {
+                    "type": "string",
+                    "enum": ["observe", "act", "assert", "inspect", "visual"],
+                },
+                "mode": {"type": "string"},
+                "scope": _REF,
+                "annotate": {"type": "boolean"},
+                "action": {"type": "string"},
+                "ref": _REF,
+                "value": {"type": "string"},
+                "expected_state_hash": _HASH,
+                "property": {"type": "string"},
+                "inspection": {"type": "string"},
+            }
+        )
+        browser_schema["oneOf"] = browser_branches
+        tools = [
             _tool(
                 "causality_init",
                 "Install project-level Causality agent files.",
@@ -505,6 +629,16 @@ class CausalityMCPServer:
                 _closed({}),
             ),
         ]
+        if self.lifecycle.policy.allowed_tools & _BROWSER_TOOLS:
+            tools.insert(
+                6,
+                _tool(
+                    "causality_task_browser",
+                    "Execute one state-bound browser operation through a capable isolated driver.",
+                    browser_schema,
+                ),
+            )
+        return tools
 
     @staticmethod
     def _strict(
@@ -670,11 +804,16 @@ class CausalityMCPServer:
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
         operation = name.removeprefix("causality_task_")
-        if name in {"causality_task_action", "causality_task_http"}:
+        if name in {
+            "causality_task_action",
+            "causality_task_http",
+            "causality_task_browser",
+        }:
             operation = "action"
         if name == "causality_append_evidence":
             operation = "append_evidence"
         key = arguments.get("idempotency_key")
+        ephemeral: Mapping[str, str] = {}
         before = self.ledger.event_count()
         if name == "causality_task_begin":
             session = self._begin(arguments)
@@ -724,6 +863,50 @@ class CausalityMCPServer:
                     **{field: arguments[field] for field in fields if field in arguments},
                 }
                 session = self.lifecycle.action(task_id, action, idempotency_key=key)
+            elif name == "causality_task_browser":
+                browser_operation = arguments.get("operation")
+                operation_fields = {
+                    "observe": ({"mode", "scope", "annotate"}, set()),
+                    "act": (
+                        {"action", "ref", "value", "expected_state_hash"},
+                        {"action", "ref", "expected_state_hash"},
+                    ),
+                    "assert": (
+                        {"property", "ref", "expected_state_hash"},
+                        {"property", "ref", "expected_state_hash"},
+                    ),
+                    "inspect": (
+                        {"inspection", "ref", "expected_state_hash"},
+                        {"inspection", "ref", "expected_state_hash"},
+                    ),
+                    "visual": (
+                        {"ref", "expected_state_hash"},
+                        {"expected_state_hash"},
+                    ),
+                }
+                if browser_operation not in operation_fields:
+                    raise TaskLifecycleError(
+                        "validation_error", "unknown browser operation"
+                    )
+                optional, operation_required = operation_fields[browser_operation]
+                self._strict(
+                    arguments,
+                    allowed=common | {"operation"} | optional,
+                    required=common | {"operation"} | operation_required,
+                )
+                action = {
+                    "kind": "browser",
+                    **{
+                        field: arguments[field]
+                        for field in ({"operation"} | optional)
+                        if field in arguments
+                    },
+                }
+                receipt = self.lifecycle.perform_action(
+                    task_id, action, idempotency_key=key
+                )
+                session = receipt.session
+                ephemeral = receipt.ephemeral
             elif name == "causality_task_verify":
                 allowed = common | {"requirement_id", "mode", "evidence_hash", "approved", "approver", "rationale", "proof"}
                 self._strict(arguments, allowed=allowed, required=common | {"requirement_id", "mode"})
@@ -818,6 +1001,10 @@ class CausalityMCPServer:
                 raise TaskLifecycleError("unknown_tool", f"unknown tool: {name}")
         replayed = self.ledger.event_count() == before
         data, event_hash = self._operation_data(session, operation, str(key))
+        if ephemeral:
+            data["untrusted"] = {
+                name: wrap_untrusted(value) for name, value in ephemeral.items()
+            }
         return _text_result(
             {
                 "ok": True,
@@ -877,7 +1064,7 @@ class CausalityMCPServer:
                 return _text_result(json.dumps(workflow_manifest(), ensure_ascii=True, indent=2))
             lifecycle_names = {
                 "causality_task_begin", "causality_task_approve", "causality_task_action",
-                "causality_task_http",
+                "causality_task_http", "causality_task_browser",
                 "causality_task_verify", "causality_task_verdict", "causality_task_complete",
                 "causality_task_resolve", "causality_task_reflect", "causality_append_evidence",
             }

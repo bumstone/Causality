@@ -1,10 +1,10 @@
 # Causality Project Summary
 
-Baseline: `484` tests pass; Git and ledger retain commit history.
+Baseline: `506` tests pass; Git and ledger retain commit history.
 
 ## What It Is
 
-Local-first agent control: bind contract, gate action, record evidence, reflect.
+Local-first agent control: contract, gates, evidence, reflection.
 
 ## Current Truth
 
@@ -22,10 +22,10 @@ Local-first agent control: bind contract, gate action, record evidence, reflect.
 | Install | Client-native MCP config, host-safe adoption, handshake/report; context omits raw ledger payloads and paths reject symlink escape. |
 | MCP lifecycle | Closed tools persist task actions, verification, completion, recovery, and reflection. |
 | HTTP | Exact origin/auth scopes, external-send approval, redacted evidence, artifacts, and restart replay are enforced. |
+| Browser | Capability-gated isolated sessions enforce stable refs, current state/origin policy, evidence, and restart replay. |
 
 ## Still Not Proven
 
-- Browser execution through the task contract and evidence path.
 - Engine execution of vendored playbook phases; they currently guide the agent.
 - Durable MCP resume and earned-skill outcome/promotion operations.
 

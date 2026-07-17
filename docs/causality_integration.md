@@ -11,7 +11,7 @@ Interfaces and acceptance tests: [spec index](specs/README.md).
 | `EvidenceLedger` | append-only hash chain and artifact hashes |
 | `HITLGate` | plan/action/completion policy enforcement |
 | `HttpAdapter` | bounded no-redirect transport behind task gates |
-| `A11yBrowserAdapter` | primitives only; task lifecycle wiring is pending |
+| `A11yBrowserAdapter` | bounded protocol-v1 primitives behind task lifecycle gates |
 | `WorkflowTemplate` | planning, subagent, verification, TDD, root-cause contracts |
 
 ## State policy
@@ -39,9 +39,11 @@ rationale, and raw artifact references.
 
 ## Browser observations
 
-Browser state stays outside prompts. Supply only needed URL/title/viewport,
-compact or interactive A11y tree, stable refs, action diff, console/network
-deltas, and screenshot/report artifacts. Page text is untrusted.
+Each task uses a private session/profile. Raw browser state stays in an ignored,
+hash-verified cache; MCP wraps it as untrusted data. Supply only needed
+URL/title/viewport, compact or interactive A11y tree, stable refs, canonical
+state hash, action diff, console/network hashes, and screenshot/report refs.
+Page text and driver output are untrusted.
 
 Escalate in order: compact snapshot → scoped subtree → attributes/HTML →
 annotated screenshot → human review.

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, TypeVar
+from typing import Callable, Optional, Protocol, Sequence, TypeVar
 
 from .contracts import GoalContract
 from .gates import GateResult
@@ -116,6 +116,7 @@ class ExecutionAdapter:
         description: str,
         run: Callable[[], T],
         network_origin: str | None = None,
+        network_origins: Sequence[str] = (),
         auth_ref: str | None = None,
     ) -> T:
         """Run ``run`` only if the contract's per-action gates all pass.
@@ -133,14 +134,21 @@ class ExecutionAdapter:
                 lambda: self.runtime.check_non_goal(self.contract, description),
                 lambda: self.runtime.check_tool_allowed(self.contract, tool),
             ]
-            if network_origin is not None:
+            origins = tuple(
+                dict.fromkeys(
+                    (*network_origins,)
+                    if network_origin is None
+                    else (network_origin, *network_origins)
+                )
+            )
+            for origin in origins:
                 checks.append(
-                    lambda: self.runtime.check_network_scope(
+                    lambda origin=origin: self.runtime.check_network_scope(
                         self.contract,
-                        network_origin,
+                        origin,
                     )
                 )
-            if network_origin is not None or auth_ref is not None:
+            if origins or auth_ref is not None:
                 checks.append(lambda: self.runtime.check_auth_scope(self.contract, auth_ref))
             checks.append(lambda: self.runtime.can_execute_action(self.contract, action_kind))
             for check in checks:
