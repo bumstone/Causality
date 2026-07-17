@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from causality.contracts import (
     AuditEventType,
+    EvidenceKind,
     GoalContract,
     PermissionContract,
     VerificationRequirement,
@@ -333,6 +334,161 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 )
             self.assertEqual(stale.exception.code, "phase_mismatch")
             self.assertEqual(lifecycle.ledger.event_count(), before)
+
+    def test_verification_result_cannot_replace_required_phase_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lifecycle, task = self._begin(root)
+            task = lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="start",
+                idempotency_key="verify-only-start",
+            )
+            task = lifecycle.verify(
+                task.task_id,
+                "unit",
+                idempotency_key="verify-only-run",
+            )
+            verify_record = task.idempotency[("verify", "verify-only-run")]
+            verify_hash = verify_record.response["event_hash"]
+            verify_action_hash = next(
+                event.entry_hash
+                for event in lifecycle.ledger.events_for_contract(
+                    task.task_id, all_segments=True
+                )
+                if event.event_type == AuditEventType.TASK_ACTION_RESULT.value
+                and event.payload.get("operation") == "verify"
+            )
+            verdict_hashes = []
+            for index, verifier in enumerate(("correctness", "evidence"), start=1):
+                key = f"verify-only-verdict-{index}"
+                task = lifecycle.verdict(
+                    task.task_id,
+                    verifier=verifier,
+                    status="pass",
+                    rationale="verification passed but no phase action ran",
+                    evidence_refs=(verify_hash,),
+                    idempotency_key=key,
+                )
+                verdict_hashes.append(
+                    task.idempotency[("verdict", key)].response[
+                        "decision_event_hash"
+                    ]
+                )
+
+            with self.assertRaises(TaskLifecycleError) as caught:
+                lifecycle.phase(
+                    task.task_id,
+                    phase_id=REPRODUCE,
+                    action="finish",
+                    status="passed",
+                    evidence_refs=(verify_action_hash, verify_hash, *verdict_hashes),
+                    idempotency_key="verify-only-finish",
+                )
+
+            self.assertEqual(caught.exception.code, "phase_evidence_incomplete")
+
+    def test_manual_verification_can_satisfy_phase_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lifecycle = TaskLifecycle(
+                root,
+                effect_runner=lambda _action: {"status": "ok"},
+                approval_authorizer=lambda _who, _stage, proof: proof == "trusted",
+            )
+            task = lifecycle.begin(
+                GoalContract(
+                    title="manual phase verification",
+                    summary="accept a human verification decision as phase evidence",
+                    permissions=PermissionContract(
+                        allowed_tools=("file.write",),
+                        write_scope=("out",),
+                    ),
+                    verification_requirements=(
+                        VerificationRequirement(
+                            id="visual",
+                            argv=(),
+                            manual=True,
+                        ),
+                    ),
+                ),
+                idempotency_key="manual-phase-begin",
+                workflow="root-cause-protocol",
+            )
+            task = lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="start",
+                idempotency_key="manual-phase-start",
+            )
+            task = lifecycle.action(
+                task.task_id,
+                {"kind": "file_write", "path": "out/result.txt", "content": "ok"},
+                idempotency_key="manual-phase-action",
+            )
+            action_hash = task.idempotency[
+                ("action", "manual-phase-action")
+            ].event_hashes[-1]
+            evidence = lifecycle.runtime.record_evidence(
+                lifecycle._contract(task),
+                EvidenceKind.A11Y_REPORT,
+                {"summary": "reviewed current visual state"},
+            )
+            task = lifecycle.verify(
+                task.task_id,
+                "visual",
+                idempotency_key="manual-phase-verify",
+                mode="manual",
+                evidence_hash=evidence.entry_hash,
+                approved=True,
+                approver="reviewer",
+                rationale="visual state matches",
+                proof="trusted",
+            )
+            manual_record = task.idempotency[("verify", "manual-phase-verify")]
+            manual_operation_hash = manual_record.event_hashes[-1]
+            manual_event = next(
+                event
+                for event in lifecycle.ledger.events_for_contract(
+                    task.task_id, all_segments=True
+                )
+                if event.entry_hash == manual_operation_hash
+            )
+            self.assertEqual(manual_event.event_type, AuditEventType.TASK_OPERATION.value)
+
+            verdict_hashes = []
+            for index, verifier in enumerate(("correctness", "evidence"), start=1):
+                key = f"manual-phase-verdict-{index}"
+                task = lifecycle.verdict(
+                    task.task_id,
+                    verifier=verifier,
+                    status="pass",
+                    rationale="manual verification is current and approved",
+                    evidence_refs=(evidence.entry_hash,),
+                    idempotency_key=key,
+                )
+                verdict_hashes.append(
+                    task.idempotency[("verdict", key)].response[
+                        "decision_event_hash"
+                    ]
+                )
+
+            task = lifecycle.phase(
+                task.task_id,
+                phase_id=REPRODUCE,
+                action="finish",
+                status="passed",
+                evidence_refs=(
+                    action_hash,
+                    evidence.entry_hash,
+                    manual_operation_hash,
+                    *verdict_hashes,
+                ),
+                idempotency_key="manual-phase-finish",
+            )
+
+            self.assertEqual(task.workflow_phases[0].status, "passed")
 
     def test_projection_revalidates_phase_evidence_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

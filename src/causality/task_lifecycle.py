@@ -627,6 +627,7 @@ def _validate_phase_evidence_events(
     action = False
     work_evidence = False
     positive_evidence_refs: dict[str, int] = {}
+    verification_evidence_refs: set[str] = set()
     latest_mutation_index = max(
         (
             index
@@ -648,14 +649,21 @@ def _validate_phase_evidence_events(
         recognized = True
         if event.event_type == TASK_ACTION_RESULT:
             completed = event.payload.get("outcome") == "completed"
-            action = action or completed
-            work_evidence = work_evidence or completed
+            action_completed = completed and event.payload.get("operation") == "action"
+            action = action or action_completed
+            work_evidence = work_evidence or action_completed
             positive = completed
         elif event.event_type == AuditEventType.EVIDENCE.value:
             evidence_status = event.payload.get("status")
             positive = evidence_status not in {"fail", "blocked", "timeout", "error"}
             if positive:
                 positive_evidence_refs[ref] = index
+                if (
+                    event.payload.get("kind")
+                    == EvidenceKind.VERIFICATION_RESULT.value
+                    and evidence_status == "pass"
+                ):
+                    verification_evidence_refs.add(ref)
             work_evidence = work_evidence or positive
         elif event.event_type == AuditEventType.VERIFIER_DECISION.value:
             positive = event.payload.get("status") == "pass"
@@ -676,6 +684,35 @@ def _validate_phase_evidence_events(
                 response, Mapping
             ):
                 positive = response.get("status") == "supported"
+                work_evidence = work_evidence or positive
+            elif event.payload.get("operation") == "verify" and isinstance(
+                response, Mapping
+            ):
+                request = event.payload.get("request")
+                evidence_ref = response.get("evidence_hash")
+                decision_ref = response.get("decision_hash")
+                evidence_record = (
+                    indexed.get(evidence_ref) if isinstance(evidence_ref, str) else None
+                )
+                decision_record = (
+                    indexed.get(decision_ref) if isinstance(decision_ref, str) else None
+                )
+                positive = bool(
+                    isinstance(request, Mapping)
+                    and request.get("mode") == "manual"
+                    and response.get("status") == "pass"
+                    and evidence_record is not None
+                    and evidence_record[0] > latest_mutation_index
+                    and decision_record is not None
+                    and decision_record[1].event_type
+                    == AuditEventType.HUMAN_DECISION.value
+                    and decision_record[1].payload.get("approved") is True
+                    and decision_record[1].payload.get("evidence_hash") == evidence_ref
+                )
+                if positive:
+                    positive_evidence_refs[ref] = index
+                    verification_evidence_refs.add(ref)
+                    verification_evidence_refs.add(evidence_ref)
                 work_evidence = work_evidence or positive
             else:
                 recognized = False
@@ -703,9 +740,7 @@ def _validate_phase_evidence_events(
     fresh_verification_refs = {
         ref
         for ref in fresh_evidence_refs
-        if events[positive_evidence_refs[ref]].payload.get("kind")
-        == EvidenceKind.VERIFICATION_RESULT.value
-        and events[positive_evidence_refs[ref]].payload.get("status") == "pass"
+        if ref in verification_evidence_refs
     }
     verdict_evidence_refs = (
         fresh_verification_refs if phase.requires_verification else fresh_evidence_refs
