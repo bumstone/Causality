@@ -26,6 +26,7 @@ from .contracts import (
 )
 from .http_adapter import HttpAdapter
 from .ledger import EvidenceLedger
+from .memory import TypedMemory
 from .task_lifecycle import (
     TaskLifecycle,
     TaskLifecycleError,
@@ -476,8 +477,15 @@ class CausalityMCPServer:
             ),
             _tool(
                 "causality_context",
-                "Return recent ledger events and workflow names.",
-                _closed({"limit": {"type": "integer", "default": 5}}),
+                "Return recent ledger events, active failures, and curated knowledge paths.",
+                _closed(
+                    {"limit": {"type": "integer", "minimum": 0, "default": 5}}
+                ),
+            ),
+            _tool(
+                "causality_task_resume",
+                "Read one durable task projection without replaying effects or writing state.",
+                _closed({"task_id": _TEXT}, ("task_id",)),
             ),
             _tool(
                 "causality_task_begin",
@@ -893,6 +901,116 @@ class CausalityMCPServer:
             data = dict(data["gate"])
         return dict(data), event_hash
 
+    @staticmethod
+    def _terminal_result(
+        session: TaskSession,
+        events: list[Any],
+    ) -> dict[str, Any] | None:
+        if not session.terminal:
+            return None
+        terminal_transitions = [
+            event
+            for event in events
+            if event.event_type == "state_transition"
+            and event.payload.get("state") in {"verified", "rejected"}
+        ]
+        if not terminal_transitions:
+            raise TaskLifecycleError(
+                "invalid_task_event",
+                "terminal task has no durable terminal transition",
+            )
+        cause_hash = terminal_transitions[-1].payload.get("cause_event_hash")
+        if not isinstance(cause_hash, str) or not cause_hash.strip():
+            raise TaskLifecycleError(
+                "invalid_task_event",
+                "terminal transition has no cause event",
+                details={"event_hash": terminal_transitions[-1].entry_hash},
+            )
+        positions = {
+            event_hash: index for index, event_hash in enumerate(session.event_hashes)
+        }
+        candidates = []
+        for record in session.idempotency.values():
+            response = record.response if isinstance(record.response, Mapping) else {}
+            terminal = False
+            if session.state.value == "verified" and record.operation == "complete":
+                gate = response.get("gate")
+                terminal = isinstance(gate, Mapping) and gate.get("decision") == "pass"
+            elif session.state.value == "rejected" and record.operation == "approve":
+                terminal = response.get("approved") is False
+            elif session.state.value == "rejected" and record.operation == "resolve":
+                terminal = response.get("resolution") == "reject"
+            if terminal and record.event_hashes and cause_hash in record.event_hashes:
+                candidates.append(record)
+        if not candidates:
+            raise TaskLifecycleError(
+                "invalid_task_event",
+                "terminal transition lacks a recorded operation result",
+                details={
+                    "event_hash": terminal_transitions[-1].entry_hash,
+                    "cause_event_hash": cause_hash,
+                },
+            )
+        record = max(
+            candidates,
+            key=lambda item: max(positions.get(value, -1) for value in item.event_hashes),
+        )
+        data = _plain(record.response or {})
+        if record.operation == "complete" and isinstance(data.get("gate"), dict):
+            data = data["gate"]
+        return {
+            "operation": record.operation,
+            "event_hash": record.event_hashes[-1],
+            "data": data,
+        }
+
+    def _resume(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._strict(arguments, allowed={"task_id"}, required={"task_id"})
+        task_id = arguments["task_id"]
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise TaskLifecycleError(
+                "invalid_task_id", "task_id must be a non-blank string"
+            )
+        with self.lifecycle.runtime.execution_lock():
+            session = self.lifecycle.get(task_id)
+            events = self.ledger.events_for_contract(
+                session.task_id, all_segments=True
+            )
+            contract = GoalContract.from_mapping(_plain(session.contract_snapshot))
+            unmet = self.lifecycle.runtime.gate.unmet_verification_ids(
+                contract, events
+            )
+        reflection = _plain(session.reflection or {})
+        reflection_result = (
+            {
+                "event_hash": reflection["event_hash"],
+                "data": reflection["response"],
+            }
+            if reflection
+            else None
+        )
+        return _text_result(
+            {
+                "ok": True,
+                "task": session.to_dict(),
+                "data": {
+                    "contract": _plain(session.contract_snapshot),
+                    "unmet_verification": list(unmet),
+                    "pending_intents": [
+                        {
+                            "kind": intent.kind,
+                            "operation": intent.operation,
+                            "operation_id": intent.operation_id,
+                            "event_hash": intent.event_hash,
+                        }
+                        for intent in session.unresolved_intents
+                    ],
+                    "terminal_result": self._terminal_result(session, events),
+                    "reflection_result": reflection_result,
+                },
+            }
+        )
+
     def _lifecycle_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         # Keep replay classification in the same cross-process critical section
         # as the lifecycle mutation.  Otherwise two servers can both observe
@@ -1247,14 +1365,65 @@ class CausalityMCPServer:
             if name == "causality_context":
                 self._strict(arguments, allowed={"limit"})
                 limit = arguments.get("limit", 5)
-                if isinstance(limit, bool) or not isinstance(limit, int):
-                    raise TaskLifecycleError("validation_error", "limit must be an integer")
+                if (
+                    isinstance(limit, bool)
+                    or not isinstance(limit, int)
+                    or limit < 0
+                ):
+                    raise TaskLifecycleError(
+                        "validation_error", "limit must be a non-negative integer"
+                    )
+                failures = TypedMemory(self.project).entries(
+                    "failures", active_only=True
+                )
+                if limit:
+                    failures = failures[-limit:]
+                else:
+                    failures = []
+
+                def markdown_paths(directory: str) -> list[str]:
+                    root = self.project / directory
+                    return (
+                        sorted(
+                            path.relative_to(self.project).as_posix()
+                            for path in root.rglob("*.md")
+                            if path.is_file()
+                        )
+                        if root.is_dir()
+                        else []
+                    )
+
+                with self.lifecycle.runtime.execution_lock():
+                    if not self.ledger.verify_chain():
+                        raise TaskLifecycleError(
+                            "ledger_integrity_failed",
+                            "ledger hash chain verification failed",
+                        )
+                    tail = self.ledger.context_tail(limit)
+
                 return _text_result(
                     json.dumps(
                         {
+                            "ok": True,
                             "project": str(self.project),
-                            "ledger_tail": self.ledger.context_tail(limit),
+                            "ledger_tail": tail,
                             "workflows": [item["name"] for item in workflow_manifest()["workflows"]],
+                            "knowledge": {
+                                "active_failures": [
+                                    item.to_dict() for item in failures
+                                ],
+                                "curated_markdown": {
+                                    "memory": markdown_paths("memory"),
+                                    "skills": markdown_paths("skills"),
+                                },
+                                "runtime_jsonl": {
+                                    "classification": "local_runtime",
+                                    "recommended_ignore_patterns": [
+                                        "memory/**/*.jsonl",
+                                        "skills/**/*.jsonl",
+                                    ],
+                                },
+                            },
                         },
                         ensure_ascii=True,
                         indent=2,
@@ -1263,6 +1432,8 @@ class CausalityMCPServer:
             if name == "causality_workflows":
                 self._strict(arguments, allowed=set())
                 return _text_result(json.dumps(workflow_manifest(), ensure_ascii=True, indent=2))
+            if name == "causality_task_resume":
+                return self._resume(arguments)
             lifecycle_names = {
                 "causality_task_begin", "causality_task_approve", "causality_task_action",
                 "causality_task_phase", "causality_task_hypothesis",

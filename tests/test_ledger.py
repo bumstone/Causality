@@ -340,6 +340,42 @@ class LedgerTests(unittest.TestCase):
             self.assertNotIn("private-contract-id", json.dumps(context))
             self.assertNotIn("another-private-id", json.dumps(context))
 
+    def test_context_tail_spans_rotated_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = EvidenceLedger(Path(temp_dir) / "ledger.jsonl")
+            first = ledger.append(
+                AuditEventType.EVIDENCE,
+                {"kind": "first"},
+                contract_id="private-a",
+            )
+            second = ledger.append(
+                AuditEventType.EVIDENCE,
+                {"kind": "second"},
+                contract_id="private-a",
+            )
+            self.assertIsNotNone(ledger.rotate())
+
+            archived_tail = ledger.context_tail(2)
+            self.assertEqual(
+                [item["event_id"] for item in archived_tail],
+                [first.event_id, second.event_id],
+            )
+
+            third = ledger.append(
+                AuditEventType.STATE_TRANSITION,
+                {"state": "executing"},
+                contract_id="private-b",
+            )
+            crossing_tail = ledger.context_tail(2)
+            self.assertEqual(
+                [item["event_id"] for item in crossing_tail],
+                [second.event_id, third.event_id],
+            )
+            self.assertEqual(
+                [item["contract_ref"] for item in crossing_tail],
+                ["contract-1", "contract-2"],
+            )
+
     def test_find_predicate_cannot_corrupt_cache(self) -> None:
         # codex r3445798584: find() scans the shared cache, so the predicate must
         # receive an isolated copy -- a predicate that mutates the event it sees

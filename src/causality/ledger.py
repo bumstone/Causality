@@ -619,7 +619,8 @@ class EvidenceLedger:
         """
         if limit <= 0:
             return []
-        events = self._load_events()[-limit:]
+        count = self.event_count()
+        events = self.events_page(max(0, count - limit), limit)
         contract_refs: dict[str, str] = {}
         for event in events:
             if event.contract_id and event.contract_id not in contract_refs:
