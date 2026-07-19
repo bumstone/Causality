@@ -518,6 +518,58 @@ class AutomaticOrchestrationContractTests(unittest.TestCase):
             server = self._server(root)
             self.assertTrue(server.ledger.verify_chain())
 
+    @unittest.skipUnless(os.name == "nt", "Windows process stress job")
+    def test_windows_multi_process_lease_stress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            program = "\n".join((
+                "import json, sys",
+                "from causality.mcp_server import CausalityMCPServer",
+                "server=CausalityMCPServer(sys.argv[1])",
+                "controller=sys.argv[3]",
+                "response=server.handle({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'causality_task_lease','arguments':{'task_id':sys.argv[2],'controller_id':controller,'action':'acquire','ttl_seconds':60,'idempotency_key':'lease-'+controller}}})",
+                "print(response['result']['content'][0]['text'])",
+            ))
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+            for round_number in range(8):
+                begin_arguments = self._begin_arguments()
+                begin_arguments["objective"] = (
+                    f"windows lease stress round {round_number}"
+                )
+                begin_arguments["idempotency_key"] = (
+                    f"begin-windows-stress-{round_number}"
+                )
+                result, payload = self._call(
+                    self._server(root),
+                    "causality_task_begin",
+                    begin_arguments,
+                )
+                self.assertFalse(result.get("isError", False), payload)
+                task_id = payload["task"]["task_id"]
+                processes = [
+                    subprocess.Popen(
+                        [sys.executable, "-c", program, str(root), task_id,
+                         f"stress-{round_number}-{worker}"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, env=environment,
+                    )
+                    for worker in range(4)
+                ]
+                payloads = []
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=30)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    payloads.append(json.loads(stdout))
+                self.assertEqual(
+                    sum(item.get("ok") is True for item in payloads), 1, payloads
+                )
+                self.assertEqual(sum(
+                    item.get("error", {}).get("code") == "controller_lease_conflict"
+                    for item in payloads
+                ), 3, payloads)
+            self.assertTrue(self._server(root).ledger.verify_chain())
+
     def test_lease_runtime_rejects_invalid_identity_and_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             server = self._server(Path(temp_dir))
