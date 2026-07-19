@@ -164,7 +164,7 @@ not edit code during onboarding unless the user separately asks for
 implementation.
 """,
     "causality-plan.md": """---
-description: Create an Causality plan with gates, evidence, and verifier criteria.
+description: Create a Causality plan with gates, evidence, and verifier criteria.
 ---
 
 Use `.causality/agent-rules.md`.
