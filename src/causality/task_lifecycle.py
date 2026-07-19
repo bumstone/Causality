@@ -528,6 +528,7 @@ class TaskSession:
     event_hashes: tuple[str, ...]
     terminal: bool
     allowed_next: tuple[str, ...]
+    recommended_next: Mapping[str, Any] = field(default_factory=dict)
     hypothesis_count: int = 0
     blocked_reason: str | None = None
     workflow: str = "legacy"
@@ -564,6 +565,7 @@ class TaskSession:
             "latest_event_hash": self.latest_event_hash,
             "terminal": self.terminal,
             "allowed_next": list(self.allowed_next),
+            "recommended_next": _thaw(self.recommended_next),
             "workflow": self.workflow,
             "workflow_phases": [phase.to_dict() for phase in self.workflow_phases],
             "current_phase_id": self.current_phase_id,
@@ -948,6 +950,456 @@ def _workflow_allowed_next(
     if state is TaskState.PLANNED:
         return ("approve", "phase_start", "reject")
     return ("phase_start", "reject")
+
+
+def _recommended_next(
+    *,
+    state: TaskState,
+    unresolved: tuple[PendingIntent, ...],
+    reflection: Mapping[str, Any] | None,
+    approval_required: bool,
+    phases: tuple[WorkflowPhase, ...],
+    current: WorkflowPhase | None,
+    unmet_verification: tuple[str, ...],
+    phase_progress: Mapping[str, Any],
+    completion_progress: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Return one stable next transition; ``allowed_next`` remains the full set."""
+
+    def item(
+        operation: str,
+        tool: str | None,
+        reason: str,
+        *,
+        requires_human: bool = False,
+        phase_id: str | None = None,
+        requirement_id: str | None = None,
+        operation_id: str | None = None,
+        evidence_refs: tuple[str, ...] = (),
+        approval_stage: str | None = None,
+    ) -> Mapping[str, Any]:
+        value: dict[str, Any] = {
+            "operation": operation,
+            "tool": tool,
+            "reason": reason,
+            "requires_human": requires_human,
+        }
+        if phase_id is not None:
+            value["phase_id"] = phase_id
+        if requirement_id is not None:
+            value["requirement_id"] = requirement_id
+        if operation_id is not None:
+            value["operation_id"] = operation_id
+        if evidence_refs:
+            value["evidence_refs"] = list(evidence_refs)
+        if approval_stage is not None:
+            value["approval_stage"] = approval_stage
+        return _freeze(value)
+
+    pending_action = next(
+        (intent for intent in unresolved if intent.kind == "action"), None
+    )
+    if pending_action is not None:
+        return item(
+            "resolve",
+            "causality_task_resolve",
+            "an effect intent has no durable result; an operator must resolve it",
+            requires_human=True,
+            operation_id=pending_action.operation_id,
+        )
+    pending_completion = next(
+        (intent for intent in unresolved if intent.kind == "completion"), None
+    )
+    if pending_completion is not None:
+        return item(
+            "complete",
+            "causality_task_complete",
+            "the prior completion decision must be replayed exactly",
+            operation_id=pending_completion.operation_id,
+        )
+    if state in {TaskState.VERIFIED, TaskState.REJECTED}:
+        if reflection is None:
+            return item(
+                "reflect",
+                "causality_task_reflect",
+                "every terminal task is reflected exactly once",
+            )
+        return item("done", None, "the terminal task and reflection are durable")
+    if state is TaskState.BLOCKED or (current is not None and current.status == "blocked"):
+        return item(
+            "approve",
+            "causality_task_approve",
+            "blocked work requires an authenticated human decision",
+            requires_human=True,
+            phase_id=current.phase_id if current is not None else None,
+            approval_stage="phase" if current is not None else "final",
+        )
+    if state is TaskState.PLANNED and approval_required:
+        return item(
+            "approve",
+            "causality_task_approve",
+            "the contract risk requires plan approval before execution",
+            requires_human=True,
+            approval_stage="plan",
+        )
+    if phases:
+        if current is None:
+            pending_requirement = next(iter(unmet_verification), None)
+            if pending_requirement is not None:
+                return item(
+                    "verify",
+                    "causality_task_verify",
+                    "all workflow phases passed; frozen verification remains",
+                    requirement_id=pending_requirement,
+                )
+            if completion_progress.get("needs_evidence"):
+                return item(
+                    "append_evidence",
+                    "causality_append_evidence",
+                    "completion still requires declared current evidence",
+                )
+            if completion_progress.get("needs_review_reset"):
+                return item(
+                    "verify",
+                    "causality_task_verify",
+                    "start a fresh verification review window after conflicting verifier evidence",
+                    requirement_id=completion_progress.get("requirement_id"),
+                )
+            if completion_progress.get("needs_verdict"):
+                return item(
+                    "verdict",
+                    "causality_task_verdict",
+                    "completion still requires independent cited verifier decisions",
+                    evidence_refs=tuple(completion_progress.get("evidence_refs", ())),
+                )
+            return item(
+                "complete",
+                "causality_task_complete",
+                "all workflow phases are closed; evaluate the completion gate",
+            )
+        if current.status == "pending":
+            return item(
+                "phase_start",
+                "causality_task_phase",
+                "start the next persisted workflow phase",
+                phase_id=current.phase_id,
+            )
+        completion_blocked = any(
+            completion_progress.get(name)
+            for name in ("needs_evidence", "needs_review_reset", "needs_verdict")
+        )
+        if phase_progress.get("ready") and not completion_blocked:
+            return item(
+                "phase_finish",
+                "causality_task_phase",
+                "the running phase satisfies its action, evidence, verification, and verdict gates",
+                phase_id=current.phase_id,
+                evidence_refs=tuple(phase_progress.get("evidence_refs", ())),
+            )
+        if current.requires_action and not phase_progress.get("has_action"):
+            return item(
+                "action",
+                "causality_task_action",
+                "the running phase requires host-supplied work",
+                phase_id=current.phase_id,
+            )
+        if (
+            (current.playbook, current.name)
+            in {
+                ("root-cause-protocol", "hypothesis"),
+                ("debugging", "isolate"),
+            }
+            and not phase_progress.get("has_hypothesis")
+        ):
+            return item(
+                "hypothesis",
+                "causality_task_hypothesis",
+                "the debugging phase requires a host-supplied evidence-backed hypothesis",
+                phase_id=current.phase_id,
+            )
+        if not phase_progress.get("has_work"):
+            return item(
+                "append_evidence",
+                "causality_append_evidence",
+                "the running phase requires task-scoped work evidence",
+                phase_id=current.phase_id,
+            )
+        if (
+            current.requires_verification or unmet_verification
+        ) and not phase_progress.get("has_fresh_verification"):
+            requirement_id = next(iter(unmet_verification), None) or phase_progress.get(
+                "requirement_id"
+            )
+            return item(
+                "verify",
+                "causality_task_verify",
+                "the running phase requires fresh verification after its latest mutation",
+                phase_id=current.phase_id,
+                requirement_id=requirement_id,
+            )
+        if completion_progress.get("needs_review_reset"):
+            return item(
+                "verify",
+                "causality_task_verify",
+                "start a fresh verification review window after conflicting verifier evidence",
+                phase_id=current.phase_id,
+                requirement_id=completion_progress.get("requirement_id"),
+            )
+        return item(
+            "verdict",
+            "causality_task_verdict",
+            "the running phase still needs an independent cited verifier decision",
+            phase_id=current.phase_id,
+            evidence_refs=tuple(completion_progress.get("evidence_refs", ()))
+            or tuple(phase_progress.get("verifier_evidence_refs", ())),
+        )
+    if state is TaskState.PLANNED:
+        return item(
+            "action",
+            "causality_task_action",
+            "the low-risk contract may enter execution through a scoped action",
+        )
+    pending_requirement = next(iter(unmet_verification), None)
+    if pending_requirement is not None:
+        return item(
+            "verify",
+            "causality_task_verify",
+            "a frozen verification requirement is still pending",
+            requirement_id=pending_requirement,
+        )
+    if completion_progress.get("needs_evidence"):
+        return item(
+            "append_evidence",
+            "causality_append_evidence",
+            "completion still requires declared current evidence",
+        )
+    if completion_progress.get("needs_review_reset"):
+        return item(
+            "verify",
+            "causality_task_verify",
+            "start a fresh verification review window after conflicting verifier evidence",
+            requirement_id=completion_progress.get("requirement_id"),
+        )
+    if completion_progress.get("needs_verdict"):
+        return item(
+            "verdict",
+            "causality_task_verdict",
+            "completion still requires independent cited verifier decisions",
+            evidence_refs=tuple(completion_progress.get("evidence_refs", ())),
+        )
+    return item(
+        "complete",
+        "causality_task_complete",
+        "the task is ready for the fixed completion gate",
+    )
+
+
+def _phase_progress(
+    events: list[LedgerEvent],
+    phase_data: Mapping[str, Any] | None,
+    phase: WorkflowPhase | None,
+    contract: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if phase_data is None or phase is None or phase.status != "running":
+        return MappingProxyType({})
+    start = int(phase_data.get("start_position", -1))
+    latest_mutation = max(
+        (
+            index
+            for index, event in enumerate(events)
+            if index > start and event.payload.get("mutates_task") is True
+        ),
+        default=-1,
+    )
+    evidence_refs: list[str] = []
+    positive_refs: set[str] = set()
+    verification_refs: set[str] = set()
+    has_action = False
+    has_work = False
+    has_hypothesis = False
+    verdicts: list[tuple[str, tuple[str, ...], int]] = []
+    for index, event in enumerate(events):
+        if index <= start:
+            continue
+        payload = event.payload
+        if event.event_type == TASK_ACTION_RESULT:
+            positive = payload.get("outcome") == "completed"
+            if positive:
+                evidence_refs.append(event.entry_hash)
+                positive_refs.add(event.entry_hash)
+                if payload.get("operation") == "action":
+                    has_action = True
+                    has_work = True
+        elif event.event_type == AuditEventType.EVIDENCE.value:
+            positive = payload.get("status") not in {
+                "fail",
+                "blocked",
+                "timeout",
+                "error",
+            }
+            if positive:
+                evidence_refs.append(event.entry_hash)
+                positive_refs.add(event.entry_hash)
+                has_work = True
+                if (
+                    payload.get("kind") == EvidenceKind.VERIFICATION_RESULT.value
+                    and payload.get("status") == "pass"
+                    and index > latest_mutation
+                ):
+                    verification_refs.add(event.entry_hash)
+        elif event.event_type == AuditEventType.VERIFIER_DECISION.value:
+            citations = payload.get("evidence_refs")
+            verifier = payload.get("verifier")
+            if (
+                payload.get("status") == "pass"
+                and isinstance(verifier, str)
+                and isinstance(citations, list)
+            ):
+                evidence_refs.append(event.entry_hash)
+                verdicts.append((verifier.casefold(), tuple(citations), index))
+        elif event.event_type == TASK_OPERATION:
+            response = payload.get("response")
+            if (
+                payload.get("operation") == "verify"
+                and isinstance(response, Mapping)
+                and response.get("status") == "pass"
+            ):
+                evidence_refs.append(event.entry_hash)
+                positive_refs.add(event.entry_hash)
+                has_work = True
+                verification_refs.add(event.entry_hash)
+            elif (
+                payload.get("operation") == "hypothesis"
+                and isinstance(response, Mapping)
+                and response.get("status") == "supported"
+            ):
+                evidence_refs.append(event.entry_hash)
+                positive_refs.add(event.entry_hash)
+                has_work = True
+                has_hypothesis = True
+
+    cited = set(evidence_refs)
+    passing_verifiers = {
+        verifier
+        for verifier, citations, verdict_index in verdicts
+        if citations
+        and set(citations) <= cited
+        and any(
+            ref in positive_refs
+            and verdict_index
+            > next(
+                index
+                for index, event in enumerate(events)
+                if event.entry_hash == ref
+            )
+            for ref in citations
+        )
+    }
+    ready = False
+    if evidence_refs:
+        try:
+            _validate_phase_evidence_events(
+                events,
+                phase,
+                tuple(evidence_refs),
+                start_index=start,
+                status="passed",
+            )
+            ready = True
+        except TaskLifecycleError:
+            pass
+    requirements = contract.get("verification_requirements", ())
+    requirement_id = next(
+        (
+            value.get("id")
+            for value in requirements
+            if isinstance(value, Mapping) and value.get("required", True)
+        ),
+        None,
+    )
+    verifier_evidence = verification_refs or positive_refs
+    return _freeze(
+        {
+            "ready": ready,
+            "has_action": has_action,
+            "has_work": has_work,
+            "has_hypothesis": has_hypothesis,
+            "has_fresh_verification": bool(verification_refs),
+            "passing_verdicts": len(passing_verifiers),
+            "evidence_refs": tuple(evidence_refs),
+            "verifier_evidence_refs": tuple(
+                ref for ref in evidence_refs if ref in verifier_evidence
+            ),
+            "requirement_id": requirement_id,
+        }
+    )
+
+
+def _completion_progress(
+    runtime: Causality,
+    events: list[LedgerEvent],
+    contract: GoalContract,
+) -> Mapping[str, Any]:
+    last_mutation = max(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.payload.get("mutates_task") is True
+        ),
+        default=-1,
+    )
+    if contract.verification_requirements:
+        issues, review_after, evidence_refs = (
+            runtime.gate._structured_requirement_issues(
+                contract.verification_requirements,
+                events,
+                workspace_root=contract.workspace_root,
+                last_mutation=last_mutation,
+            )
+        )
+    else:
+        issues, review_after, evidence_refs = [], last_mutation, set()
+    generic_issues, generic_after, generic_refs = (
+        runtime.gate._structured_generic_evidence_issues(
+            contract,
+            events,
+            workspace_root=contract.workspace_root,
+            last_mutation=last_mutation,
+        )
+    )
+    issues.extend(generic_issues)
+    review_after = max(review_after, generic_after)
+    evidence_refs.update(generic_refs)
+    verifier_issues = runtime.gate._structured_verifier_issues(
+        events,
+        None,
+        review_after=review_after,
+        requirement_hashes=evidence_refs,
+        min_passes=2,
+    )
+    quorum_only = bool(verifier_issues) and all(
+        issue.startswith("completion requires at least ")
+        for issue in verifier_issues
+    )
+    requirement_id = next(
+        (
+            requirement.id
+            for requirement in contract.verification_requirements
+            if requirement.required
+        ),
+        None,
+    )
+    return _freeze(
+        {
+            "needs_evidence": bool(issues),
+            "needs_verdict": not issues and quorum_only,
+            "needs_review_reset": not issues
+            and bool(verifier_issues)
+            and not quorum_only,
+            "evidence_refs": tuple(sorted(evidence_refs)),
+            "requirement_id": requirement_id,
+        }
+    )
 
 
 class TaskLifecycle:
@@ -5588,6 +6040,19 @@ class TaskLifecycle:
             ),
             None,
         )
+        projected_contract = GoalContract.from_mapping(_thaw(frozen_contract))
+        unmet_verification = self.runtime.gate.unmet_verification_ids(
+            projected_contract, scoped
+        )
+        phase_progress = _phase_progress(
+            scoped,
+            current_workflow_phase,
+            projected_current_phase,
+            frozen_contract,
+        )
+        completion_progress = _completion_progress(
+            self.runtime, scoped, projected_contract
+        )
         session = TaskSession(
             schema_version=SCHEMA_VERSION,
             task_id=task_id,
@@ -5608,6 +6073,17 @@ class TaskLifecycle:
                 reflection,
                 projected_workflow_phases,
                 projected_current_phase,
+            ),
+            recommended_next=_recommended_next(
+                state=projected_state,
+                unresolved=unresolved,
+                reflection=reflection,
+                approval_required=bool(contract.get("approval_required")),
+                phases=projected_workflow_phases,
+                current=projected_current_phase,
+                unmet_verification=tuple(unmet_verification),
+                phase_progress=phase_progress,
+                completion_progress=completion_progress,
             ),
             hypothesis_count=hypothesis_count,
             blocked_reason=(
@@ -5639,6 +6115,14 @@ class TaskLifecycle:
                     allow_pending=state is not TaskState.BLOCKED,
                 ),
             )
+            if state is TaskState.BLOCKED:
+                recommendation = dict(_thaw(session.recommended_next))
+                recommendation["evidence_refs"] = list(
+                    session.approval_evidence_refs
+                )
+                session = replace(
+                    session, recommended_next=_freeze(recommendation)
+                )
             if state is not TaskState.BLOCKED:
                 if self._hypothesis_block_record(session) is not None:
                     recovery = "hypothesis"
@@ -5651,7 +6135,49 @@ class TaskLifecycle:
                         and cause.payload.get("operation") == "verify"
                         else "phase_finish"
                     )
-                session = replace(session, allowed_next=(recovery, "reject"))
+                recovery_tool = {
+                    "verify": "causality_task_verify",
+                    "phase_finish": "causality_task_phase",
+                    "hypothesis": "causality_task_hypothesis",
+                }[recovery]
+                session = replace(
+                    session,
+                    allowed_next=(recovery, "reject"),
+                    recommended_next=_freeze(
+                        {
+                            "operation": recovery,
+                            "tool": recovery_tool,
+                            "reason": "replay the exact checkpointed request to finish the interrupted durable transition",
+                            "requires_human": False,
+                            "replay_required": True,
+                            "phase_id": session.current_phase_id,
+                        }
+                    ),
+                )
+        latest_block_transition = next(
+            (
+                event
+                for event in reversed(scoped)
+                if event.event_type == STATE_TRANSITION
+                and event.payload.get("state") == TaskState.BLOCKED.value
+            ),
+            None,
+        )
+        if (
+            session.state is TaskState.BLOCKED
+            and session.recommended_next.get("approval_stage") == "final"
+            and latest_block_transition is not None
+            and latest_block_transition.payload.get("reason")
+            == "completion gate requires intervention"
+        ):
+            final_refs = self._current_evidence(session)
+            recommendation = dict(_thaw(session.recommended_next))
+            recommendation["evidence_refs"] = list(final_refs)
+            session = replace(
+                session,
+                approval_evidence_refs=final_refs,
+                recommended_next=_freeze(recommendation),
+            )
         return session
 
 

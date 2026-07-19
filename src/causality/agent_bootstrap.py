@@ -30,6 +30,7 @@ not need to name the workflow.
 - Code or product work that needs evidence before completion: `causality-verify`
 - Bugs, regressions, broken behavior: `causality-root-cause`
 - Browser/UI workflows: `causality-a11y-observe`
+- End-to-end autonomous execution or "continue until terminal": `causality-orchestrate`
 - Session start or project onboarding: `onboard`
 - Final handoff or "done" claims: `causality-complete`
 
@@ -138,6 +139,7 @@ Project slash commands are installed under `.claude/commands/`:
 - `/causality-verify`
 - `/causality-root-cause`
 - `/causality-a11y-observe`
+- `/causality-orchestrate`
 - `/causality-complete`
 """
 
@@ -219,6 +221,18 @@ Completion claim: $ARGUMENTS
 Check required evidence, verifier passes, unresolved risks, and human approval
 requirements. If any gate fails, report the blocker instead of claiming done.
 """,
+    "causality-orchestrate.md": """---
+description: Drive the durable Causality lifecycle until terminal or an explicit handoff.
+---
+
+Use `skills/causality-orchestrate.md` and the advertised MCP tools only.
+
+Objective: $ARGUMENTS
+
+Run the restart-safe causality-orchestrate loop. Stop for bootstrap remediation,
+missing capability, uncertain effects, HITL proof, host work, or independent
+verifier input. Never invent a decision or persist a secret.
+""",
 }
 
 
@@ -237,6 +251,8 @@ without waiting for the user to name it:
 - `causality-verify`
 - `causality-root-cause`
 - `causality-a11y-observe`
+- `causality-orchestrate` uses `skills/causality-orchestrate.md` for end-to-end
+  execution and resume-until-terminal requests
 - `causality-complete`
 
 Use the MCP-style server when available:
@@ -926,6 +942,34 @@ read-only inspection sequentially.
 """
 
 
+CAUSALITY_ORCHESTRATE_SKILL = """# Skill: causality-orchestrate
+
+Use for end-to-end execution or requests to continue until a task is terminal.
+
+## Bootstrap contract
+
+The installed Python package and `causality install-agent --client <name>
+--verify` are the official pre-session bootstrap. Once MCP is loaded, call
+`causality_init(client=<name>, verify=true)`. Continue only on `active`; return
+its exact remediation and stop on `pending|broken`. Then read `tools/list` and
+never guess an unadvertised capability.
+
+## Restart-safe loop
+
+1. Begin or resume one task; acquire its controller lease.
+2. Refresh resume state before every mutation.
+3. Execute only `task.recommended_next`; persist a secret-free checkpoint.
+4. Host supplies edits/actions. Humans alone supply approval or recovery proof.
+   Independent verifiers supply their own cited decisions.
+5. Never replay an uncertain effect. Stop on pending intent for HITL resolution.
+6. Complete through the server gate, reflect once, release the lease, and return
+   task ID plus final event hash.
+
+Never store proof, credentials, browser text, raw HTTP bodies, or ledger payloads.
+The controller lease coordinates writers; it is not authentication.
+"""
+
+
 MEMORY_INDEX = """# Long-term Memory
 
 Six typed stores (ADR 0005 §2.2). Keep `assumptions` separate from `decisions`:
@@ -1038,6 +1082,7 @@ def install_agent_files(
 
     files[root / "skills" / "README.md"] = SKILL_INDEX
     files[root / "skills" / "onboard-project.md"] = ONBOARD_PROJECT_SKILL
+    files[root / "skills" / "causality-orchestrate.md"] = CAUSALITY_ORCHESTRATE_SKILL
 
     files[root / "memory" / "README.md"] = MEMORY_INDEX
     for mem_type, purpose in MEMORY_TYPES.items():

@@ -39,8 +39,8 @@ exactly, while uncertain effects require human resolution.
 ## Caller-driven external MCP sequence
 
 ```text
-init -> begin -> phase/action -> verify -> two verdicts -> complete -> reflect
-     -> resume/context as needed -> outcomes -> HITL promote -> recall
+install -> init -> begin -> lease -> recommended_next loop -> complete -> reflect
+        -> release -> outcomes -> HITL promote -> recall
 ```
 
 `init` returns `active|pending|broken`; host adoption and client trust are never
@@ -48,6 +48,10 @@ guessed. Only a verified terminal task's reflection creates a local candidate;
 a rejected reflection returns no skill and must not enter the outcome flow.
 Outcomes cite exact terminal verification evidence. Promotion uses fixed
 thresholds and stores no proof.
+
+`recommended_next` chooses one transition; the older `allowed_next` remains the
+full compatible set. Once claimed, task mutations require the active controller
+lease. Leases live in a separate ledger scope and never count as task evidence.
 
 ## Boundaries
 

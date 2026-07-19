@@ -13,6 +13,8 @@ without waiting for the user to name it:
 - `causality-verify`
 - `causality-root-cause`
 - `causality-a11y-observe`
+- `causality-orchestrate` uses `skills/causality-orchestrate.md` for end-to-end
+  execution and resume-until-terminal requests
 - `causality-complete`
 
 Use the MCP-style server when available:

@@ -35,12 +35,15 @@ causality install-agent --client codex --adopt --verify
 # --client claude or generic
 ```
 
-Installs routing, local ledger/MCP config, and on-demand workflow/skill files.
+This installed CLI is the official bootstrap. It installs routing, local
+ledger/MCP config, and on-demand workflow/skill files including
+`skills/causality-orchestrate.md`. The experimental plugin manifest is not used.
 
 Host `AGENTS.md` and `CLAUDE.md` are never overwritten. `--force` refreshes
 other generated files; update helpers use it automatically for schema changes.
 MCP `causality_init` accepts only `client` and `verify`; `--force` and `--adopt`
-are CLI-only operator actions.
+are CLI-only operator actions. `causality_init(verify=true)` is session
+activation after MCP registration, not a replacement for package installation.
 
 `auto` needs exactly one existing Codex/Claude signal; otherwise it returns an
 explicit rerun command.

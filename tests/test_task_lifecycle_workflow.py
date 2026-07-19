@@ -824,6 +824,13 @@ class WorkflowLifecycleTests(unittest.TestCase):
             recovered = build_lifecycle()
             pending = recovered.get(task.task_id)
             self.assertEqual(pending.allowed_next, ("phase_finish", "reject"))
+            self.assertEqual(
+                pending.to_dict()["recommended_next"]["operation"],
+                "phase_finish",
+            )
+            self.assertTrue(
+                pending.to_dict()["recommended_next"]["replay_required"]
+            )
             before = recovered.ledger.event_count()
             historical = recovered.phase(
                 task.task_id,
@@ -845,6 +852,10 @@ class WorkflowLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(blocked.state, TaskState.BLOCKED)
             self.assertEqual(blocked.allowed_next, ("approve",))
+            self.assertEqual(
+                blocked.to_dict()["recommended_next"]["evidence_refs"],
+                list(blocked.approval_evidence_refs),
+            )
             self.assertEqual(recovered.ledger.event_count(), before + 1)
 
     def test_phase_enabled_task_blocks_effect_before_phase_start(self) -> None:
@@ -973,6 +984,12 @@ class WorkflowLifecycleTests(unittest.TestCase):
             self.assertEqual(pending.state, TaskState.BLOCKED)
             self.assertEqual(pending.workflow_phases[0].status, "blocked")
             self.assertEqual(pending.allowed_next, ("verify", "reject"))
+            self.assertEqual(
+                pending.to_dict()["recommended_next"]["operation"], "verify"
+            )
+            self.assertTrue(
+                pending.to_dict()["recommended_next"]["replay_required"]
+            )
             self.assertEqual(
                 pending.blocked_reason,
                 "workflow recovery requires an exact operation replay",
@@ -1368,6 +1385,13 @@ class WorkflowLifecycleTests(unittest.TestCase):
             self.assertEqual(blocked.state, TaskState.BLOCKED)
             self.assertEqual(blocked.approval_evidence_refs, ())
             self.assertEqual(blocked.allowed_next, ("hypothesis", "reject"))
+            self.assertEqual(
+                blocked.to_dict()["recommended_next"]["operation"],
+                "hypothesis",
+            )
+            self.assertTrue(
+                blocked.to_dict()["recommended_next"]["replay_required"]
+            )
             self.assertEqual(
                 blocked.blocked_reason,
                 "workflow recovery requires an exact operation replay",
