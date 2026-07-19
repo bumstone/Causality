@@ -374,6 +374,60 @@ class ReferenceOrchestrator:
         task = result.get("task")
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
         lease = data.get("controller_lease") if isinstance(data, dict) else None
+        if (
+            checkpoint is not None
+            and checkpoint.status == "prepared"
+            and checkpoint.operation == "causality_task_lease"
+            and checkpoint.task_id == task_id
+        ):
+            if checkpoint.lease_id is None:
+                lease_arguments = {
+                    "task_id": task_id,
+                    "controller_id": self.controller_id,
+                    "action": "acquire",
+                    "ttl_seconds": self.lease_seconds,
+                    "idempotency_key": checkpoint.idempotency_key,
+                }
+            else:
+                lease_arguments = {
+                    "task_id": task_id,
+                    "controller_id": self.controller_id,
+                    "action": "release",
+                    "lease_id": checkpoint.lease_id,
+                    "idempotency_key": checkpoint.idempotency_key,
+                }
+            if (
+                semantic_request_sha256("causality_task_lease", lease_arguments)
+                != checkpoint.request_sha256
+            ):
+                return DriverDirective(
+                    "recovery_required",
+                    "the prepared lease request cannot be reconstructed exactly",
+                    task_id,
+                    "causality_task_lease",
+                )
+            replayed = self._call_mutation(
+                "causality_task_lease",
+                lease_arguments,
+                task_id=task_id,
+                lease_id=checkpoint.lease_id,
+                last_event_hash=checkpoint.last_event_hash,
+            )
+            if isinstance(replayed, DriverDirective):
+                return replayed
+            checkpoint = self.checkpoints.load()
+            result = self.transport.call(
+                "causality_task_resume", {"task_id": task_id}
+            )
+            if result.get("ok") is not True or not isinstance(result.get("task"), dict):
+                return DriverDirective(
+                    "recovery_required",
+                    "task resume failed after replaying the prepared lease",
+                    task_id,
+                )
+            task = result["task"]
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            lease = data.get("controller_lease") if isinstance(data, dict) else None
         task_advanced = bool(
             checkpoint is not None
             and isinstance(task, dict)
@@ -526,6 +580,7 @@ class ReferenceOrchestrator:
                         "approval_stage",
                         "phase_id",
                         "operation_id",
+                        "requirement_id",
                         "evidence_refs",
                     )
                     if key in recommendation
@@ -643,6 +698,101 @@ class ReferenceOrchestrator:
             tool,
             operation,
             details={"event_hash": result.get("event_hash")},
+        )
+
+    def submit_human(
+        self, task_id: str, arguments: Mapping[str, Any], *, proof: str,
+    ) -> DriverDirective:
+        """Submit explicit operator judgment without persisting its proof."""
+
+        resumed = self._resume(task_id)
+        if isinstance(resumed, DriverDirective):
+            return resumed
+        task = resumed["task"]
+        recommendation = task["recommended_next"]
+        tool = recommendation.get("tool")
+        if not recommendation.get("requires_human") or tool not in {
+            "causality_task_approve", "causality_task_resolve",
+            "causality_task_verify",
+        }:
+            return DriverDirective("blocked", "task is not waiting for HITL", task_id)
+        lease = self._ensure_owned_lease(task_id, resumed)
+        if isinstance(lease, DriverDirective):
+            return lease
+        payload = dict(arguments)
+        if tool == "causality_task_verify":
+            requirement_id = recommendation.get("requirement_id")
+            if payload.get("requirement_id", requirement_id) != requirement_id or payload.get(
+                "mode", "manual"
+            ) != "manual":
+                return DriverDirective(
+                    "blocked", "human decision does not match the recommended verification", task_id
+                )
+            payload["requirement_id"] = requirement_id
+            payload["mode"] = "manual"
+        payload.update({
+            "task_id": task_id, "controller_id": self.controller_id,
+            "lease_id": lease.get("lease_id"), "proof": proof,
+        })
+        payload.setdefault(
+            "idempotency_key",
+            self._key(task_id, recommendation["operation"], task["latest_event_hash"]),
+        )
+        result = self._call_mutation(
+            tool, payload, task_id=task_id, lease_id=lease.get("lease_id"),
+            phase_id=recommendation.get("phase_id"), proof_bearing=True,
+            last_event_hash=task.get("latest_event_hash"),
+        )
+        if isinstance(result, DriverDirective):
+            return result
+        return DriverDirective(
+            "advanced", "human decision was durably acknowledged", task_id, tool
+        )
+
+    def submit_verifier(
+        self, task_id: str, *, verifier_id: str, provider_id: str,
+        status: str, rationale: str, evidence_refs: tuple[str, ...],
+    ) -> DriverDirective:
+        """Submit one provider-attributed verdict over the exact current evidence."""
+
+        resumed = self._resume(task_id)
+        if isinstance(resumed, DriverDirective):
+            return resumed
+        task = resumed["task"]
+        recommendation = task["recommended_next"]
+        if recommendation.get("operation") != "verdict":
+            return DriverDirective("blocked", "task is not waiting for a verifier", task_id)
+        expected = tuple(recommendation.get("evidence_refs", ()))
+        if not verifier_id.strip() or not provider_id.strip() or set(evidence_refs) != set(expected):
+            return DriverDirective("blocked", "verifier handoff is incomplete", task_id)
+        lease = self._ensure_owned_lease(task_id, resumed)
+        if isinstance(lease, DriverDirective):
+            return lease
+        arguments = {
+            "task_id": task_id, "controller_id": self.controller_id,
+            "lease_id": lease.get("lease_id"), "verifier": verifier_id,
+            "provider_id": provider_id, "status": status, "rationale": rationale,
+            "evidence_refs": list(evidence_refs),
+            "idempotency_key": self._key(
+                task_id, "verdict",
+                canonical_sha256({
+                    "provider_id": provider_id,
+                    "verifier": verifier_id,
+                    "evidence_refs": sorted(evidence_refs),
+                }),
+            ),
+        }
+        result = self._call_mutation(
+            "causality_task_verdict", arguments, task_id=task_id,
+            lease_id=lease.get("lease_id"),
+            phase_id=recommendation.get("phase_id"),
+            last_event_hash=task.get("latest_event_hash"),
+        )
+        if isinstance(result, DriverDirective):
+            return result
+        return DriverDirective(
+            "advanced", "verifier decision was durably acknowledged", task_id,
+            "causality_task_verdict", "verdict",
         )
 
 __all__ = [

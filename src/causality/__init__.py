@@ -61,6 +61,7 @@ from .automatic_orchestration import (
     OrchestrationError,
     ReferenceOrchestrator,
 )
+from .orchestration_environment import bounded_environment_snapshot
 
 __all__ = [
     "ActionType",
@@ -123,6 +124,7 @@ __all__ = [
     "OrchestrationCheckpoint",
     "OrchestrationError",
     "ReferenceOrchestrator",
+    "bounded_environment_snapshot",
     "check_docs",
     "format_plan",
     "over_budget",

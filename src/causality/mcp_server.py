@@ -27,6 +27,7 @@ from .contracts import (
     VerificationRequirement,
 )
 from .controller import ControllerLeaseStore
+from .orchestration_environment import bounded_environment_snapshot
 from .http_adapter import HttpAdapter
 from .ledger import EvidenceLedger
 from .memory import TypedMemory
@@ -270,6 +271,13 @@ class CausalityMCPServer:
         )
         self.controllers = ControllerLeaseStore(self.ledger)
         self.skills = SkillStore(self.project)
+        policy_value = {
+            name: sorted(value) if isinstance(value, frozenset) else value
+            for name, value in vars(effective_policy).items()
+        }
+        self._policy_digest = hashlib.sha256(
+            json.dumps(policy_value, ensure_ascii=True, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
     def _authorize(self, _principal: str, _stage: str, proof: str | None) -> bool:
         return bool(
@@ -692,6 +700,7 @@ class CausalityMCPServer:
                     {
                         **_COMMON,
                         "verifier": _TEXT,
+                        "provider_id": _TEXT,
                         "status": {"type": "string", "enum": ["pass", "fail"]},
                         "rationale": _TEXT,
                         "severity": {"type": "string", "enum": ["normal", "critical"]},
@@ -1164,6 +1173,41 @@ class CausalityMCPServer:
             }
         )
 
+    def _ensure_lease_environment(
+        self,
+        arguments: Mapping[str, Any],
+        action: str,
+        lease: Mapping[str, Any],
+        event_hash: str,
+    ) -> None:
+        environment_recorded = any(
+            event.event_type == AuditEventType.ORCHESTRATION_ENVIRONMENT.value
+            and event.payload.get("lease_event_hash") == event_hash
+            for event in self.ledger.events_for_contract(
+                f"controller:{arguments['task_id']}", all_segments=True
+            )
+        )
+        if environment_recorded:
+            return
+        environment = bounded_environment_snapshot(
+            self.project,
+            tuple(tool["name"] for tool in self._tools()),
+            self._policy_digest,
+        )
+        self.ledger.append(
+            AuditEventType.ORCHESTRATION_ENVIRONMENT,
+            {
+                "schema_version": 1,
+                "task_id": arguments["task_id"],
+                "controller_id": arguments["controller_id"],
+                "lease_id": lease["lease_id"],
+                "lease_action": action,
+                "lease_event_hash": event_hash,
+                "environment": environment,
+            },
+            contract_id=f"controller:{arguments['task_id']}",
+        )
+
     def _lease(self, arguments: dict[str, Any]) -> dict[str, Any]:
         allowed = {
             "task_id",
@@ -1194,14 +1238,32 @@ class CausalityMCPServer:
             )
         with self.lifecycle.runtime.execution_lock():
             self.lifecycle.get(arguments["task_id"])
-            lease, replayed, event_hash = self.controllers.mutate(
-                arguments["task_id"],
-                controller_id=arguments["controller_id"],
-                action=action,
-                ttl_seconds=arguments.get("ttl_seconds"),
-                lease_id=arguments.get("lease_id"),
-                idempotency_key=arguments["idempotency_key"],
-            )
+            try:
+                lease, replayed, event_hash = self.controllers.mutate(
+                    arguments["task_id"],
+                    controller_id=arguments["controller_id"],
+                    action=action,
+                    ttl_seconds=arguments.get("ttl_seconds"),
+                    lease_id=arguments.get("lease_id"),
+                    idempotency_key=arguments["idempotency_key"],
+                )
+            except TaskLifecycleError as exc:
+                if exc.code == "controller_lease_stale":
+                    recorded = self.controllers.recorded_mutation(
+                        arguments["task_id"],
+                        controller_id=arguments["controller_id"],
+                        action=action,
+                        ttl_seconds=arguments.get("ttl_seconds"),
+                        lease_id=arguments.get("lease_id"),
+                        idempotency_key=arguments["idempotency_key"],
+                    )
+                    if recorded is not None:
+                        recorded_lease, recorded_hash = recorded
+                        self._ensure_lease_environment(
+                            arguments, action, recorded_lease, recorded_hash
+                        )
+                raise
+            self._ensure_lease_environment(arguments, action, lease, event_hash)
         return _text_result(
             {
                 "ok": True,
@@ -1246,6 +1308,7 @@ class CausalityMCPServer:
             if not isinstance(arguments.get("task_id"), str) or not isinstance(key, str):
                 raise TaskLifecycleError("validation_error", "task_id and idempotency_key are required")
             task_id = arguments["task_id"]
+            controller_managed = self.controllers.is_managed(task_id)
             self.controllers.assert_mutation(
                 task_id,
                 controller_id=arguments.get("controller_id"),
@@ -1439,12 +1502,21 @@ class CausalityMCPServer:
                     proof=arguments.get("proof"),
                 )
             elif name == "causality_task_verdict":
-                allowed = common | {"verifier", "status", "rationale", "severity", "evidence_refs"}
+                allowed = common | {
+                    "verifier", "provider_id", "status", "rationale", "severity",
+                    "evidence_refs",
+                }
                 self._strict(arguments, allowed=allowed, required=common | {"verifier", "status", "rationale", "evidence_refs"})
+                if controller_managed and "provider_id" not in arguments:
+                    raise TaskLifecycleError(
+                        "validation_error",
+                        "controller-managed verdict requires provider_id",
+                    )
                 refs = self._string_array(arguments["evidence_refs"], "evidence_refs")
                 session = self.lifecycle.verdict(
                     task_id,
                     verifier=arguments["verifier"],
+                    provider_id=arguments.get("provider_id"),
                     status=arguments["status"],
                     rationale=arguments["rationale"],
                     severity=arguments.get("severity", "normal"),

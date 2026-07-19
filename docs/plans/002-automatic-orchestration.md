@@ -1,6 +1,6 @@
 # Plan 002 — Automatic Orchestration
 
-Status: active; 007A implemented, 007B–007C pending.
+Status: active; 007A–007B implemented, 007C pending.
 
 ## Goal
 
@@ -14,7 +14,7 @@ orders phases, gates effects, records evidence, and decides completion.
    - Add an installer-owned `causality-orchestrate` skill and route.
    - Start with `causality_init(verify=true)`; stop on `pending|broken`.
    - Use additive `recommended_next`; coordinate writers with a task lease.
-2. [ ] **007B — durable loop and recovery**
+2. [x] **007B — durable loop and recovery**
    - Drive phase → action → verify → debug/retry/HITL → complete → reflect.
    - Persist the strict secret-free controller/task/operation/key/request/event checkpoint.
    - Restart after each mutating boundary; never replay an uncertain effect.
