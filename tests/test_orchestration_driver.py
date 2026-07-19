@@ -63,8 +63,9 @@ class _LossyTransport:
 
 
 class _BootstrapTransport:
-    def __init__(self, activation: str):
+    def __init__(self, activation: str, project_root: str | Path):
         self.activation = activation
+        self.project_root = str(Path(project_root).resolve())
         self.calls: list[str] = []
 
     def tools(self) -> tuple[str, ...]:
@@ -72,7 +73,25 @@ class _BootstrapTransport:
 
     def call(self, name: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         self.calls.append(name)
-        return {"activation": self.activation, "remediation": ["restart client"]}
+        return {
+            "activation": self.activation,
+            "project_root": self.project_root,
+            "remediation": ["restart client"],
+        }
+
+
+class _ActiveTransport:
+    def __init__(self, delegate: InProcessMCPTransport, project_root: str | Path):
+        self.delegate = delegate
+        self.project_root = str(Path(project_root).resolve())
+
+    def tools(self) -> tuple[str, ...]:
+        return self.delegate.tools()
+
+    def call(self, name: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        if name == "causality_init":
+            return {"activation": "active", "project_root": self.project_root}
+        return self.delegate.call(name, arguments)
 
 
 class OrchestrationDriverTests(unittest.TestCase):
@@ -82,21 +101,40 @@ class OrchestrationDriverTests(unittest.TestCase):
             root, policy=TaskPolicy(verification_commands=(VERIFY,))
         )
 
+    def driver(
+        self, root: str | Path, transport: Any | None = None
+    ) -> ReferenceOrchestrator:
+        selected = transport or InProcessMCPTransport(self.server(root))
+        if not isinstance(selected, _ActiveTransport):
+            selected = _ActiveTransport(selected, root)
+        driver = ReferenceOrchestrator(
+            selected, CheckpointStore(root, "controller-a")
+        )
+        self.assertEqual(driver.bootstrap().kind, "ready")
+        return driver
+
     def test_bootstrap_stops_before_work_when_activation_is_pending(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            transport = _BootstrapTransport("pending")
+            transport = _BootstrapTransport("pending", root)
             driver = ReferenceOrchestrator(
                 transport, CheckpointStore(root, "controller-a")
             )
             self.assertEqual(driver.bootstrap().kind, "bootstrap_blocked")
             self.assertEqual(transport.calls, ["causality_init"])
 
+    def test_work_and_cross_project_bootstrap_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as other:
+            transport = _BootstrapTransport("active", other)
+            driver = ReferenceOrchestrator(
+                transport, CheckpointStore(root, "controller-a")
+            )
+            self.assertEqual(driver.begin(contract()).kind, "bootstrap_required")
+            self.assertEqual(driver.bootstrap().kind, "bootstrap_blocked")
+            self.assertEqual(driver.begin(contract()).kind, "bootstrap_required")
+
     def test_begin_claim_phase_and_host_handoff_use_real_server(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            driver = ReferenceOrchestrator(
-                InProcessMCPTransport(self.server(root)),
-                CheckpointStore(root, "controller-a"),
-            )
+            driver = self.driver(root)
             begun = driver.begin(contract("root-cause-protocol"))
             self.assertIsInstance(begun, dict)
             assert isinstance(begun, dict)
@@ -112,13 +150,15 @@ class OrchestrationDriverTests(unittest.TestCase):
                 InProcessMCPTransport(server), "causality_task_begin"
             )
             store = CheckpointStore(root, "controller-a")
-            first = ReferenceOrchestrator(lossy, store).begin(contract())
+            first_driver = ReferenceOrchestrator(_ActiveTransport(lossy, root), store)
+            self.assertEqual(first_driver.bootstrap().kind, "ready")
+            first = first_driver.begin(contract())
             self.assertIsInstance(first, DriverDirective)
             assert isinstance(first, DriverDirective)
             self.assertEqual(first.kind, "recovery_required")
             self.assertEqual(store.load().status, "prepared")
             self.assertIsInstance(
-                ReferenceOrchestrator(lossy, store).begin(contract()), dict
+                self.driver(root, lossy).begin(contract()), dict
             )
             starts = [
                 event for event in server.ledger.events(all_segments=True)
@@ -135,9 +175,10 @@ class OrchestrationDriverTests(unittest.TestCase):
                 idempotency_key="phase-a", request_sha256="0" * 64,
                 status="prepared", task_id="another-task",
             ))
-            result = ReferenceOrchestrator(
-                InProcessMCPTransport(server), store
-            ).begin(contract())
+            active = _ActiveTransport(InProcessMCPTransport(server), root)
+            driver = ReferenceOrchestrator(active, store)
+            self.assertEqual(driver.bootstrap().kind, "ready")
+            result = driver.begin(contract())
             self.assertIsInstance(result, DriverDirective)
             assert isinstance(result, DriverDirective)
             self.assertEqual(result.kind, "recovery_required")
@@ -145,10 +186,7 @@ class OrchestrationDriverTests(unittest.TestCase):
 
     def test_host_action_is_checkpointed_then_driver_runs_verification(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            driver = ReferenceOrchestrator(
-                InProcessMCPTransport(self.server(root)),
-                CheckpointStore(root, "controller-a"),
-            )
+            driver = self.driver(root)
             begun = driver.begin(contract())
             assert isinstance(begun, dict)
             task_id = begun["task"]["task_id"]
@@ -158,6 +196,53 @@ class OrchestrationDriverTests(unittest.TestCase):
             }})
             self.assertEqual(submitted.kind, "advanced")
             self.assertEqual(driver.advance(task_id).kind, "verifier_required")
+
+    def test_response_loss_converges_after_phase_action_and_verify(self) -> None:
+        for tool, workflow in (
+            ("causality_task_phase", "root-cause-protocol"),
+            ("causality_task_action", "auto"),
+            ("causality_task_verify", "auto"),
+        ):
+            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as root:
+                server = self.server(root)
+                lossy = _LossyTransport(InProcessMCPTransport(server), tool)
+                driver = self.driver(root, lossy)
+                begun = driver.begin(contract(workflow))
+                assert isinstance(begun, dict)
+                task_id = begun["task"]["task_id"]
+                if tool == "causality_task_phase":
+                    lost = driver.step(task_id)
+                    expected = "host_action_required"
+                else:
+                    lost = driver.submit_host_action(task_id, {"action": {
+                        "kind": "file_write", "path": "out/lost.txt",
+                        "content": "applied once",
+                    }})
+                    if tool == "causality_task_verify":
+                        self.assertEqual(lost.kind, "advanced")
+                        lost = driver.step(task_id)
+                    expected = "verifier_required"
+                self.assertEqual(lost.kind, "recovery_required")
+                recovered = self.driver(root, lossy).advance(task_id)
+                self.assertEqual(recovered.kind, expected)
+
+    def test_released_lease_uses_a_new_acquire_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            server = self.server(root)
+            driver = self.driver(root, InProcessMCPTransport(server))
+            begun = driver.begin(contract())
+            assert isinstance(begun, dict)
+            task_id = begun["task"]["task_id"]
+            first = begun["lease"]
+            released = driver.release(
+                task_id, first["lease_id"],
+                last_event_hash=begun["task"]["latest_event_hash"],
+            )
+            self.assertIsInstance(released, dict)
+            self.assertEqual(driver.step(task_id).kind, "host_action_required")
+            second = server.controllers.state(task_id)
+            self.assertEqual(second["status"], "active")
+            self.assertNotEqual(second["lease_id"], first["lease_id"])
 
 
 if __name__ == "__main__":

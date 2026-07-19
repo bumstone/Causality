@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol
+from uuid import uuid4
 
 from .contracts import utc_now
 from .orchestration_checkpoint import (
@@ -99,6 +100,7 @@ class ReferenceOrchestrator:
         self.controller_id = checkpoints.controller_id
         self.lease_seconds = lease_seconds
         self._tools: set[str] = set()
+        self._active = False
 
     def bootstrap(self, client: str = "auto") -> DriverDirective:
         self._tools = set(self.transport.tools())
@@ -108,13 +110,31 @@ class ReferenceOrchestrator:
             "causality_init", {"client": client, "verify": True}
         )
         activation = result.get("activation")
-        if activation != "active":
+        project_root = result.get("project_root")
+        project_matches = (
+            isinstance(project_root, str)
+            and Path(project_root).resolve() == self.checkpoints.project
+        )
+        if activation != "active" or not project_matches:
             return DriverDirective(
                 "bootstrap_blocked",
-                f"Causality activation is {activation or 'unknown'}",
+                (
+                    f"Causality activation is {activation or 'unknown'}"
+                    if activation != "active"
+                    else "Causality MCP project does not match the checkpoint project"
+                ),
                 details={"remediation": list(result.get("remediation", ()))},
             )
+        self._active = True
         return DriverDirective("ready", "Causality activation and tool discovery passed")
+
+    def _activation_issue(self) -> DriverDirective | None:
+        if self._active:
+            return None
+        return DriverDirective(
+            "bootstrap_required",
+            "bootstrap must prove active installation and matching project before work",
+        )
 
     def _available(self) -> set[str]:
         if not self._tools:
@@ -124,6 +144,9 @@ class ReferenceOrchestrator:
     def begin(self, contract: Mapping[str, Any]) -> Mapping[str, Any] | DriverDirective:
         """Begin one task with a deterministic key, then claim its controller lease."""
 
+        issue = self._activation_issue()
+        if issue is not None:
+            return issue
         if "causality_task_begin" not in self._available():
             return DriverDirective(
                 "capability_unavailable", "task begin is not advertised"
@@ -142,7 +165,9 @@ class ReferenceOrchestrator:
         task = result.get("task")
         if not isinstance(task, dict) or not isinstance(task.get("task_id"), str):
             return DriverDirective("recovery_required", "task begin returned no task id")
-        claimed = self.claim(task["task_id"])
+        claimed = self.claim(
+            task["task_id"], last_event_hash=task.get("latest_event_hash")
+        )
         if isinstance(claimed, DriverDirective):
             return claimed
         return {**result, "lease": claimed.get("lease")}
@@ -189,6 +214,7 @@ class ReferenceOrchestrator:
         lease_id: str | None,
         phase_id: str | None = None,
         proof_bearing: bool = False,
+        last_event_hash: str | None = None,
     ) -> Mapping[str, Any] | DriverDirective:
         with self.checkpoints.transaction():
             return self._call_mutation_locked(
@@ -198,6 +224,7 @@ class ReferenceOrchestrator:
                 lease_id=lease_id,
                 phase_id=phase_id,
                 proof_bearing=proof_bearing,
+                last_event_hash=last_event_hash,
             )
 
     def _call_mutation_locked(
@@ -209,6 +236,7 @@ class ReferenceOrchestrator:
         lease_id: str | None,
         phase_id: str | None,
         proof_bearing: bool,
+        last_event_hash: str | None,
     ) -> Mapping[str, Any] | DriverDirective:
         prepared = self.checkpoints.load()
         if prepared is not None and prepared.status == "human_required":
@@ -241,7 +269,7 @@ class ReferenceOrchestrator:
             task_id=task_id,
             lease_id=lease_id,
             phase_id=phase_id,
-            last_event_hash=prepared.last_event_hash if prepared else None,
+            last_event_hash=last_event_hash,
         )
         try:
             result = self.transport.call(name, arguments)
@@ -254,7 +282,7 @@ class ReferenceOrchestrator:
                 task_id=task_id,
                 lease_id=lease_id,
                 phase_id=phase_id,
-                last_event_hash=prepared.last_event_hash if prepared else None,
+                last_event_hash=last_event_hash,
             )
             return DriverDirective(
                 "human_input_required" if proof_bearing else "recovery_required",
@@ -292,12 +320,14 @@ class ReferenceOrchestrator:
         )
         return result
 
-    def claim(self, task_id: str) -> Mapping[str, Any] | DriverDirective:
+    def claim(
+        self, task_id: str, *, last_event_hash: str | None
+    ) -> Mapping[str, Any] | DriverDirective:
         if "causality_task_lease" not in self._available():
             return DriverDirective(
                 "capability_unavailable", "controller lease is not advertised", task_id
             )
-        key = self._key(task_id, "lease", self.controller_id)
+        key = self._key(task_id, "lease", f"{self.controller_id}:{uuid4()}")
         return self._call_mutation(
             "causality_task_lease",
             {
@@ -309,9 +339,12 @@ class ReferenceOrchestrator:
             },
             task_id=task_id,
             lease_id=None,
+            last_event_hash=last_event_hash,
         )
 
-    def release(self, task_id: str, lease_id: str) -> Mapping[str, Any] | DriverDirective:
+    def release(
+        self, task_id: str, lease_id: str, *, last_event_hash: str | None
+    ) -> Mapping[str, Any] | DriverDirective:
         return self._call_mutation(
             "causality_task_lease",
             {
@@ -323,9 +356,13 @@ class ReferenceOrchestrator:
             },
             task_id=task_id,
             lease_id=lease_id,
+            last_event_hash=last_event_hash,
         )
 
     def _resume(self, task_id: str) -> Mapping[str, Any] | DriverDirective:
+        issue = self._activation_issue()
+        if issue is not None:
+            return issue
         if "causality_task_resume" not in self._available():
             return DriverDirective(
                 "capability_unavailable", "task resume is not advertised", task_id
@@ -335,21 +372,40 @@ class ReferenceOrchestrator:
             return DriverDirective("blocked", "task resume failed", task_id)
         checkpoint = self.checkpoints.load()
         task = result.get("task")
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        lease = data.get("controller_lease") if isinstance(data, dict) else None
+        task_advanced = bool(
+            checkpoint is not None
+            and isinstance(task, dict)
+            and isinstance(task.get("latest_event_hash"), str)
+            and task.get("latest_event_hash") != checkpoint.last_event_hash
+        )
+        lease_applied = bool(
+            checkpoint is not None
+            and checkpoint.operation == "causality_task_lease"
+            and isinstance(lease, dict)
+            and lease.get("controller_id") == self.controller_id
+            and lease.get("status") in {"active", "released"}
+        )
         if (
             checkpoint is not None
-            and checkpoint.status == "human_required"
+            and checkpoint.status in {"prepared", "human_required"}
             and checkpoint.task_id == task_id
             and isinstance(task, dict)
-            and task.get("recommended_next", {}).get("tool") != checkpoint.operation
+            and (task_advanced or lease_applied)
         ):
-            self.checkpoints.save(
-                replace(
-                    checkpoint,
-                    status="acknowledged",
-                    last_event_hash=task.get("latest_event_hash"),
-                    updated_at=utc_now(),
-                )
+            updated = replace(
+                checkpoint,
+                status="acknowledged",
+                last_event_hash=task.get("latest_event_hash"),
+                updated_at=utc_now(),
             )
+            try:
+                self.checkpoints.compare_and_save(checkpoint, updated)
+            except OrchestrationError:
+                return DriverDirective(
+                    "recovery_required", "checkpoint changed during resume", task_id
+                )
         return result
 
     def advance(self, task_id: str, *, max_steps: int = 32) -> DriverDirective:
@@ -367,14 +423,54 @@ class ReferenceOrchestrator:
             task_id,
         )
 
+    def _ensure_owned_lease(
+        self, task_id: str, resumed: Mapping[str, Any]
+    ) -> Mapping[str, Any] | DriverDirective:
+        task = resumed["task"]
+        lease = resumed["data"].get("controller_lease")
+        if lease and lease.get("status") == "active":
+            if lease.get("controller_id") != self.controller_id:
+                return DriverDirective(
+                    "controller_conflict", "another controller owns the task", task_id
+                )
+            return lease
+        claimed = self.claim(
+            task_id, last_event_hash=task.get("latest_event_hash")
+        )
+        if isinstance(claimed, DriverDirective):
+            return claimed
+        return claimed["lease"]
+
     def step(self, task_id: str) -> DriverDirective:
         resumed = self._resume(task_id)
         if isinstance(resumed, DriverDirective):
             return resumed
         task = resumed["task"]
         lease = resumed["data"].get("controller_lease")
+        recommendation = task["recommended_next"]
+        operation = recommendation["operation"]
+        if operation == "done":
+            if (
+                lease
+                and lease.get("status") == "active"
+                and lease.get("controller_id") == self.controller_id
+            ):
+                released = self.release(
+                    task_id,
+                    lease["lease_id"],
+                    last_event_hash=task.get("latest_event_hash"),
+                )
+                if isinstance(released, DriverDirective):
+                    return released
+            return DriverDirective(
+                "terminal", recommendation["reason"], task_id,
+                operation=operation,
+                details={"event_hash": task["latest_event_hash"]},
+            )
         if not lease or lease.get("status") != "active":
-            claimed = self.claim(task_id)
+            claimed = self.claim(
+                task_id, last_event_hash=task.get("latest_event_hash")
+            )
             if isinstance(claimed, DriverDirective):
                 return claimed
             lease = claimed["lease"]
@@ -387,20 +483,7 @@ class ReferenceOrchestrator:
                 "controller_conflict", "another controller owns the task", task_id
             )
         lease_id = lease["lease_id"]
-        recommendation = task["recommended_next"]
-        operation = recommendation["operation"]
         tool = recommendation.get("tool")
-        if operation == "done":
-            released = self.release(task_id, lease_id)
-            if isinstance(released, DriverDirective):
-                return released
-            return DriverDirective(
-                "terminal",
-                recommendation["reason"],
-                task_id,
-                operation=operation,
-                details={"event_hash": task["latest_event_hash"]},
-            )
         if tool not in self._available():
             return DriverDirective(
                 "capability_unavailable",
@@ -492,6 +575,7 @@ class ReferenceOrchestrator:
             task_id=task_id,
             lease_id=lease_id,
             phase_id=phase_id,
+            last_event_hash=task.get("latest_event_hash"),
         )
         if isinstance(result, DriverDirective):
             return result
@@ -524,7 +608,9 @@ class ReferenceOrchestrator:
             return DriverDirective(
                 "capability_unavailable", f"{tool or operation} is not advertised", task_id
             )
-        lease = resumed["data"].get("controller_lease") or {}
+        lease = self._ensure_owned_lease(task_id, resumed)
+        if isinstance(lease, DriverDirective):
+            return lease
         payload = dict(arguments)
         payload.update(
             {
@@ -546,6 +632,7 @@ class ReferenceOrchestrator:
             task_id=task_id,
             lease_id=lease.get("lease_id"),
             phase_id=phase_id,
+            last_event_hash=task.get("latest_event_hash"),
         )
         if isinstance(result, DriverDirective):
             return result
