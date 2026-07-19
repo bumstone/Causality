@@ -26,6 +26,7 @@ from .contracts import (
     PermissionContract,
     VerificationRequirement,
 )
+from .controller import ControllerLeaseStore
 from .http_adapter import HttpAdapter
 from .ledger import EvidenceLedger
 from .memory import TypedMemory
@@ -85,7 +86,12 @@ _KEY = {
 }
 _HASH = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
 _REF = {"type": "string", "pattern": "^@[ec][0-9]+$"}
-_COMMON = {"task_id": _TEXT, "idempotency_key": _KEY}
+_COMMON = {
+    "task_id": _TEXT,
+    "idempotency_key": _KEY,
+    "controller_id": _TEXT,
+    "lease_id": _TEXT,
+}
 _BROWSER_TOOLS = frozenset(
     {
         "browser.observe",
@@ -262,6 +268,7 @@ class CausalityMCPServer:
             http_adapter=http_adapter,
             browser_adapter=effective_browser,
         )
+        self.controllers = ControllerLeaseStore(self.ledger)
         self.skills = SkillStore(self.project)
 
     def _authorize(self, _principal: str, _stage: str, proof: str | None) -> bool:
@@ -490,6 +497,33 @@ class CausalityMCPServer:
                 "causality_task_resume",
                 "Read one durable task projection without replaying effects or writing state.",
                 _closed({"task_id": _TEXT}, ("task_id",)),
+            ),
+            _tool(
+                "causality_task_lease",
+                "Acquire, renew, or release the single durable controller lease for a task.",
+                _closed(
+                    {
+                        "task_id": _TEXT,
+                        "controller_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$",
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["acquire", "renew", "release"],
+                        },
+                        "ttl_seconds": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 300,
+                        },
+                        "lease_id": _TEXT,
+                        "idempotency_key": _KEY,
+                    },
+                    ("task_id", "controller_id", "action", "idempotency_key"),
+                ),
             ),
             _tool(
                 "causality_task_begin",
@@ -1097,6 +1131,7 @@ class CausalityMCPServer:
             unmet = self.lifecycle.runtime.gate.unmet_verification_ids(
                 contract, events
             )
+            controller_lease = self.controllers.state(task_id)
         reflection = _plain(session.reflection or {})
         reflection_result = (
             {
@@ -1124,6 +1159,57 @@ class CausalityMCPServer:
                     ],
                     "terminal_result": self._terminal_result(session, events),
                     "reflection_result": reflection_result,
+                    "controller_lease": controller_lease,
+                },
+            }
+        )
+
+    def _lease(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "task_id",
+            "controller_id",
+            "action",
+            "ttl_seconds",
+            "lease_id",
+            "idempotency_key",
+        }
+        required = {"task_id", "controller_id", "action", "idempotency_key"}
+        self._strict(arguments, allowed=allowed, required=required)
+        action = arguments["action"]
+        if action in {"acquire", "renew"} and "ttl_seconds" not in arguments:
+            raise TaskLifecycleError(
+                "validation_error", "acquire and renew require ttl_seconds"
+            )
+        if action in {"renew", "release"} and "lease_id" not in arguments:
+            raise TaskLifecycleError(
+                "validation_error", "renew and release require lease_id"
+            )
+        if action == "acquire" and "lease_id" in arguments:
+            raise TaskLifecycleError(
+                "validation_error", "acquire does not accept lease_id"
+            )
+        if action == "release" and "ttl_seconds" in arguments:
+            raise TaskLifecycleError(
+                "validation_error", "release does not accept ttl_seconds"
+            )
+        with self.lifecycle.runtime.execution_lock():
+            self.lifecycle.get(arguments["task_id"])
+            lease, replayed, event_hash = self.controllers.mutate(
+                arguments["task_id"],
+                controller_id=arguments["controller_id"],
+                action=action,
+                ttl_seconds=arguments.get("ttl_seconds"),
+                lease_id=arguments.get("lease_id"),
+                idempotency_key=arguments["idempotency_key"],
+            )
+        return _text_result(
+            {
+                "ok": True,
+                "lease": lease,
+                "event_hash": event_hash,
+                "idempotency": {
+                    "key": arguments["idempotency_key"],
+                    "replayed": replayed,
                 },
             }
         )
@@ -1160,6 +1246,16 @@ class CausalityMCPServer:
             if not isinstance(arguments.get("task_id"), str) or not isinstance(key, str):
                 raise TaskLifecycleError("validation_error", "task_id and idempotency_key are required")
             task_id = arguments["task_id"]
+            self.controllers.assert_mutation(
+                task_id,
+                controller_id=arguments.get("controller_id"),
+                lease_id=arguments.get("lease_id"),
+            )
+            arguments = {
+                name: value
+                for name, value in arguments.items()
+                if name not in {"controller_id", "lease_id"}
+            }
             if operation != "reflect":
                 try:
                     current = self.lifecycle.get(task_id)
@@ -1742,6 +1838,8 @@ class CausalityMCPServer:
                 })
             if name == "causality_task_resume":
                 return self._resume(arguments)
+            if name == "causality_task_lease":
+                return self._lease(arguments)
             lifecycle_names = {
                 "causality_task_begin", "causality_task_approve", "causality_task_action",
                 "causality_task_phase", "causality_task_hypothesis",

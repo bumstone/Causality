@@ -1,6 +1,6 @@
 # Causality Project Summary
 
-Baseline: `557` tests pass; Git and ledger retain commit history.
+Baseline: the full suite passes; Git and ledger retain commit history.
 
 ## What It Is
 
@@ -19,13 +19,14 @@ Local-first agent control: contract, gated execution, evidence, and reflection.
 | Reflection | Stable causes deduplicate while first time and provenance are retained. |
 | Skills | Exact task evidence gates outcome recording, promotion, and authored-first recall. |
 | Install | Host-owned rules, native MCP config, safe adoption, handshake, and activation reports work. |
-| MCP | Closed tools cover lifecycle, resume/context, and audited skill evolution. |
+| MCP | Closed tools cover lifecycle, resume/context, controller lease, and audited skill evolution. |
+| Orchestration | 007A bootstrap/routing, lease, and deterministic next-call contract are implemented. |
 | HTTP/browser | Exact scopes, approvals, redaction, state binding, bounded secret transport, artifacts, and replay are enforced. |
 
 ## Still Not Proven
 
-- Automatic orchestration across install, workflow selection, recovery, verification,
-  and reflection as one external-client-owned loop ([planned as Spec 007](specs/007-automatic-orchestration.md)).
+- 007B reference driver/checkpoint/HITL handoff and 007C external crash matrix
+  ([active Spec 007](specs/007-automatic-orchestration.md)).
 - External App, secret, repository-rule, and autofix operating configuration.
 
 ## Sources

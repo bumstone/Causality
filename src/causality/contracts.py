@@ -59,6 +59,7 @@ class AuditEventType(str, Enum):
     TASK_ACTION_RESULT = "task_action_result"
     TASK_REFLECTION_INTENT = "task_reflection_intent"
     TASK_REFLECTED = "task_reflected"
+    TASK_CONTROLLER_LEASE = "task_controller_lease"
 
 
 class GateDecision(str, Enum):

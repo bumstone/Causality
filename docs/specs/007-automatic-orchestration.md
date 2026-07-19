@@ -1,6 +1,6 @@
 # Spec 007 — Automatic Orchestration
 
-Status: planned. Depends on Specs 001–006.
+Status: active. 007A implemented; 007B–007C pending. Depends on Specs 001–006.
 
 ## Contract
 
@@ -8,14 +8,19 @@ An installer-owned client skill runs a restart-safe loop over existing closed
 MCP tools; no one-shot effectful API is added. The host owns reasoning and edits;
 Causality owns order, scope, evidence, stops, HITL, and terminal truth.
 
+Official pre-session bootstrap is the installed Python package plus
+`causality install-agent --client <name> --verify`. The experimental plugin
+manifest is not a runtime contract. MCP `causality_init(verify=true)` only
+converges an already loaded session; `pending|broken` stops with remediation.
+
 ## Sequence
 
 1. Call `causality_init(client, verify=true)`. Continue only when `active`; return
    exact operator guidance for `pending|broken`.
 2. Read advertised tools and context. Missing HTTP/browser capability disables
    that path; it is never guessed.
-3. Begin or resume one task. Follow persisted `allowed_next`; create/approve the
-   contract before effects.
+3. Begin or resume one task, acquire `causality_task_lease`, and follow the one
+   persisted `recommended_next`. `allowed_next` remains the compatible choice set.
 4. Per phase: start, act in scope, verify, collect two cited verdicts, then pass
    or enter hypothesis/debug/HITL handling.
 5. Complete only through the server gate. Reflect every terminal task; only a
@@ -25,13 +30,24 @@ Causality owns order, scope, evidence, stops, HITL, and terminal truth.
 
 ## Recovery and safety
 
-- Before every mutation, refresh resume state. Persist only task ID and last
-  response hash; secrets, proof, browser text, and raw ledger payload stay out.
+- Before every mutation, refresh resume state. The 007B checkpoint may contain
+  only controller/lease, task/phase, operation/key, canonical request hash,
+  last event hash, state, and timestamp. Raw request, proof, credentials,
+  browser/HTTP content, and ledger payload stay out.
 - Same key+digest may replay. A conflicting retry stops. An intent without a
   result stops for human resolution; external effects are never guessed.
 - Network/auth/write scope and browser capability remain server-policy ceilings.
 - Ledger records phase through reflection so failed and successful runs survive
   process restart.
+
+## 007A wire additions
+
+- `task.recommended_next`: `{operation, tool, reason, requires_human, ...ids}`.
+- `causality_task_lease`: acquire/renew/release, 5–300 second server lease.
+- Mutation inputs accept optional `controller_id` + `lease_id`. Legacy tasks stay
+  compatible; after first claim every mutation requires the active lease.
+- Lease events use `controller:<task_id>` scope, outside task evidence/provenance.
+  A lease coordinates writers and is not an authentication proof.
 
 ## Acceptance
 
