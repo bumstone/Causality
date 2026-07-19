@@ -1,6 +1,6 @@
 # Plan 002 — Automatic Orchestration
 
-Status: active; 007A–007B implemented, 007C pending.
+Status: implemented.
 
 ## Goal
 
@@ -18,7 +18,7 @@ orders phases, gates effects, records evidence, and decides completion.
    - Drive phase → action → verify → debug/retry/HITL → complete → reflect.
    - Persist the strict secret-free controller/task/operation/key/request/event checkpoint.
    - Restart after each mutating boundary; never replay an uncertain effect.
-3. [ ] **007C — external acceptance**
+3. [x] **007C — external acceptance**
    - Run fresh-project success, verification failure, recovery, and rejection E2E.
    - Assert exact-once terminal effects, ledger chain, failure/success history,
      capability gates, secret redaction, and no skill after rejected reflection.
