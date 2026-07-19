@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from .contracts import utc_now
-from .durable import write_text_durably
+from .durable import file_lock, write_text_durably
 from .task_lifecycle import canonical_sha256
 
 
@@ -49,29 +52,39 @@ class OrchestrationCheckpoint:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or self.status not in _STATUSES:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise OrchestrationError("unsupported checkpoint state")
+        if not isinstance(self.status, str) or self.status not in _STATUSES:
             raise OrchestrationError("unsupported checkpoint state")
         for name in ("controller_id", "operation", "idempotency_key"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise OrchestrationError(f"checkpoint {name} must be non-blank")
-        for name in ("request_sha256", "last_event_hash"):
-            value = getattr(self, name)
-            if value is not None and (
-                not isinstance(value, str)
-                or len(value) != 64
-                or any(char not in _HASH for char in value)
-            ):
-                raise OrchestrationError(f"checkpoint {name} must be a SHA-256")
+        if (
+            not isinstance(self.request_sha256, str)
+            or len(self.request_sha256) != 64
+            or any(char not in _HASH for char in self.request_sha256)
+        ):
+            raise OrchestrationError("checkpoint request_sha256 must be a SHA-256")
+        if self.last_event_hash is not None and (
+                not isinstance(self.last_event_hash, str)
+                or len(self.last_event_hash) != 64
+                or any(char not in _HASH for char in self.last_event_hash)
+        ):
+            raise OrchestrationError("checkpoint last_event_hash must be a SHA-256")
         for name in ("task_id", "lease_id", "phase_id"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise OrchestrationError(f"checkpoint {name} must be null or non-blank")
+        if not isinstance(self.updated_at, str):
+            raise OrchestrationError("checkpoint updated_at must be text")
         if self.updated_at:
             try:
-                datetime.fromisoformat(self.updated_at.replace("Z", "+00:00"))
+                parsed = datetime.fromisoformat(self.updated_at.replace("Z", "+00:00"))
             except ValueError as exc:
                 raise OrchestrationError("checkpoint updated_at must be ISO-8601") from exc
+            if parsed.utcoffset() is None:
+                raise OrchestrationError("checkpoint updated_at must include a timezone")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,7 +105,10 @@ class OrchestrationCheckpoint:
     def from_mapping(cls, value: Mapping[str, Any]) -> "OrchestrationCheckpoint":
         if set(value) != _FIELDS:
             raise OrchestrationError("checkpoint schema is not closed")
-        return cls(**dict(value))
+        try:
+            return cls(**dict(value))
+        except TypeError as exc:
+            raise OrchestrationError("checkpoint field types are invalid") from exc
 
 
 class CheckpointStore:
@@ -111,8 +127,27 @@ class CheckpointStore:
         current = self.project
         for part in self.path.relative_to(self.project).parts:
             current /= part
-            if current.is_symlink():
-                raise OrchestrationError("checkpoint path contains a symlink")
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                continue
+            attributes = getattr(info, "st_file_attributes", 0)
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            if current.is_symlink() or (os.name == "nt" and attributes & reparse):
+                raise OrchestrationError("checkpoint path contains a symlink or reparse point")
+            if not current.resolve(strict=False).is_relative_to(self.project):
+                raise OrchestrationError("checkpoint path resolves outside the project")
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Serialize read/prepare/call/ack for one controller across processes."""
+
+        self._assert_safe_path()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._assert_safe_path()
+        with file_lock(self.path):
+            self._assert_safe_path()
+            yield
 
     def load(self) -> OrchestrationCheckpoint | None:
         self._assert_safe_path()
@@ -139,6 +174,18 @@ class CheckpointStore:
             self.path,
             json.dumps(checkpoint.to_dict(), ensure_ascii=True, sort_keys=True) + "\n",
         )
+
+    def compare_and_save(
+        self,
+        expected: OrchestrationCheckpoint | None,
+        checkpoint: OrchestrationCheckpoint,
+    ) -> None:
+        """Save only if the durable checkpoint still equals the caller's snapshot."""
+
+        with self.transaction():
+            if self.load() != expected:
+                raise OrchestrationError("checkpoint changed concurrently")
+            self.save(checkpoint)
 
 
 __all__ = [

@@ -74,6 +74,46 @@ class OrchestrationCheckpointTests(unittest.TestCase):
                     updated_at="not-a-time",
                 )
 
+    def test_malformed_json_types_fail_as_orchestration_errors(self) -> None:
+        valid = OrchestrationCheckpoint(
+            controller_id="controller-a", operation="begin",
+            idempotency_key="begin-a", request_sha256="a" * 64,
+            status="prepared", updated_at="2026-07-19T00:00:00+00:00",
+        ).to_dict()
+        for field, value in (
+            ("schema_version", True),
+            ("status", []),
+            ("request_sha256", None),
+            ("updated_at", True),
+        ):
+            with self.subTest(field=field):
+                malformed = {**valid, field: value}
+                with self.assertRaises(OrchestrationError):
+                    OrchestrationCheckpoint.from_mapping(malformed)
+
+    def test_compare_and_save_rejects_a_stale_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = CheckpointStore(temp_dir, "controller-a")
+            first = OrchestrationCheckpoint(
+                controller_id="controller-a", operation="begin",
+                idempotency_key="begin-a", request_sha256="a" * 64,
+                status="prepared",
+            )
+            store.compare_and_save(None, first)
+            durable_first = store.load()
+            assert durable_first is not None
+            second = OrchestrationCheckpoint(
+                controller_id="controller-a", operation="begin",
+                idempotency_key="begin-a", request_sha256="a" * 64,
+                status="acknowledged",
+            )
+            store.compare_and_save(durable_first, second)
+            durable_second = store.load()
+            assert durable_second is not None
+            with self.assertRaisesRegex(OrchestrationError, "changed concurrently"):
+                store.compare_and_save(durable_first, first)
+            self.assertEqual(store.load(), durable_second)
+
     def test_symlinked_checkpoint_directory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside:
             root = Path(temp_dir)
