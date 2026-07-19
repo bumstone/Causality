@@ -6154,9 +6154,21 @@ class TaskLifecycle:
                         }
                     ),
                 )
+        latest_block_transition = next(
+            (
+                event
+                for event in reversed(scoped)
+                if event.event_type == STATE_TRANSITION
+                and event.payload.get("state") == TaskState.BLOCKED.value
+            ),
+            None,
+        )
         if (
             session.state is TaskState.BLOCKED
             and session.recommended_next.get("approval_stage") == "final"
+            and latest_block_transition is not None
+            and latest_block_transition.payload.get("reason")
+            == "completion gate requires intervention"
         ):
             final_refs = self._current_evidence(session)
             recommendation = dict(_thaw(session.recommended_next))
