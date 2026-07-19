@@ -27,6 +27,7 @@ from .contracts import (
     VerificationRequirement,
 )
 from .controller import ControllerLeaseStore
+from .orchestration_environment import bounded_environment_snapshot
 from .http_adapter import HttpAdapter
 from .ledger import EvidenceLedger
 from .memory import TypedMemory
@@ -270,6 +271,13 @@ class CausalityMCPServer:
         )
         self.controllers = ControllerLeaseStore(self.ledger)
         self.skills = SkillStore(self.project)
+        policy_value = {
+            name: sorted(value) if isinstance(value, frozenset) else value
+            for name, value in vars(effective_policy).items()
+        }
+        self._policy_digest = hashlib.sha256(
+            json.dumps(policy_value, ensure_ascii=True, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
     def _authorize(self, _principal: str, _stage: str, proof: str | None) -> bool:
         return bool(
@@ -692,6 +700,7 @@ class CausalityMCPServer:
                     {
                         **_COMMON,
                         "verifier": _TEXT,
+                        "provider_id": _TEXT,
                         "status": {"type": "string", "enum": ["pass", "fail"]},
                         "rationale": _TEXT,
                         "severity": {"type": "string", "enum": ["normal", "critical"]},
@@ -1202,6 +1211,25 @@ class CausalityMCPServer:
                 lease_id=arguments.get("lease_id"),
                 idempotency_key=arguments["idempotency_key"],
             )
+            if not replayed:
+                environment = bounded_environment_snapshot(
+                    self.project,
+                    tuple(tool["name"] for tool in self._tools()),
+                    self._policy_digest,
+                )
+                self.ledger.append(
+                    AuditEventType.ORCHESTRATION_ENVIRONMENT,
+                    {
+                        "schema_version": 1,
+                        "task_id": arguments["task_id"],
+                        "controller_id": arguments["controller_id"],
+                        "lease_id": lease["lease_id"],
+                        "lease_action": action,
+                        "lease_event_hash": event_hash,
+                        "environment": environment,
+                    },
+                    contract_id=f"controller:{arguments['task_id']}",
+                )
         return _text_result(
             {
                 "ok": True,
@@ -1439,12 +1467,16 @@ class CausalityMCPServer:
                     proof=arguments.get("proof"),
                 )
             elif name == "causality_task_verdict":
-                allowed = common | {"verifier", "status", "rationale", "severity", "evidence_refs"}
+                allowed = common | {
+                    "verifier", "provider_id", "status", "rationale", "severity",
+                    "evidence_refs",
+                }
                 self._strict(arguments, allowed=allowed, required=common | {"verifier", "status", "rationale", "evidence_refs"})
                 refs = self._string_array(arguments["evidence_refs"], "evidence_refs")
                 session = self.lifecycle.verdict(
                     task_id,
                     verifier=arguments["verifier"],
+                    provider_id=arguments.get("provider_id"),
                     status=arguments["status"],
                     rationale=arguments["rationale"],
                     severity=arguments.get("severity", "normal"),

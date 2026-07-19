@@ -749,12 +749,37 @@ class HITLGate:
             issues.append("structured completion accepts only ledger-recorded verifier decisions")
             records: list[VerifierDecision] = []
         else:
-            records = [
-                self._decision_from_event(event)
+            current_events = [
+                event
                 for index, event in enumerate(events)
                 if index > review_after
                 and event.event_type == AuditEventType.VERIFIER_DECISION.value
             ]
+            records = [self._decision_from_event(event) for event in current_events]
+
+            orchestrated = [
+                event for event in current_events
+                if event.payload.get("orchestrated") is True
+            ]
+            if orchestrated:
+                providers = [
+                    event.payload.get("provider_id", "").strip().casefold()
+                    if isinstance(event.payload.get("provider_id"), str)
+                    else ""
+                    for event in current_events
+                ]
+                if any(not provider for provider in providers):
+                    issues.append("orchestrated verifier provider identity must be non-blank")
+                duplicate_providers = sorted(
+                    provider
+                    for provider, count in Counter(providers).items()
+                    if provider and count > 1
+                )
+                if duplicate_providers:
+                    issues.append(
+                        "duplicate verifier providers in current review attempt: "
+                        + ", ".join(duplicate_providers)
+                    )
 
         invalid_names = [item.verifier for item in records if not self._verifier_key(item)]
         if invalid_names:

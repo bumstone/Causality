@@ -4384,6 +4384,7 @@ class TaskLifecycle:
         task_id: str,
         *,
         verifier: str,
+        provider_id: str | None = None,
         status: str,
         rationale: str,
         severity: str = "normal",
@@ -4395,11 +4396,16 @@ class TaskLifecycle:
             raise _error("validation_error", "invalid verifier status or severity")
         if not isinstance(verifier, str) or not verifier.strip():
             raise _error("validation_error", "verifier must be non-blank")
+        if provider_id is not None and (
+            not isinstance(provider_id, str) or not provider_id.strip()
+        ):
+            raise _error("validation_error", "provider_id must be null or non-blank")
         if not isinstance(rationale, str) or not rationale.strip():
             raise _error("validation_error", "verifier rationale must be non-blank")
         refs = tuple(evidence_refs)
         request = {
             "verifier": verifier.strip(),
+            "provider_id": provider_id.strip() if provider_id is not None else None,
             "status": status,
             "rationale": rationale.strip(),
             "severity": severity,
@@ -4437,12 +4443,19 @@ class TaskLifecycle:
                 event = self.runtime.record_verifier(
                     self._contract(session),
                     decision,
-                    metadata=self._operation_metadata(
-                        task_id,
-                        "verdict",
-                        key,
-                        digest,
-                    ),
+                    metadata={
+                        **self._operation_metadata(
+                            task_id,
+                            "verdict",
+                            key,
+                            digest,
+                        ),
+                        **(
+                            {"provider_id": provider_id.strip(), "orchestrated": True}
+                            if provider_id is not None
+                            else {}
+                        ),
+                    },
                 )
             else:
                 current_refs = refs
