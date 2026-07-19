@@ -1,6 +1,6 @@
 # Spec 007 — Automatic Orchestration
 
-Status: active. 007A–007B implemented; 007C pending. Depends on Specs 001–006.
+Status: implemented. Depends on Specs 001–006.
 
 ## Contract
 
@@ -59,13 +59,30 @@ converges an already loaded session; `pending|broken` stops with remediation.
 - A prepared key+digest is replayable. A conflict stops. Proof-bearing response
   loss is not automatically resent; resume may only clear it when durable task
   state proves the server already advanced.
+- A failed executable verification returns `verification_failed` immediately;
+  the driver never burns its bounded loop by automatically rerunning failure.
 - Automatic verdicts carry a host-asserted `provider_id`. Two verifier names
   from the same provider do not satisfy the orchestrated quorum. This is an
   auditable independence claim, not cryptographic provider attestation.
 - Lease changes record a whitelist-only environment snapshot in
   `controller:<task_id>`: package/Python/OS, advertised capability names and
-  digest, policy digest, and Git HEAD/dirty state. Policy values, credentials,
+  digest, policy digest, and safely readable loose Git HEAD. Dirty state remains
+  explicitly unknown. Policy values, credentials,
   request content, command output, host/user names, and paths are excluded.
+
+## 007C external acceptance
+
+- A copied source package is installed without dependencies into a fresh venv,
+  then `install-agent --client generic --verify` must report `active`.
+- Separate external processes lose responses after begin, lease, action,
+  verification, first verdict, completion, reflection, and lease release. The
+  same checkpoint converges to one terminal effect, two provider decisions,
+  one reflection, a released lease, and a valid ledger chain.
+- The same installed project proves failed verification stops, omitted
+  capability fails closed, rejected HITL reflects without a new skill candidate,
+  and approval proof is absent from ledger and checkpoint bytes.
+- Ubuntu runs the full Python 3.11–3.13 suite. A Python 3.11 Windows job runs the
+  controller process-race, checkpoint, driver, HITL, and external crash matrix.
 
 ## Acceptance
 

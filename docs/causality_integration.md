@@ -59,6 +59,8 @@ Embedded clients may construct `ReferenceOrchestrator` with an MCP transport and
 host, human, or verifier handoff. Submit that independently produced result via
 `submit_host_action`, `submit_human`, or `submit_verifier`; repeat until the
 terminal directive confirms reflection and lease release.
+`verification_failed` is also a stop: debug, change host work, or request HITL;
+do not automatically rerun the same failed requirement.
 
 ## Boundaries
 
