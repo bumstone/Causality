@@ -21,6 +21,8 @@ from causality.task_lifecycle import TaskPolicy
 
 
 VERIFY = (sys.executable, "-c", "print('driver-pass')")
+FAIL_VERIFY = (sys.executable, "-c", "raise SystemExit(9)")
+TIMEOUT_VERIFY = (sys.executable, "-c", "import time; time.sleep(1)")
 
 
 def contract(workflow: str = "auto") -> dict[str, Any]:
@@ -243,6 +245,70 @@ class OrchestrationDriverTests(unittest.TestCase):
             second = server.controllers.state(task_id)
             self.assertEqual(second["status"], "active")
             self.assertNotEqual(second["lease_id"], first["lease_id"])
+
+    def test_failed_verification_stops_before_automatic_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            server = CausalityMCPServer(
+                root,
+                policy=TaskPolicy(verification_commands=(VERIFY, FAIL_VERIFY)),
+            )
+            driver = self.driver(root, InProcessMCPTransport(server))
+            request = contract()
+            request["verification_requirements"][0]["argv"] = list(FAIL_VERIFY)
+            begun = driver.begin(request)
+            assert isinstance(begun, dict)
+            task_id = begun["task"]["task_id"]
+            driver.submit_host_action(task_id, {"action": {
+                "kind": "file_write", "path": "out/failure.txt", "content": "failed",
+            }})
+            stopped = driver.advance(task_id)
+            self.assertEqual(stopped.kind, "verification_failed")
+            self.assertEqual(stopped.details["status"], "fail")
+            self.assertEqual(driver.advance(task_id).kind, "verification_failed")
+            results = [
+                event for event in server.ledger.events_for_contract(
+                    task_id, all_segments=True
+                )
+                if event.event_type == AuditEventType.EVIDENCE.value
+                and event.payload.get("requirement_id") == "driver-pass"
+            ]
+            self.assertEqual(len(results), 1)
+
+    def test_lost_timeout_response_resumes_as_verification_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            server = CausalityMCPServer(
+                root,
+                policy=TaskPolicy(
+                    verification_commands=(VERIFY, TIMEOUT_VERIFY),
+                ),
+            )
+            lossy = _LossyTransport(
+                InProcessMCPTransport(server), "causality_task_verify"
+            )
+            driver = self.driver(root, lossy)
+            request = contract()
+            requirement = request["verification_requirements"][0]
+            requirement["argv"] = list(TIMEOUT_VERIFY)
+            requirement["timeout_seconds"] = 0.01
+            begun = driver.begin(request)
+            assert isinstance(begun, dict)
+            task_id = begun["task"]["task_id"]
+            driver.submit_host_action(task_id, {"action": {
+                "kind": "file_write", "path": "out/timeout.txt", "content": "x",
+            }})
+            self.assertEqual(driver.advance(task_id).kind, "recovery_required")
+            resumed = self.driver(root, lossy)
+            self.assertEqual(resumed.advance(task_id).kind, "verification_failed")
+            self.assertEqual(resumed.advance(task_id).kind, "verification_failed")
+            results = [
+                event for event in server.ledger.events_for_contract(
+                    task_id, all_segments=True
+                )
+                if event.event_type == AuditEventType.EVIDENCE.value
+                and event.payload.get("requirement_id") == "driver-pass"
+            ]
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].payload["status"], "timeout")
 
 
 if __name__ == "__main__":

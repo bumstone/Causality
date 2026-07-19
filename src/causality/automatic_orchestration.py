@@ -495,6 +495,52 @@ class ReferenceOrchestrator:
             return claimed
         return claimed["lease"]
 
+    @staticmethod
+    def _durable_verification_failure(
+        task: Mapping[str, Any], recommendation: Mapping[str, Any]
+    ) -> DriverDirective | None:
+        operation = recommendation.get("operation")
+        if operation not in {"verify", "approve"}:
+            return None
+        results = task.get("requirement_results")
+        if not isinstance(results, Mapping):
+            return None
+        if operation == "verify":
+            requirement_ids = (recommendation.get("requirement_id"),)
+        else:
+            evidence_refs = set(recommendation.get("evidence_refs", ()))
+            matched = tuple(
+                requirement_id
+                for requirement_id, result in results.items()
+                if isinstance(result, Mapping)
+                and result.get("evidence_event_hash") in evidence_refs
+            )
+            failed_ids = tuple(
+                requirement_id
+                for requirement_id, result in results.items()
+                if isinstance(result, Mapping)
+                and result.get("status") in {"fail", "blocked", "timeout", "error"}
+            )
+            requirement_ids = matched or (failed_ids if len(failed_ids) == 1 else ())
+        requirement_id = next((item for item in requirement_ids if item in results), None)
+        verification = results.get(requirement_id)
+        if not isinstance(verification, Mapping) or verification.get("status") not in {
+            "fail", "blocked", "timeout", "error",
+        }:
+            return None
+        return DriverDirective(
+            "verification_failed",
+            "verification did not pass; explicit host recovery is required",
+            task.get("task_id"),
+            "causality_task_verify",
+            "verify",
+            details={
+                "requirement_id": requirement_id,
+                "status": verification.get("status"),
+                "evidence_event_hash": verification.get("evidence_event_hash"),
+            },
+        )
+
     def step(self, task_id: str) -> DriverDirective:
         resumed = self._resume(task_id)
         if isinstance(resumed, DriverDirective):
@@ -503,6 +549,9 @@ class ReferenceOrchestrator:
         lease = resumed["data"].get("controller_lease")
         recommendation = task["recommended_next"]
         operation = recommendation["operation"]
+        failed = self._durable_verification_failure(task, recommendation)
+        if failed is not None:
+            return failed
         if operation == "done":
             if (
                 lease
@@ -634,6 +683,16 @@ class ReferenceOrchestrator:
         )
         if isinstance(result, DriverDirective):
             return result
+        if operation == "verify":
+            result_task = result.get("task")
+            if not isinstance(result_task, Mapping):
+                return DriverDirective(
+                    "recovery_required", "verification result is missing", task_id,
+                    tool, operation,
+                )
+            failed = self._durable_verification_failure(result_task, recommendation)
+            if failed is not None:
+                return failed
         return DriverDirective(
             "advanced",
             f"{operation} was durably acknowledged",
