@@ -1,6 +1,6 @@
 # Spec 007 — Automatic Orchestration
 
-Status: active. 007A implemented; 007B–007C pending. Depends on Specs 001–006.
+Status: active. 007A–007B implemented; 007C pending. Depends on Specs 001–006.
 
 ## Contract
 
@@ -48,6 +48,24 @@ converges an already loaded session; `pending|broken` stops with remediation.
   compatible; after first claim every mutation requires the active lease.
 - Lease events use `controller:<task_id>` scope, outside task evidence/provenance.
   A lease coordinates writers and is not an authentication proof.
+
+## 007B reference driver
+
+- `ReferenceOrchestrator` provides begin, claim, bounded deterministic advance,
+  host-action, HITL, verifier, completion, reflection, and lease-release paths.
+- The checkpoint is a closed, controller-namespaced JSON document. It stores
+  only controller/lease/task/phase IDs, operation/idempotency key, request and
+  event hashes, status, and timestamp. It never stores a raw request or proof.
+- A prepared key+digest is replayable. A conflict stops. Proof-bearing response
+  loss is not automatically resent; resume may only clear it when durable task
+  state proves the server already advanced.
+- Automatic verdicts carry a host-asserted `provider_id`. Two verifier names
+  from the same provider do not satisfy the orchestrated quorum. This is an
+  auditable independence claim, not cryptographic provider attestation.
+- Lease changes record a whitelist-only environment snapshot in
+  `controller:<task_id>`: package/Python/OS, advertised capability names and
+  digest, policy digest, and Git HEAD/dirty state. Policy values, credentials,
+  request content, command output, host/user names, and paths are excluded.
 
 ## Acceptance
 

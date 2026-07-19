@@ -20,12 +20,12 @@ Local-first agent control: contract, gated execution, evidence, and reflection.
 | Skills | Exact task evidence gates outcome recording, promotion, and authored-first recall. |
 | Install | Host-owned rules, native MCP config, safe adoption, handshake, and activation reports work. |
 | MCP | Closed tools cover lifecycle, resume/context, controller lease, and audited skill evolution. |
-| Orchestration | 007A bootstrap/routing, lease, and deterministic next-call contract are implemented. |
+| Orchestration | 007A bootstrap/routing plus 007B checkpoint, reference driver, HITL/verifier handoff, environment audit, and terminal lease release are implemented. |
 | HTTP/browser | Exact scopes, approvals, redaction, state binding, bounded secret transport, artifacts, and replay are enforced. |
 
 ## Still Not Proven
 
-- 007B reference driver/checkpoint/HITL handoff and 007C external crash matrix
+- 007C fresh-project external crash matrix and CI proof
   ([active Spec 007](specs/007-automatic-orchestration.md)).
 - External App, secret, repository-rule, and autofix operating configuration.
 

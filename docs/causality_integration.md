@@ -15,6 +15,7 @@ Order: [Plan 001](plans/001-external-harness-delivery.md). Contracts:
 | `HttpAdapter` | scoped transport |
 | `A11yBrowserAdapter` | isolated browser primitives |
 | `SkillStore` | candidate, outcome, promotion, recall |
+| `ReferenceOrchestrator` | secret-free checkpoint, lease, and deterministic handoff loop |
 
 ## State
 
@@ -52,6 +53,12 @@ thresholds and stores no proof.
 `recommended_next` chooses one transition; the older `allowed_next` remains the
 full compatible set. Once claimed, task mutations require the active controller
 lease. Leases live in a separate ledger scope and never count as task evidence.
+
+Embedded clients may construct `ReferenceOrchestrator` with an MCP transport and
+`CheckpointStore`. Call `bootstrap`, `begin`, then `advance` until it returns a
+host, human, or verifier handoff. Submit that independently produced result via
+`submit_host_action`, `submit_human`, or `submit_verifier`; repeat until the
+terminal directive confirms reflection and lease release.
 
 ## Boundaries
 

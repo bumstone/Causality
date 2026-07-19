@@ -13,4 +13,4 @@ tests. Keep each spec decision-complete and under the document budget.
 | 004 | [API/browser adapters](004-api-browser-adapters.md) | implemented | 002, 003 |
 | 005 | [Workflow and debug loop](005-workflow-debug-loop.md) | implemented | 002, 003, 004 |
 | 006 | [Resume and skill operations](006-resume-and-skill-operations.md) | implemented | 003, 005 |
-| 007 | [Automatic orchestration](007-automatic-orchestration.md) | planned | 001–006 |
+| 007 | [Automatic orchestration](007-automatic-orchestration.md) | active (007A–007B implemented) | 001–006 |
