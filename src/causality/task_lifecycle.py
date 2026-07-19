@@ -961,6 +961,7 @@ def _recommended_next(
     phases: tuple[WorkflowPhase, ...],
     current: WorkflowPhase | None,
     unmet_verification: tuple[str, ...],
+    manual_verification: frozenset[str],
     phase_progress: Mapping[str, Any],
     completion_progress: Mapping[str, Any],
 ) -> Mapping[str, Any]:
@@ -995,6 +996,16 @@ def _recommended_next(
         if approval_stage is not None:
             value["approval_stage"] = approval_stage
         return _freeze(value)
+
+    def verification_item(reason: str, requirement_id: str | None, **fields: Any):
+        return item(
+            "verify",
+            "causality_task_verify",
+            reason,
+            requirement_id=requirement_id,
+            requires_human=requirement_id in manual_verification,
+            **fields,
+        )
 
     pending_action = next(
         (intent for intent in unresolved if intent.kind == "action"), None
@@ -1046,11 +1057,9 @@ def _recommended_next(
         if current is None:
             pending_requirement = next(iter(unmet_verification), None)
             if pending_requirement is not None:
-                return item(
-                    "verify",
-                    "causality_task_verify",
+                return verification_item(
                     "all workflow phases passed; frozen verification remains",
-                    requirement_id=pending_requirement,
+                    pending_requirement,
                 )
             if completion_progress.get("needs_evidence"):
                 return item(
@@ -1059,11 +1068,9 @@ def _recommended_next(
                     "completion still requires declared current evidence",
                 )
             if completion_progress.get("needs_review_reset"):
-                return item(
-                    "verify",
-                    "causality_task_verify",
+                return verification_item(
                     "start a fresh verification review window after conflicting verifier evidence",
-                    requirement_id=completion_progress.get("requirement_id"),
+                    completion_progress.get("requirement_id"),
                 )
             if completion_progress.get("needs_verdict"):
                 return item(
@@ -1130,20 +1137,16 @@ def _recommended_next(
             requirement_id = next(iter(unmet_verification), None) or phase_progress.get(
                 "requirement_id"
             )
-            return item(
-                "verify",
-                "causality_task_verify",
+            return verification_item(
                 "the running phase requires fresh verification after its latest mutation",
+                requirement_id,
                 phase_id=current.phase_id,
-                requirement_id=requirement_id,
             )
         if completion_progress.get("needs_review_reset"):
-            return item(
-                "verify",
-                "causality_task_verify",
+            return verification_item(
                 "start a fresh verification review window after conflicting verifier evidence",
+                completion_progress.get("requirement_id"),
                 phase_id=current.phase_id,
-                requirement_id=completion_progress.get("requirement_id"),
             )
         return item(
             "verdict",
@@ -1161,11 +1164,9 @@ def _recommended_next(
         )
     pending_requirement = next(iter(unmet_verification), None)
     if pending_requirement is not None:
-        return item(
-            "verify",
-            "causality_task_verify",
+        return verification_item(
             "a frozen verification requirement is still pending",
-            requirement_id=pending_requirement,
+            pending_requirement,
         )
     if completion_progress.get("needs_evidence"):
         return item(
@@ -1174,11 +1175,9 @@ def _recommended_next(
             "completion still requires declared current evidence",
         )
     if completion_progress.get("needs_review_reset"):
-        return item(
-            "verify",
-            "causality_task_verify",
+        return verification_item(
             "start a fresh verification review window after conflicting verifier evidence",
-            requirement_id=completion_progress.get("requirement_id"),
+            completion_progress.get("requirement_id"),
         )
     if completion_progress.get("needs_verdict"):
         return item(
@@ -4405,12 +4404,13 @@ class TaskLifecycle:
         refs = tuple(evidence_refs)
         request = {
             "verifier": verifier.strip(),
-            "provider_id": provider_id.strip() if provider_id is not None else None,
             "status": status,
             "rationale": rationale.strip(),
             "severity": severity,
             "evidence_refs": list(refs),
         }
+        if provider_id is not None:
+            request["provider_id"] = provider_id.strip()
         digest = canonical_sha256(request)
         with self.runtime.execution_lock():
             session = self.get(task_id)
@@ -6095,6 +6095,11 @@ class TaskLifecycle:
                 phases=projected_workflow_phases,
                 current=projected_current_phase,
                 unmet_verification=tuple(unmet_verification),
+                manual_verification=frozenset(
+                    requirement.id
+                    for requirement in projected_contract.verification_requirements
+                    if requirement.manual
+                ),
                 phase_progress=phase_progress,
                 completion_progress=completion_progress,
             ),

@@ -713,6 +713,10 @@ class TaskLifecycleTests(unittest.TestCase):
                 and event.payload.get("verifier") == "security"
             ]
             self.assertEqual(len(verifier_events), 1)
+            self.assertNotIn(
+                "provider_id",
+                task.idempotency[("verdict", "partial-verdict")].request,
+            )
             task = fresh.verdict(
                 task.task_id,
                 verifier="conformance",

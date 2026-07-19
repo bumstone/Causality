@@ -259,6 +259,41 @@ class ControllerLeaseStore:
             return None
         return lease.to_dict()
 
+    def is_managed(self, task_id: str) -> bool:
+        """Return whether the task has ever entered controller management."""
+
+        _, _, managed = self._replay(task_id)
+        return managed
+
+    def recorded_mutation(
+        self,
+        task_id: str,
+        *,
+        controller_id: str,
+        action: str,
+        idempotency_key: str,
+        ttl_seconds: int | None = None,
+        lease_id: str | None = None,
+    ) -> tuple[dict[str, str], str] | None:
+        """Return a matching durable lease result for audit reconciliation."""
+
+        request = {
+            "task_id": task_id,
+            "controller_id": controller_id,
+            "action": action,
+            "ttl_seconds": None if action == "release" else ttl_seconds,
+            "lease_id": lease_id,
+        }
+        _, idempotency, _ = self._replay(task_id)
+        replay = idempotency.get(idempotency_key)
+        if replay is None:
+            return None
+        if replay[0] != _digest(request):
+            raise TaskLifecycleError(
+                "idempotency_conflict", "lease key was used with another request"
+            )
+        return dict(replay[1]["lease"]), replay[2]
+
     def mutate(
         self,
         task_id: str,

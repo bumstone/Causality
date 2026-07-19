@@ -374,6 +374,60 @@ class ReferenceOrchestrator:
         task = result.get("task")
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
         lease = data.get("controller_lease") if isinstance(data, dict) else None
+        if (
+            checkpoint is not None
+            and checkpoint.status == "prepared"
+            and checkpoint.operation == "causality_task_lease"
+            and checkpoint.task_id == task_id
+        ):
+            if checkpoint.lease_id is None:
+                lease_arguments = {
+                    "task_id": task_id,
+                    "controller_id": self.controller_id,
+                    "action": "acquire",
+                    "ttl_seconds": self.lease_seconds,
+                    "idempotency_key": checkpoint.idempotency_key,
+                }
+            else:
+                lease_arguments = {
+                    "task_id": task_id,
+                    "controller_id": self.controller_id,
+                    "action": "release",
+                    "lease_id": checkpoint.lease_id,
+                    "idempotency_key": checkpoint.idempotency_key,
+                }
+            if (
+                semantic_request_sha256("causality_task_lease", lease_arguments)
+                != checkpoint.request_sha256
+            ):
+                return DriverDirective(
+                    "recovery_required",
+                    "the prepared lease request cannot be reconstructed exactly",
+                    task_id,
+                    "causality_task_lease",
+                )
+            replayed = self._call_mutation(
+                "causality_task_lease",
+                lease_arguments,
+                task_id=task_id,
+                lease_id=checkpoint.lease_id,
+                last_event_hash=checkpoint.last_event_hash,
+            )
+            if isinstance(replayed, DriverDirective):
+                return replayed
+            checkpoint = self.checkpoints.load()
+            result = self.transport.call(
+                "causality_task_resume", {"task_id": task_id}
+            )
+            if result.get("ok") is not True or not isinstance(result.get("task"), dict):
+                return DriverDirective(
+                    "recovery_required",
+                    "task resume failed after replaying the prepared lease",
+                    task_id,
+                )
+            task = result["task"]
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            lease = data.get("controller_lease") if isinstance(data, dict) else None
         task_advanced = bool(
             checkpoint is not None
             and isinstance(task, dict)
@@ -526,6 +580,7 @@ class ReferenceOrchestrator:
                         "approval_stage",
                         "phase_id",
                         "operation_id",
+                        "requirement_id",
                         "evidence_refs",
                     )
                     if key in recommendation
@@ -665,6 +720,16 @@ class ReferenceOrchestrator:
         if isinstance(lease, DriverDirective):
             return lease
         payload = dict(arguments)
+        if tool == "causality_task_verify":
+            requirement_id = recommendation.get("requirement_id")
+            if payload.get("requirement_id", requirement_id) != requirement_id or payload.get(
+                "mode", "manual"
+            ) != "manual":
+                return DriverDirective(
+                    "blocked", "human decision does not match the recommended verification", task_id
+                )
+            payload["requirement_id"] = requirement_id
+            payload["mode"] = "manual"
         payload.update({
             "task_id": task_id, "controller_id": self.controller_id,
             "lease_id": lease.get("lease_id"), "proof": proof,
@@ -710,7 +775,11 @@ class ReferenceOrchestrator:
             "evidence_refs": list(evidence_refs),
             "idempotency_key": self._key(
                 task_id, "verdict",
-                f"{provider_id}:{verifier_id}:{task['latest_event_hash']}",
+                canonical_sha256({
+                    "provider_id": provider_id,
+                    "verifier": verifier_id,
+                    "evidence_refs": sorted(evidence_refs),
+                }),
             ),
         }
         result = self._call_mutation(

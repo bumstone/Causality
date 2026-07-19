@@ -1173,6 +1173,41 @@ class CausalityMCPServer:
             }
         )
 
+    def _ensure_lease_environment(
+        self,
+        arguments: Mapping[str, Any],
+        action: str,
+        lease: Mapping[str, Any],
+        event_hash: str,
+    ) -> None:
+        environment_recorded = any(
+            event.event_type == AuditEventType.ORCHESTRATION_ENVIRONMENT.value
+            and event.payload.get("lease_event_hash") == event_hash
+            for event in self.ledger.events_for_contract(
+                f"controller:{arguments['task_id']}", all_segments=True
+            )
+        )
+        if environment_recorded:
+            return
+        environment = bounded_environment_snapshot(
+            self.project,
+            tuple(tool["name"] for tool in self._tools()),
+            self._policy_digest,
+        )
+        self.ledger.append(
+            AuditEventType.ORCHESTRATION_ENVIRONMENT,
+            {
+                "schema_version": 1,
+                "task_id": arguments["task_id"],
+                "controller_id": arguments["controller_id"],
+                "lease_id": lease["lease_id"],
+                "lease_action": action,
+                "lease_event_hash": event_hash,
+                "environment": environment,
+            },
+            contract_id=f"controller:{arguments['task_id']}",
+        )
+
     def _lease(self, arguments: dict[str, Any]) -> dict[str, Any]:
         allowed = {
             "task_id",
@@ -1203,33 +1238,32 @@ class CausalityMCPServer:
             )
         with self.lifecycle.runtime.execution_lock():
             self.lifecycle.get(arguments["task_id"])
-            lease, replayed, event_hash = self.controllers.mutate(
-                arguments["task_id"],
-                controller_id=arguments["controller_id"],
-                action=action,
-                ttl_seconds=arguments.get("ttl_seconds"),
-                lease_id=arguments.get("lease_id"),
-                idempotency_key=arguments["idempotency_key"],
-            )
-            if not replayed:
-                environment = bounded_environment_snapshot(
-                    self.project,
-                    tuple(tool["name"] for tool in self._tools()),
-                    self._policy_digest,
+            try:
+                lease, replayed, event_hash = self.controllers.mutate(
+                    arguments["task_id"],
+                    controller_id=arguments["controller_id"],
+                    action=action,
+                    ttl_seconds=arguments.get("ttl_seconds"),
+                    lease_id=arguments.get("lease_id"),
+                    idempotency_key=arguments["idempotency_key"],
                 )
-                self.ledger.append(
-                    AuditEventType.ORCHESTRATION_ENVIRONMENT,
-                    {
-                        "schema_version": 1,
-                        "task_id": arguments["task_id"],
-                        "controller_id": arguments["controller_id"],
-                        "lease_id": lease["lease_id"],
-                        "lease_action": action,
-                        "lease_event_hash": event_hash,
-                        "environment": environment,
-                    },
-                    contract_id=f"controller:{arguments['task_id']}",
-                )
+            except TaskLifecycleError as exc:
+                if exc.code == "controller_lease_stale":
+                    recorded = self.controllers.recorded_mutation(
+                        arguments["task_id"],
+                        controller_id=arguments["controller_id"],
+                        action=action,
+                        ttl_seconds=arguments.get("ttl_seconds"),
+                        lease_id=arguments.get("lease_id"),
+                        idempotency_key=arguments["idempotency_key"],
+                    )
+                    if recorded is not None:
+                        recorded_lease, recorded_hash = recorded
+                        self._ensure_lease_environment(
+                            arguments, action, recorded_lease, recorded_hash
+                        )
+                raise
+            self._ensure_lease_environment(arguments, action, lease, event_hash)
         return _text_result(
             {
                 "ok": True,
@@ -1274,6 +1308,7 @@ class CausalityMCPServer:
             if not isinstance(arguments.get("task_id"), str) or not isinstance(key, str):
                 raise TaskLifecycleError("validation_error", "task_id and idempotency_key are required")
             task_id = arguments["task_id"]
+            controller_managed = self.controllers.is_managed(task_id)
             self.controllers.assert_mutation(
                 task_id,
                 controller_id=arguments.get("controller_id"),
@@ -1472,6 +1507,11 @@ class CausalityMCPServer:
                     "evidence_refs",
                 }
                 self._strict(arguments, allowed=allowed, required=common | {"verifier", "status", "rationale", "evidence_refs"})
+                if controller_managed and "provider_id" not in arguments:
+                    raise TaskLifecycleError(
+                        "validation_error",
+                        "controller-managed verdict requires provider_id",
+                    )
                 refs = self._string_array(arguments["evidence_refs"], "evidence_refs")
                 session = self.lifecycle.verdict(
                     task_id,
