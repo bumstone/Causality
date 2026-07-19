@@ -53,6 +53,14 @@ from .task_lifecycle import (
     TaskSession,
     TaskState,
 )
+from .automatic_orchestration import (
+    CheckpointStore,
+    DriverDirective,
+    InProcessMCPTransport,
+    OrchestrationCheckpoint,
+    OrchestrationError,
+    ReferenceOrchestrator,
+)
 
 __all__ = [
     "ActionType",
@@ -65,11 +73,13 @@ __all__ = [
     "BoundContract",
     "Causality",
     "CausalityEngine",
+    "CheckpointStore",
     "ContractHarness",
     "ContractHarnessError",
     "DEFAULT_DOC_MAX_CHARS",
     "DEFAULT_MAX_LINES",
     "Dispatch",
+    "DriverDirective",
     "DocSize",
     "FileChange",
     "EvidenceKind",
@@ -109,6 +119,10 @@ __all__ = [
     "Verifier",
     "VerifierDecision",
     "IdempotencyRecord",
+    "InProcessMCPTransport",
+    "OrchestrationCheckpoint",
+    "OrchestrationError",
+    "ReferenceOrchestrator",
     "check_docs",
     "format_plan",
     "over_budget",
