@@ -34,7 +34,7 @@ def _event_payload(
 
 
 class Causality:
-    """Small orchestration facade for embedding in an Causality runtime."""
+    """Small orchestration facade for embedding in a Causality runtime."""
 
     def __init__(
         self,
